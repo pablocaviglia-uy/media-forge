@@ -1,0 +1,94 @@
+name: Test and deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Tests (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest version the project claims to support, current LTS, and
+        # current. `node --test` argument handling has changed across these.
+        node: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # There are no dependencies to install; that is the point.
+      - name: Check for stray dependencies
+        run: |
+          if [ -f package-lock.json ] || [ -d node_modules ]; then
+            echo "This project ships with no dependencies." >&2
+            exit 1
+          fi
+
+      # The vendored WebAssembly core is the one thing here nobody can read: 32 MB
+      # of compiled FFmpeg. This re-hashes every byte of it against the checksums
+      # in assets/ffmpeg/manifest.json, so a truncated download, a core vendored
+      # from the wrong package, or a file mangled by a stray text-mode checkout
+      # fails here rather than as `magic word 00 61 73 6d` in someone's browser.
+      - name: Verify the vendored FFmpeg core
+        run: node tools/fetch-core.mjs --check
+
+      - name: Run tests
+        run: npm test
+
+  icons:
+    name: Icons are reproducible
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # Compares decoded pixels, not file bytes, so a different zlib build
+      # cannot fail these spuriously.
+      - run: node tools/make-icons.mjs --check
+      - run: node tools/make-og-image.mjs --check
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: [test, icons]
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/configure-pages@v5
+
+      # The site is the repository. No build, nothing to transform.
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
+        with:
+          # The action gives up after 10 minutes by default and marks the run
+          # red, even though GitHub usually finishes the deployment afterwards.
+          # Pages deployment lag is common enough that the default turns a
+          # working deploy into a failed build; wait longer instead. The 32 MB
+          # core makes this artifact large, which does not help.
+          timeout: 1200000

@@ -1,0 +1,30 @@
+{
+  "comment": "Written by tools/fetch-core.mjs. The app reads `variants` to decide which core it may load; the checksums exist so anyone can prove the vendored bytes are the published ones.",
+  "package": "@ffmpeg/core",
+  "version": "0.12.10",
+  "license": "GPL-2.0-or-later",
+  "npmIntegrity": "sha512-dzNplnn2Nxle2c2i2rrDhqcB19q9cglCkWnoMTDN9Q9l3PvdjZWd1HfSPjCNWc/p8Q3CT+Es9fWOR0UhAeYQZA==",
+  "ffmpeg": {
+    "version": "5.1.4",
+    "emscripten": "3.1.40",
+    "configure": "--target-os=none --arch=x86_32 --enable-cross-compile --disable-asm --disable-stripping --disable-programs --disable-doc --disable-debug --disable-runtime-cpudetect --disable-autodetect --nm=emnm --ar=emar --ranlib=emranlib --cc=emcc --cxx=em++ --objcc=emcc --dep-cc=emcc --extra-cflags='-I/opt/include -O3 -msimd128' --extra-cxxflags='-I/opt/include -O3 -msimd128' --disable-pthreads --disable-w32threads --disable-os2threads --enable-gpl --enable-libx264 --enable-libx265 --enable-libvpx --enable-libmp3lame --enable-libtheora --enable-libvorbis --enable-libopus --enable-zlib --enable-libwebp --enable-libfreetype --enable-libfribidi --enable-libass --enable-libzimg"
+  },
+  "variants": {
+    "st": {
+      "threads": false,
+      "requiresCrossOriginIsolation": false,
+      "files": {
+        "core": {
+          "path": "./ffmpeg-core.js",
+          "bytes": 111804,
+          "sha256": "67a48f11645f85439f3fde4f2119042c16b374b910206b7a7a24f342e28dcae3"
+        },
+        "wasm": {
+          "path": "./ffmpeg-core.wasm",
+          "bytes": 32232419,
+          "sha256": "9f57947a5bd530d8f00c5b3f2cb2a3492faa7e5d823315342d6a8656d0a6b7b7"
+        }
+      }
+    }
+  }
+}

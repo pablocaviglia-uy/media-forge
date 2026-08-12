@@ -1,0 +1,542 @@
+<!doctype html>
+<html lang="en" data-theme="light" data-page-lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- English is the default so link previews, search results and the wider
+     audience get English; the page switches itself for Spanish browsers. -->
+<title>media-forge — convert video and audio without uploading it anywhere</title>
+<meta name="description" content="A video and audio converter that runs entirely in your browser, on FFmpeg compiled to WebAssembly. Nothing is uploaded, there is no server to upload it to, and it works offline.">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0d1117" media="(prefers-color-scheme: dark)">
+
+<link rel="icon" href="./assets/icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="./assets/icons/icon-180.png">
+<link rel="canonical" href="https://pablocaviglia-uy.github.io/media-forge/about.html">
+
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="media-forge">
+<meta property="og:url" content="https://pablocaviglia-uy.github.io/media-forge/about.html">
+<meta property="og:title" content="media-forge — convert video and audio without uploading it anywhere">
+<meta property="og:description" content="Converting a video usually means uploading it to a stranger's server. This is FFmpeg compiled to WebAssembly, running in the tab: the file never leaves your device, and there is no server to send it to.">
+<meta property="og:image" content="https://pablocaviglia-uy.github.io/media-forge/assets/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="media-forge">
+<meta name="twitter:card" content="summary_large_image">
+
+<link rel="stylesheet" href="./assets/css/base.css">
+<link rel="stylesheet" href="./assets/css/about.css">
+
+<script>
+  // Apply the stored theme before first paint so there is no flash. Same key
+  // and same shape as the app, so a choice made in there holds out here.
+  try {
+    const stored = JSON.parse(localStorage.getItem('media-forge:prefs') || '{}');
+    const theme = stored.theme === 'light' || stored.theme === 'dark'
+      ? stored.theme
+      : (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    const root = document.documentElement;
+    root.dataset.theme = theme;
+    if (stored.accent) root.dataset.accent = stored.accent;
+  } catch (_) { /* first visit */ }
+</script>
+
+<script>
+  // Pick the language before first paint, so nothing flashes in the wrong one.
+  // A previous choice wins; otherwise a Spanish-speaking browser gets Spanish
+  // and everyone else gets the English the markup already carries.
+  (function () {
+    var lang = null;
+    try { lang = localStorage.getItem('media-forge:page-lang'); } catch (_) { /* private mode */ }
+    if (lang !== 'en' && lang !== 'es') {
+      var preferred = (navigator.languages && navigator.languages[0]) || navigator.language || 'en';
+      lang = /^es\b/i.test(preferred) ? 'es' : 'en';
+    }
+    document.documentElement.dataset.pageLang = lang;
+    document.documentElement.lang = lang;
+  })();
+</script>
+</head>
+
+<body>
+<header class="site-header">
+  <a class="brand" href="./">
+    <img src="./assets/icons/icon.svg" width="26" height="26" alt="">
+    <span>media-forge</span>
+  </a>
+  <div class="header-actions">
+    <div class="lang-switch" role="group" aria-label="Language / Idioma">
+      <button type="button" data-set-lang="es" aria-pressed="true">ES</button>
+      <button type="button" data-set-lang="en" aria-pressed="false">EN</button>
+    </div>
+    <a class="ghost-link" href="https://github.com/pablocaviglia-uy/media-forge">GitHub</a>
+  </div>
+</header>
+
+<main>
+
+  <!-- ── Hero ─────────────────────────────────────────────────────── -->
+  <section class="hero">
+    <p class="eyebrow">
+      <span lang="es">Código abierto · GPL-2.0-or-later · Sin dependencias</span>
+      <span lang="en">Open source · GPL-2.0-or-later · Zero dependencies</span>
+    </p>
+
+    <h1>
+      <span lang="es">Convertí video y audio sin subirlo a ningún lado.</span>
+      <span lang="en">Convert video and audio without uploading it anywhere.</span>
+    </h1>
+
+    <p class="lede">
+      <span lang="es">
+        Convertir un video suele significar subirlo al sitio de un desconocido, esperar, y
+        bajar el resultado. Acá todo pasa en la pestaña: el archivo no se sube, y no hay
+        servidor al que subirlo. Es FFmpeg, el de siempre, compilado a WebAssembly y
+        corriendo en tu propio procesador.
+      </span>
+      <span lang="en">
+        Converting a video usually means uploading it to a stranger's website, waiting, and
+        downloading the result. Here everything happens in the tab: the file is never
+        uploaded, and there is no server to upload it to. It is FFmpeg — the same FFmpeg —
+        compiled to WebAssembly and running on your own processor.
+      </span>
+    </p>
+
+    <div class="cta-row">
+      <a class="cta-primary" href="./">
+        <span lang="es">Abrir la herramienta</span>
+        <span lang="en">Open the app</span>
+      </a>
+      <a class="cta-secondary" href="https://github.com/pablocaviglia-uy/media-forge">
+        <span lang="es">Ver el código</span>
+        <span lang="en">Read the code</span>
+      </a>
+    </div>
+
+    <p class="cta-note">
+      <span lang="es">No hay registro, ni instalación, ni nada que aceptar. Y no hay nada que subir.</span>
+      <span lang="en">No sign-up, no install, nothing to accept. And nothing to upload.</span>
+    </p>
+  </section>
+
+  <!-- ── Why ──────────────────────────────────────────────────────── -->
+  <section class="band">
+    <h2>
+      <span lang="es">Por qué</span>
+      <span lang="en">Why</span>
+    </h2>
+    <div class="prose">
+      <p>
+        <span lang="es">
+          Para casi todo el mundo, convertir un video sigue siendo abrir el primer conversor
+          online que aparece, arrastrar el archivo y esperar. Ese archivo muchas veces es de
+          un cliente, o una reunión grabada, o los hijos de alguien. Nadie decidió mandarlo a
+          un servidor ajeno; simplemente era el camino de menor fricción.
+        </span>
+        <span lang="en">
+          For most people, converting a video still means opening the first online converter
+          that comes up, dragging the file in and waiting. That file is often a client's, or a
+          recorded meeting, or somebody's children. Nobody decided to send it to a stranger's
+          server; it was just the path of least friction.
+        </span>
+      </p>
+      <p>
+        <span lang="es">
+          FFmpeg hace exactamente esto en tu propia máquina desde hace veinte años. Lo que
+          falta no es la herramienta: es instalarla, mantenerla, y acordarse de los
+          <em>flags</em> cada vez.
+        </span>
+        <span lang="en">
+          FFmpeg has done exactly this on your own machine for twenty years. What is missing
+          is not the tool: it is installing it, keeping it, and remembering the flags every
+          time.
+        </span>
+      </p>
+      <p>
+        <span lang="es">
+          Esto es el mismo camino de menor fricción, sin la parte de subir el archivo.
+        </span>
+        <span lang="en">
+          This is that same path, without the upload.
+        </span>
+      </p>
+    </div>
+  </section>
+
+  <!-- ── Features ─────────────────────────────────────────────────── -->
+  <section class="band">
+    <h2>
+      <span lang="es">Qué hace</span>
+      <span lang="en">What it does</span>
+    </h2>
+
+    <div class="cards">
+      <article class="card">
+        <h3><span lang="es">Convierte</span><span lang="en">Converts</span></h3>
+        <p>
+          <span lang="es">
+            Video a MP4, MKV, MOV o WebM. Audio a MP3, M4A, Opus, OGG, FLAC o WAV. Resolución,
+            cuadros por segundo, calidad, recorte y rotación, con la opción de sacarle el
+            audio a un video y quedarte solo con el sonido.
+          </span>
+          <span lang="en">
+            Video to MP4, MKV, MOV or WebM. Audio to MP3, M4A, Opus, OGG, FLAC or WAV.
+            Resolution, frame rate, quality, trimming and rotation, plus pulling the sound out
+            of a video and keeping only that.
+          </span>
+        </p>
+      </article>
+
+      <article class="card">
+        <h3><span lang="es">Hace las dos pasadas</span><span lang="en">Does the two passes</span></h3>
+        <p>
+          <span lang="es">
+            Un GIF decente necesita construir una paleta a partir del clip y recién después
+            cuantizar contra ella. Apuntar a un tamaño de archivo necesita medir antes de
+            comprometerse a un bitrate. Las dos cosas son dos corridas de FFmpeg, y las hace.
+          </span>
+          <span lang="en">
+            A decent GIF needs a palette built from the clip before anything is quantised
+            against it. Hitting a target file size needs a measuring pass before committing to
+            a bitrate. Both are two runs of FFmpeg, and both are done properly.
+          </span>
+        </p>
+      </article>
+
+      <article class="card">
+        <h3><span lang="es">Lee el archivo primero</span><span lang="en">Reads the file first</span></h3>
+        <p>
+          <span lang="es">
+            La duración, las pistas y los códecs salen de <code>ffprobe</code>, que vive en el
+            mismo core. Los controles saben con qué están tratando antes de que elijas nada.
+          </span>
+          <span lang="en">
+            Duration, streams and codecs come from <code>ffprobe</code>, which lives in the
+            same core. The controls know what they are dealing with before you choose
+            anything.
+          </span>
+        </p>
+      </article>
+
+      <article class="card">
+        <h3><span lang="es">Te muestra el comando</span><span lang="en">Shows you the command</span></h3>
+        <p>
+          <span lang="es">
+            El inspector imprime los argumentos exactos que va a ejecutar, no una
+            reconstrucción verosímil. Los podés copiar y correrlos en tu terminal, o escribir
+            los tuyos.
+          </span>
+          <span lang="en">
+            The inspector prints the exact arguments it is about to run, not a
+            plausible-looking reconstruction. Copy them into your own terminal, or write your
+            own instead.
+          </span>
+        </p>
+      </article>
+
+      <article class="card">
+        <h3><span lang="es">Se queda en tu equipo</span><span lang="en">Stays on your device</span></h3>
+        <p>
+          <span lang="es">
+            Sin cuenta, sin telemetría, sin subida. La pestaña lee el archivo, la pestaña lo
+            convierte y la pestaña te lo devuelve. Cerrás la pestaña y no queda nada.
+          </span>
+          <span lang="en">
+            No account, no telemetry, no upload. The tab reads the file, the tab converts it
+            and the tab hands it back. Close the tab and nothing is left.
+          </span>
+        </p>
+      </article>
+
+      <article class="card">
+        <h3><span lang="es">Anda sin conexión</span><span lang="en">Works offline</span></h3>
+        <p>
+          <span lang="es">
+            Se instala como PWA. Los 32 MB del core no se descargan al instalar — a propósito:
+            se guardan la primera vez que convertís algo. De ahí en adelante funciona con el
+            avión encendido.
+          </span>
+          <span lang="en">
+            Installs as a PWA. The 32 MB core is deliberately not fetched at install time; it
+            is cached the first time you convert something. After that it works in aeroplane
+            mode.
+          </span>
+        </p>
+      </article>
+    </div>
+  </section>
+
+  <!-- ── How ──────────────────────────────────────────────────────── -->
+  <section class="band">
+    <h2>
+      <span lang="es">Cómo está hecho</span>
+      <span lang="en">How it is built</span>
+    </h2>
+
+    <div class="stats">
+      <div class="stat"><strong>0</strong><span lang="es">dependencias</span><span lang="en">dependencies</span></div>
+      <div class="stat"><strong>0</strong><span lang="es">pasos de build</span><span lang="en">build steps</span></div>
+      <div class="stat"><strong>0</strong><span lang="es">bytes subidos</span><span lang="en">bytes uploaded</span></div>
+      <div class="stat"><strong>32 MB</strong><span lang="es">de motor, en el repo</span><span lang="en">of engine, in the repo</span></div>
+    </div>
+
+    <div class="prose">
+      <p>
+        <span lang="es">
+          El motor es <strong>FFmpeg 5.1.4 compilado a WebAssembly</strong>
+          (<code>@ffmpeg/core</code> 0.12.10). No viene de un CDN: está vendorizado en el
+          repositorio, en <code>assets/ffmpeg/</code>, 32 MB, con el SHA-256 de cada archivo
+          anotado en <code>manifest.json</code> para que cualquiera pueda comprobar que los
+          bytes son los publicados. Corre dentro de un Worker, porque <code>exec</code>
+          bloquea su hilo del primer argumento al último cuadro: en el hilo principal la
+          página se congelaría, sin barra de progreso, hasta que el trabajo terminara.
+        </span>
+        <span lang="en">
+          The engine is <strong>FFmpeg 5.1.4 compiled to WebAssembly</strong>
+          (<code>@ffmpeg/core</code> 0.12.10). It does not come from a CDN: it is vendored in
+          the repository, at <code>assets/ffmpeg/</code>, 32 MB of it, with the SHA-256 of
+          every file recorded in <code>manifest.json</code> so anyone can verify the bytes are
+          the published ones. It runs inside a Worker, because <code>exec</code> blocks its
+          thread from the first argument to the last frame: on the main thread the page would
+          freeze, with no progress bar, for as long as the job took.
+        </span>
+      </p>
+      <p>
+        <span lang="es">
+          Corre <strong>en un solo hilo</strong>, y no es un descuido. La build multihilo
+          necesita <code>SharedArrayBuffer</code>, que necesita que la página esté aislada
+          entre orígenes, que necesita dos cabeceras de respuesta HTTP que GitHub Pages no
+          puede mandar. La build multihilo es, además, apenas unas dos veces más rápida, y
+          dentro de un WebView de Android directamente no existe. Si lo hospedás detrás de un
+          servidor que sí puede mandar esas cabeceras, la app se da cuenta sola y levanta el
+          core rápido.
+        </span>
+        <span lang="en">
+          It runs <strong>single-threaded</strong>, and that is not an oversight. The
+          multi-threaded build needs <code>SharedArrayBuffer</code>, which needs the page to
+          be cross-origin isolated, which needs two HTTP response headers GitHub Pages cannot
+          send. The multi-threaded build is also only about twice as fast, and inside an
+          Android WebView it does not exist at all. If you self-host this behind a server that
+          can send those headers, the app notices and picks the faster core up on its own.
+        </span>
+      </p>
+      <p>
+        <span lang="es">
+          La licencia sale del core. Está compilado con <code>--enable-gpl</code>,
+          <code>--enable-libx264</code> y <code>--enable-libx265</code>, y se publica como
+          GPL-2.0-or-later; lo que lo enlaza hereda eso. Así que el código de esta app también
+          es <strong>GPL-2.0-or-later</strong>. No es una postura: es lo que dice la licencia.
+        </span>
+        <span lang="en">
+          The licence follows from the core. It is built with <code>--enable-gpl</code>,
+          <code>--enable-libx264</code> and <code>--enable-libx265</code>, and published as
+          GPL-2.0-or-later; anything that links it inherits that. So this app's own source is
+          <strong>GPL-2.0-or-later</strong> too. That is not a position, it is what the
+          licence says.
+        </span>
+      </p>
+
+      <div class="links">
+        <a href="./LICENSE"><span lang="es">Licencia</span><span lang="en">Licence</span></a>
+        <a href="./THIRD-PARTY.md"><span lang="es">Avisos de terceros</span><span lang="en">Third-party notices</span></a>
+        <a href="./assets/ffmpeg/manifest.json"><span lang="es">Checksums del core</span><span lang="en">Core checksums</span></a>
+      </div>
+
+      <p class="aside">
+        <span lang="es">
+          Se despliega en GitHub Pages copiando el repositorio tal cual. El sitio
+          <em>es</em> el repositorio, los 32 MB de motor incluidos.
+        </span>
+        <span lang="en">
+          It deploys to GitHub Pages by copying the repository verbatim. The site
+          <em>is</em> the repository, the 32 MB of engine included.
+        </span>
+      </p>
+    </div>
+  </section>
+
+  <!-- ── Limits ───────────────────────────────────────────────────── -->
+  <section class="band">
+    <h2>
+      <span lang="es">Lo que no puede hacer</span>
+      <span lang="en">What it cannot do</span>
+    </h2>
+
+    <div class="prose">
+      <p>
+        <span lang="es">
+          <strong>Es lento.</strong> Unas 25 veces más lento que el mismo trabajo con un
+          ffmpeg nativo, según el benchmark publicado de este proyecto. Es una máquina virtual
+          dentro de una pestaña, en un solo núcleo. Para clips cortos no importa; para una
+          película, buscá otra cosa.
+        </span>
+        <span lang="en">
+          <strong>It is slow.</strong> Roughly 25 times slower than the same job with a native
+          ffmpeg, by this project's own published benchmark. It is a virtual machine inside a
+          browser tab, running on one core. For short clips that does not matter; for a
+          feature film, use something else.
+        </span>
+      </p>
+      <p>
+        <span lang="es">
+          <strong>Hay un techo de tamaño, y es duro.</strong> El heap de WebAssembly es de 32
+          bits y tope 2 GB, y la entrada, la salida y los buffers de trabajo del códec viven
+          ahí adentro al mismo tiempo. La app rechaza archivos de más de 500 MB y avisa a
+          partir de 150 MB. Decirlo antes de empezar es mejor que morirse a mitad de camino
+          con un error de asignación de memoria.
+        </span>
+        <span lang="en">
+          <strong>There is a hard ceiling on size.</strong> The WebAssembly heap is 32-bit and
+          capped at 2 GB, and the input, the output and the codec's working buffers all live
+          in it at once. The app refuses files over 500 MB and warns above 150 MB. Saying so
+          before starting is better than dying halfway through with a memory allocation error.
+        </span>
+      </p>
+      <p>
+        <span lang="es">
+          <strong>El WebM que produce es VP8, no VP9.</strong> <code>libvpx-vp9</code> está
+          compilado en el core y aparece en <code>-encoders</code>, pero cada intento de
+          encodear con él mata la instancia de WebAssembly antes del primer cuadro. Ofrecer un
+          formato que se cae siempre es peor que no ofrecerlo.
+        </span>
+        <span lang="en">
+          <strong>The WebM it produces is VP8, not VP9.</strong> <code>libvpx-vp9</code> is
+          compiled into the core and shows up in <code>-encoders</code>, but every attempt to
+          encode with it kills the WebAssembly instance before the first frame. Offering a
+          format that reliably crashes is worse than not offering it.
+        </span>
+      </p>
+    </div>
+  </section>
+
+  <!-- ── About ────────────────────────────────────────────────────── -->
+  <section class="band band-about">
+    <h2>
+      <span lang="es">Quién lo hizo</span>
+      <span lang="en">Who made it</span>
+    </h2>
+
+    <div class="about-grid">
+      <div class="prose">
+        <p>
+          <span lang="es">
+            Soy <strong>Pablo Caviglia</strong>, Technical Lead en Senaptec, desde Uruguay.
+            Llevo más de veinte años escribiendo software: hoy sobre todo Android y Kotlin
+            Multiplatform, arquitectura offline-first y full-stack — Kotlin y Compose del lado
+            del cliente, Django y Python en el backend, Vue.js en la web — con bastante trabajo
+            pegado al hardware: C/C++ nativo, dispositivos a medida, sensores.
+          </span>
+          <span lang="en">
+            I'm <strong>Pablo Caviglia</strong>, Technical Lead at Senaptec, based in Uruguay.
+            I have been writing software for over twenty years: these days mostly Android and
+            Kotlin Multiplatform, offline-first architecture and full-stack work — Kotlin and
+            Compose on the client, Django and Python on the backend, Vue.js on the web — with a
+            good deal of hardware-adjacent work alongside it: native C/C++, custom devices,
+            sensors.
+          </span>
+        </p>
+        <p>
+          <span lang="es">
+            Me atraen los problemas de los bordes: redes que no funcionan, dispositivos raros,
+            y la disciplina de mantener simple un código que crece. En Senaptec construí un
+            framework de sincronización offline-first para que la plataforma siga andando en
+            hardware de kiosco y con redes poco confiables.
+          </span>
+          <span lang="en">
+            I'm drawn to problems at the edges: unreliable networks, custom devices, and the
+            discipline of keeping a large codebase simple. At Senaptec I built an offline-first
+            sync framework so the platform keeps working on kiosk hardware and flaky networks.
+          </span>
+        </p>
+        <p>
+          <span lang="es">
+            Que este conversor corra en tu procesador y no en el de otro no es una postura de
+            marketing: es el mismo argumento que vengo haciendo en el trabajo y en lo que hago
+            aparte.
+          </span>
+          <span lang="en">
+            That this converter runs on your processor rather than somebody else's is not a
+            marketing position: it is the same argument I keep making at work and in what I
+            build on the side.
+          </span>
+        </p>
+
+        <div class="links">
+          <a href="https://www.linkedin.com/in/pablo-caviglia/">LinkedIn</a>
+          <a href="https://github.com/pablocaviglia-uy">GitHub</a>
+        </div>
+      </div>
+
+      <aside class="sibling">
+        <p class="sibling-label">
+          <span lang="es">Del mismo argumento</span>
+          <span lang="en">Same argument</span>
+        </p>
+        <a class="sibling-card" href="https://pablocaviglia-uy.github.io/md-viewer/">
+          <strong>md-viewer</strong>
+          <span lang="es">
+            Lee Markdown — con sus tablas, su código resaltado y sus diagramas — dentro del
+            navegador, sin subirlo a ningún visor online y sin conexión.
+          </span>
+          <span lang="en">
+            Reads Markdown — tables, highlighted code and diagrams included — inside the
+            browser, without pasting it into an online viewer and without a connection.
+          </span>
+        </a>
+      </aside>
+    </div>
+  </section>
+
+  <!-- ── Closing ──────────────────────────────────────────────────── -->
+  <section class="closing">
+    <h2>
+      <span lang="es">Probalo con ese video que ibas a subir a un conversor online.</span>
+      <span lang="en">Try it with the video you were about to upload to an online converter.</span>
+    </h2>
+    <a class="cta-primary" href="./">
+      <span lang="es">Abrir la herramienta</span>
+      <span lang="en">Open the app</span>
+    </a>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <p>
+    <span lang="es">Software libre bajo licencia GPL-2.0-or-later.</span>
+    <span lang="en">Free software under the GPL-2.0-or-later licence.</span>
+    <a href="https://github.com/pablocaviglia-uy/media-forge">github.com/pablocaviglia-uy/media-forge</a>
+  </p>
+</footer>
+
+<script>
+  // The rest of the page needs no script. This one only handles the switch.
+  const root = document.documentElement;
+
+  // The document title lives in <head>, so it cannot be swapped by CSS.
+  const TITLES = {
+    en: 'media-forge — convert video and audio without uploading it anywhere',
+    es: 'media-forge — convertí video y audio sin subirlo a ningún lado',
+  };
+
+  function apply(lang) {
+    root.dataset.pageLang = lang;
+    root.lang = lang;
+    document.title = TITLES[lang];
+    for (const button of document.querySelectorAll('[data-set-lang]')) {
+      button.setAttribute('aria-pressed', String(button.dataset.setLang === lang));
+    }
+  }
+
+  for (const button of document.querySelectorAll('[data-set-lang]')) {
+    button.addEventListener('click', () => {
+      apply(button.dataset.setLang);
+      try { localStorage.setItem('media-forge:page-lang', button.dataset.setLang); } catch (_) { /* private mode */ }
+    });
+  }
+
+  apply(root.dataset.pageLang);
+</script>
+</body>
+</html>

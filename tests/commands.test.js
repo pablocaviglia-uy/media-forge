@@ -1,0 +1,633 @@
+/**
+ * The command builder, on its own terms.
+ *
+ * `core.test.js` puts every plan through the FFmpeg that actually ships and
+ * proves the arguments are accepted. That is a different question from whether
+ * they are the arguments that were meant: `-ss` after `-i` decodes and discards
+ * everything up to the seek point and still exits zero, a plain `scale=1280:720`
+ * happily blows a 320-pixel clip up to fill the box and still exits zero, and a
+ * GIF quantised against a palette built from different frames than it quantises
+ * is a perfectly valid GIF that looks wrong.
+ *
+ * So this file asks the other half of the question, and asks it of pure
+ * functions: no WebAssembly, no filesystem, no media. Every source below is a
+ * description of a file that does not exist. That is what makes this suite fast
+ * enough to run on every save and deterministic enough to believe when it goes
+ * red — if something here fails, the builder changed, not the weather.
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+
+import { OPERATIONS, buildPlan, planToCommand, splitArguments, operationsFor } from '../src/media/commands.js';
+import { AUDIO_FORMATS, AUDIO_ENCODERS, RESOLUTIONS, crfFor } from '../src/media/formats.js';
+import { formatTimestamp } from '../src/ui/dom.js';
+
+/* ------------------------------------------------------------------ *
+ * Sources
+ * ------------------------------------------------------------------ */
+
+const source = (name, info) => ({ name, info });
+
+/** Two minutes of 1080p with a stereo track: the ordinary case. */
+const VIDEO = source('holiday.mp4', {
+  hasVideo: true,
+  hasAudio: true,
+  duration: 120,
+  video: { width: 1920, height: 1080, fps: 30 },
+  audio: { channels: 2, sampleRate: 48_000 },
+});
+
+/** A minute of video with no audio stream at all. */
+const SILENT = source('timelapse.mov', { hasVideo: true, hasAudio: false, duration: 60 });
+
+/** Exactly a minute, so the compression arithmetic can be checked by hand. */
+const MINUTE = source('clip.mp4', { hasVideo: true, hasAudio: true, duration: 60 });
+
+/**
+ * A file whose length nobody knows. Some containers genuinely do not say, and
+ * a probe that fails leaves the app in the same position.
+ */
+const UNKNOWN = source('stream.mkv', { hasVideo: true, hasAudio: true, duration: null });
+
+/* ------------------------------------------------------------------ *
+ * Reading a plan
+ * ------------------------------------------------------------------ */
+
+/** Prepended to every invocation by `buildPlan`, and not interesting after that. */
+const PREFIX = ['-hide_banner', '-loglevel', 'info', '-stats'];
+
+/** One step's arguments with the fixed prefix taken off, so offsets mean something. */
+const body = (plan, index = 0) => plan.steps[index].args.slice(PREFIX.length);
+
+const valueAfter = (args, flag) => args[args.indexOf(flag) + 1];
+
+/** The `-vf` chain of a single-step plan, which is what most tests here are about. */
+const chainOf = (options, operation = 'convert', from = VIDEO) => valueAfter(body(buildPlan(from, operation, options)), '-vf');
+
+/* ------------------------------------------------------------------ *
+ * The shape of a plan
+ * ------------------------------------------------------------------ */
+
+test('every operation returns a plan the worker can act on without special cases', () => {
+  for (const operation of OPERATIONS) {
+    const plan = buildPlan(VIDEO, operation.id, {});
+
+    assert.equal(plan.operation, operation.id);
+    assert.ok(Array.isArray(plan.steps) && plan.steps.length > 0, `${operation.id} planned nothing to run`);
+    for (const step of plan.steps) {
+      assert.equal(typeof step.label, 'string', `${operation.id} has a step with no label for the progress line`);
+      assert.ok(step.label.length > 0, `${operation.id} has an empty label`);
+      assert.ok(Array.isArray(step.args), `${operation.id} has a step with no arguments`);
+      // Anything that is not a string reaches the core as `undefined` or as
+      // "[object Object]", which fails in a way that reads as an FFmpeg bug.
+      for (const argument of step.args) assert.equal(typeof argument, 'string', `${operation.id} passes a non-string: ${argument}`);
+    }
+
+    assert.deepEqual(plan.inputNames, ['input.mp4'], `${operation.id} asked for the wrong input`);
+    assert.ok(Array.isArray(plan.outputs), `${operation.id} has no outputs array`);
+    // Frames are the one operation that cannot name its outputs in advance, so
+    // it names a prefix instead; everything else must list them.
+    assert.ok(
+      plan.outputs.length > 0 || typeof plan.outputPrefix === 'string',
+      `${operation.id} tells the worker neither what to read back nor where to look`
+    );
+    assert.ok(/^[a-z]+\/[\w.+-]+$/.test(plan.mime), `${operation.id} has no usable MIME type: ${plan.mime}`);
+    assert.ok(plan.downloadName.length > 0, `${operation.id} produced a file with no name`);
+    assert.ok(
+      plan.duration === null || Number.isFinite(plan.duration),
+      `${operation.id} gave the progress bar a duration it cannot divide by: ${plan.duration}`
+    );
+  }
+});
+
+test('every invocation states the banner and the log level for itself', () => {
+  for (const operation of OPERATIONS) {
+    const plan = buildPlan(VIDEO, operation.id, {});
+    for (const [index, step] of plan.steps.entries()) {
+      // The core is one long-lived process, so verbosity set by an earlier job
+      // would otherwise decide how much this one prints — and at debug level
+      // the status line changes shape and progress stops parsing.
+      assert.deepEqual(step.args.slice(0, PREFIX.length), PREFIX, `${operation.id} step ${index} does not set its own log level`);
+    }
+  }
+});
+
+test('the core works on fixed names while the download keeps the one the user knows', () => {
+  const plan = buildPlan(source('My Holiday: 2019 (final).MP4', VIDEO.info), 'convert', { format: 'webm-vp8' });
+
+  // Punctuation, spaces and case all belong to the download name; the names
+  // handed to the core stay boring, because they become paths in its filesystem.
+  assert.deepEqual(plan.inputNames, ['input.mp4']);
+  assert.deepEqual(plan.outputs, ['output.webm']);
+  assert.equal(plan.downloadName, 'My Holiday: 2019 (final).webm');
+});
+
+test('an operation nobody offers is refused by name', () => {
+  assert.throws(() => buildPlan(VIDEO, 'transcode-to-betamax', {}), /no "transcode-to-betamax" operation/);
+});
+
+/* ------------------------------------------------------------------ *
+ * Trimming
+ * ------------------------------------------------------------------ */
+
+test('trimming seeks before the input, and asks for a duration rather than an end', () => {
+  const args = body(buildPlan(VIDEO, 'convert', { trimStart: 5, trimEnd: 12.5 }));
+
+  assert.deepEqual(args.slice(0, 4), ['-ss', '00:00:05.000', '-t', '00:00:07.500']);
+  // Before `-i` the seek is a jump; after it, FFmpeg decodes and throws away
+  // everything up to the mark, which on a long file takes as long as it sounds.
+  assert.ok(args.indexOf('-ss') < args.indexOf('-i'), 'the seek landed after the input');
+  // `-to` means different things on either side of `-i` and has changed meaning
+  // between versions; a duration is unambiguous in every build.
+  assert.equal(args.includes('-to'), false, '-to came back');
+});
+
+test('timestamps are written the way the rest of the app writes them', () => {
+  const args = body(buildPlan(VIDEO, 'convert', { trimStart: 3661.5, trimEnd: 3661.75 }));
+
+  assert.equal(args[1], '01:01:01.500');
+  assert.equal(args[3], '00:00:00.250');
+  // Stated as an identity as well as a literal: if `formatTimestamp` ever
+  // rounds to whole seconds, trimming would jump and this would catch it.
+  assert.equal(args[1], formatTimestamp(3661.5));
+  assert.equal(args[3], formatTimestamp(0.25));
+});
+
+test('the planned duration follows from the trim, and from what the file admits to', () => {
+  const durationOf = (options, from = VIDEO) => buildPlan(from, 'convert', options).duration;
+
+  assert.equal(durationOf({}), 120, 'no trim means the whole file');
+  assert.equal(durationOf({ trimStart: 30 }), 90, 'a start alone leaves the rest of the file');
+  assert.equal(durationOf({ trimEnd: 30 }), 30, 'an end alone counts from zero');
+  assert.equal(durationOf({ trimStart: 10, trimEnd: 25 }), 15);
+  // The progress bar divides by this, so an unknown length has to stay null
+  // rather than become zero, which would read as "already finished".
+  assert.equal(durationOf({}, UNKNOWN), null);
+  assert.equal(durationOf({ trimEnd: 8 }, UNKNOWN), 8, 'an end is knowable even when the total is not');
+});
+
+test('an end before the start is ignored rather than producing a negative length', () => {
+  const plan = buildPlan(VIDEO, 'convert', { trimStart: 60, trimEnd: 10 });
+  const args = body(plan);
+
+  assert.equal(plan.duration, 60, 'the nonsensical end was honoured');
+  assert.deepEqual(args.slice(0, 2), ['-ss', '00:01:00.000']);
+  // A `-t` of minus fifty seconds would be rejected outright, so the end is
+  // dropped and the job runs from the start to the end of the file.
+  assert.equal(args.includes('-t'), false);
+});
+
+test('a start alone adds no length, because the rest of the file is the answer', () => {
+  const args = body(buildPlan(VIDEO, 'convert', { trimStart: 30 }));
+  assert.deepEqual(args.slice(0, 2), ['-ss', '00:00:30.000']);
+  assert.equal(args.includes('-t'), false);
+});
+
+/* ------------------------------------------------------------------ *
+ * Scaling
+ * ------------------------------------------------------------------ */
+
+test('the scale filter bounds the picture without ever enlarging it', () => {
+  const chain = chainOf({ resolution: '720' });
+
+  // `force_original_aspect_ratio=decrease` on its own will still stretch a
+  // 320x240 clip up to fill a 1280x720 box; the `min()` pair is what stops it.
+  assert.ok(chain.includes("scale='min(iw,1280)':'min(ih,720)'"), chain);
+  assert.ok(chain.includes('force_original_aspect_ratio=decrease'), chain);
+  // H.264 in yuv420p cannot encode an odd dimension, and an odd source height
+  // survives the aspect-ratio maths often enough to matter.
+  assert.ok(chain.includes('force_divisible_by=2'), chain);
+});
+
+test('every resolution on the menu implies an even, 16:9 width', () => {
+  for (const resolution of RESOLUTIONS.filter((entry) => entry.height !== null)) {
+    const chain = chainOf({ resolution: resolution.id });
+    const width = Number(/min\(iw,(\d+)\)/.exec(chain)[1]);
+    const height = Number(/min\(ih,(\d+)\)/.exec(chain)[1]);
+
+    assert.equal(height, resolution.height, `${resolution.id} did not bound the height it names`);
+    assert.equal(width % 2, 0, `${resolution.id} implies an odd width of ${width}`);
+    // 480p and 240p are not whole numbers at 16:9 (853.3 and 426.7), so the
+    // rounding to an even width is allowed to move by a pixel and no more.
+    assert.ok(Math.abs(width - (resolution.height * 16) / 9) <= 1, `${resolution.id} implies ${width}, which is not 16:9`);
+  }
+});
+
+test('leaving the resolution alone adds no filter at all', () => {
+  const args = body(buildPlan(VIDEO, 'convert', { resolution: 'source' }));
+  // An identity filter would still cost a full decode-scale-encode of every
+  // frame, so "same as source" has to mean no filter rather than a harmless one.
+  assert.equal(args.includes('-vf'), false, 'a filter chain was built for a job that changes nothing');
+});
+
+/* ------------------------------------------------------------------ *
+ * The filter chain
+ * ------------------------------------------------------------------ */
+
+test('frames are dropped first, then the picture is turned, then it is scaled', () => {
+  const chain = chainOf({ fps: '24', rotate: 90, resolution: '480' });
+
+  // Positions rather than a split on commas, because the scale filter contains
+  // commas of its own inside min(iw,854).
+  assert.ok(chain.indexOf('fps=24') < chain.indexOf('transpose='), `rotation before the frame drop: ${chain}`);
+  assert.ok(chain.indexOf('transpose=') < chain.indexOf('scale='), `scaled before rotating: ${chain}`);
+  assert.ok(chain.startsWith('fps=24,'), chain);
+  // Dropping frames first means nothing downstream works on frames that are
+  // about to be thrown away; scaling last means the chosen height describes the
+  // picture the user ends up looking at, not the one before it was turned.
+  assert.ok(chain.includes("scale='min(iw,854)':'min(ih,480)'"), chain);
+});
+
+test('rotation and flips map to the filters FFmpeg actually has', () => {
+  assert.equal(chainOf({ rotate: 90 }), 'transpose=1');
+  assert.equal(chainOf({ rotate: 270 }), 'transpose=2');
+  // There is no transpose value for half a turn, so it is two quarter turns.
+  assert.equal(chainOf({ rotate: 180 }), 'transpose=1,transpose=1');
+  assert.equal(chainOf({ flip: 'horizontal' }), 'hflip');
+  assert.equal(chainOf({ flip: 'vertical' }), 'vflip');
+  assert.equal(chainOf({ rotate: 90, flip: 'horizontal' }), 'transpose=1,hflip');
+});
+
+test('a rotation of zero, or none, leaves the picture alone', () => {
+  const args = body(buildPlan(VIDEO, 'convert', { rotate: 0, flip: 'none' }));
+  assert.equal(args.includes('-vf'), false);
+});
+
+/* ------------------------------------------------------------------ *
+ * Video quality
+ * ------------------------------------------------------------------ */
+
+test('x264 is given a CRF, a preset and the pixel format everything can decode', () => {
+  const args = body(buildPlan(VIDEO, 'convert', { format: 'mp4-h264', quality: 'high', speed: 'slow' }));
+
+  assert.equal(valueAfter(args, '-c:v'), 'libx264');
+  assert.equal(valueAfter(args, '-crf'), '18');
+  assert.equal(valueAfter(args, '-crf'), String(crfFor('libx264', 'high')), 'the CRF drifted from the table');
+  assert.equal(valueAfter(args, '-preset'), 'slow');
+  // Without this, x264 will happily pick yuv444p from a high-bit-depth source
+  // and produce a file QuickTime and most phones refuse to open.
+  assert.equal(valueAfter(args, '-pix_fmt'), 'yuv420p');
+});
+
+test('the quality choice moves the CRF and nothing else', () => {
+  const crfFrom = (quality) => valueAfter(body(buildPlan(VIDEO, 'convert', { format: 'mp4-h264', quality })), '-crf');
+
+  assert.equal(crfFrom('high'), '18');
+  assert.equal(crfFrom('balanced'), '23');
+  assert.equal(crfFrom('small'), '28');
+  // Higher CRF is a smaller file: the scale runs the opposite way to the label,
+  // which is exactly the mistake worth having a test for.
+  assert.ok(Number(crfFrom('high')) < Number(crfFrom('small')));
+});
+
+test('VP8 has no constant-quality mode, so its CRF comes with a bitrate cap', () => {
+  const args = body(buildPlan(VIDEO, 'convert', { format: 'webm-vp8', quality: 'balanced' }));
+
+  assert.equal(valueAfter(args, '-c:v'), 'libvpx');
+  assert.equal(valueAfter(args, '-crf'), String(crfFor('libvpx', 'balanced')));
+  // For VP8 the CRF alone is ignored without a `-b:v` to bound it — and unlike
+  // VP9 there is no `-b:v 0` that means "constant quality", so it is a real cap.
+  assert.equal(valueAfter(args, '-b:v'), '2M');
+  assert.notEqual(valueAfter(args, '-b:v'), '0', 'a zero cap is VP9 syntax, and VP8 reads it as unbounded');
+});
+
+/* ------------------------------------------------------------------ *
+ * Audio
+ * ------------------------------------------------------------------ */
+
+test('each audio format asks for the encoder the table names', () => {
+  for (const format of AUDIO_FORMATS) {
+    const args = body(buildPlan(VIDEO, 'extract-audio', { audioFormat: format.id, audioBitrate: 96 }));
+
+    assert.equal(valueAfter(args, '-c:a'), AUDIO_ENCODERS[format.id], `${format.id} used the wrong encoder`);
+    assert.ok(args.includes('-vn'), `${format.id} kept the video stream`);
+    assert.equal(args.at(-1), `output.${format.extension}`, `${format.id} wrote the wrong file`);
+  }
+});
+
+test('the lossless formats are not offered a bitrate they cannot honour', () => {
+  for (const format of AUDIO_FORMATS) {
+    const args = body(buildPlan(VIDEO, 'extract-audio', { audioFormat: format.id, audioBitrate: 96 }));
+    const lossless = format.id === 'wav' || format.id === 'flac';
+
+    // `-b:a` to PCM or FLAC is not merely useless: it is a request the encoder
+    // cannot satisfy, and asking for it silently produces a file of a different
+    // size than the number implies.
+    assert.equal(args.includes('-b:a'), !lossless, `${format.id} ${lossless ? 'was given' : 'was denied'} a bitrate`);
+    if (!lossless) assert.equal(valueAfter(args, '-b:a'), '96k', format.id);
+  }
+});
+
+test('a video keeps an audio track encoded for the container it is going into', () => {
+  assert.equal(valueAfter(body(buildPlan(VIDEO, 'convert', { format: 'mp4-h264' })), '-c:a'), 'aac');
+  // WebM cannot carry AAC, so the format table's second encoder decides.
+  assert.equal(valueAfter(body(buildPlan(VIDEO, 'convert', { format: 'webm-vp8' })), '-c:a'), 'libvorbis');
+});
+
+/* ------------------------------------------------------------------ *
+ * Silence
+ * ------------------------------------------------------------------ */
+
+test('mute drops the track, and a source with no track drops it too', () => {
+  const muted = body(buildPlan(VIDEO, 'convert', { mute: true }));
+  assert.ok(muted.includes('-an'), 'mute did not silence the output');
+  assert.equal(muted.includes('-c:a'), false, 'an encoder was configured for a stream that will not exist');
+
+  // Not the same reason, but it has to be the same argument: without `-an`,
+  // some muxers still write an empty audio stream, and players show a track.
+  const silent = body(buildPlan(SILENT, 'convert', {}));
+  assert.ok(silent.includes('-an'), 'a silent source was given an audio encoder anyway');
+  assert.equal(silent.includes('-c:a'), false);
+});
+
+test('muting an audio extraction is ignored, because it would produce nothing at all', () => {
+  const args = body(buildPlan(VIDEO, 'extract-audio', { audioFormat: 'mp3', mute: true }));
+  assert.equal(args.includes('-an'), false, 'the only stream the user asked for was removed');
+  assert.equal(valueAfter(args, '-c:a'), 'libmp3lame');
+});
+
+/* ------------------------------------------------------------------ *
+ * Containers
+ * ------------------------------------------------------------------ */
+
+test('the MP4 family moves its index to the front, and the others have no index to move', () => {
+  const movflags = (plan) => valueAfter(body(plan), '-movflags');
+
+  // Without this the moov atom lands at the end of the file, and a browser
+  // cannot start playing until the whole thing has downloaded.
+  assert.equal(movflags(buildPlan(VIDEO, 'convert', { format: 'mp4-h264' })), '+faststart');
+  assert.equal(movflags(buildPlan(VIDEO, 'convert', { format: 'mov-h264' })), '+faststart');
+  // M4A is the ipod muxer, which is MP4 wearing a different name.
+  assert.equal(movflags(buildPlan(VIDEO, 'extract-audio', { audioFormat: 'm4a' })), '+faststart');
+
+  for (const format of ['webm-vp8', 'mkv-h264']) {
+    const args = body(buildPlan(VIDEO, 'convert', { format }));
+    // Matroska and WebM are streamable by construction; `-movflags` is not a
+    // valid option for them and would be an error rather than a no-op.
+    assert.equal(args.includes('-movflags'), false, `${format} was given an MP4 option`);
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * GIF
+ * ------------------------------------------------------------------ */
+
+test('a GIF is a palette built from the clip, then a quantisation against it', () => {
+  const plan = buildPlan(VIDEO, 'gif', { gifFps: 15, gifWidth: 320, trimStart: 2, trimEnd: 4 });
+  assert.equal(plan.steps.length, 2, 'a one-pass GIF is the banded mess this operation exists to avoid');
+
+  const first = body(plan, 0);
+  const second = body(plan, 1);
+
+  assert.equal(first.at(-1), 'palette.png', 'the first pass did not write the palette');
+  assert.ok(valueAfter(first, '-vf').includes('palettegen'), 'the first pass is not generating a palette');
+
+  // The palette has to arrive as a second input, and `paletteuse` reads it as
+  // `[1:v]`, so the order of the two `-i` arguments is load-bearing.
+  assert.equal(second.indexOf('-i', second.indexOf('-i') + 1), second.indexOf('palette.png') - 1);
+  assert.ok(valueAfter(second, '-lavfi').includes('paletteuse'), 'the second pass ignores the palette');
+  assert.deepEqual(plan.outputs, ['output.gif']);
+  assert.equal(plan.mime, 'image/gif');
+  assert.equal(plan.duration, 2);
+});
+
+test('both GIF passes see exactly the same frames', () => {
+  const plan = buildPlan(VIDEO, 'gif', { gifFps: 15, gifWidth: 320, trimStart: 2, trimEnd: 4 });
+  const first = body(plan, 0);
+  const second = body(plan, 1);
+
+  const paletteChain = valueAfter(first, '-vf').replace(/,palettegen.*$/, '');
+  const useChain = valueAfter(second, '-lavfi').replace(/\[x\];.*$/, '');
+
+  // A palette built from every frame at full size, then applied to a decimated
+  // and shrunken clip, is a palette for pictures that no longer exist: the
+  // colours it picked are not the colours being quantised.
+  assert.equal(paletteChain, useChain, 'the two passes filter the source differently');
+  assert.equal(paletteChain, 'fps=15,scale=320:-1:flags=lanczos');
+  // Same for the seek: a palette from seconds 0-2 applied to seconds 2-4 is
+  // just as wrong, and much harder to notice.
+  assert.deepEqual(first.slice(0, 4), ['-ss', '00:00:02.000', '-t', '00:00:02.000']);
+  assert.deepEqual(second.slice(0, 4), first.slice(0, 4));
+});
+
+test('turning dither off says so, rather than leaving it to the default', () => {
+  const paletteuse = (options) => valueAfter(body(buildPlan(VIDEO, 'gif', options), 1), '-lavfi');
+
+  assert.ok(paletteuse({ dither: false }).includes('paletteuse=dither=none'), paletteuse({ dither: false }));
+  // FFmpeg's own default is sierra2_4a, so "dither on" still has to be stated
+  // for the flat-colour result the option promises to be the one that changes.
+  assert.ok(paletteuse({ dither: true }).includes('dither=bayer'), paletteuse({ dither: true }));
+});
+
+test('asking convert for a GIF builds the GIF plan rather than a video with a .gif name', () => {
+  const viaConvert = buildPlan(VIDEO, 'convert', { format: 'gif', gifFps: 12, gifWidth: 480 });
+  const direct = buildPlan(VIDEO, 'gif', { gifFps: 12, gifWidth: 480 });
+
+  assert.deepEqual(viaConvert.steps, direct.steps);
+  assert.deepEqual(viaConvert.outputs, ['output.gif']);
+});
+
+/* ------------------------------------------------------------------ *
+ * Compressing to a size
+ * ------------------------------------------------------------------ */
+
+test('compressing is two passes, and the first one throws its pictures away', () => {
+  const plan = buildPlan(VIDEO, 'compress', { targetSize: 10 });
+  assert.equal(plan.steps.length, 2);
+
+  const first = body(plan, 0);
+  const second = body(plan, 1);
+
+  assert.equal(valueAfter(first, '-pass'), '1');
+  // The measuring pass has no use for sound, and `-f null -` discards the
+  // encoded frames: it is writing the statistics file and nothing else.
+  assert.ok(first.includes('-an'), 'the measuring pass encodes audio it will not keep');
+  assert.deepEqual(first.slice(-3), ['-f', 'null', '-']);
+
+  assert.equal(valueAfter(second, '-pass'), '2');
+  assert.equal(valueAfter(second, '-c:a'), 'aac');
+  assert.equal(second.at(-1), 'output.mp4');
+
+  // Statistics collected under different settings describe a different encode,
+  // so everything up to the pass number has to match exactly.
+  assert.deepEqual(first.slice(0, first.indexOf('-pass')), second.slice(0, second.indexOf('-pass')));
+});
+
+test('the video bitrate falls out of the target size, the length and the audio', () => {
+  // 10 MB is 80,000,000 bits. Keep 97% of it for the picture and the sound and
+  // leave the rest for container overhead: 77,600,000 bits over 60 seconds is
+  // 1293.33 kbps for everything, and the audio takes 128 of that.
+  const plan = buildPlan(MINUTE, 'compress', { targetSize: 10, audioBitrate: 128 });
+  const second = body(plan, 1);
+
+  assert.equal(valueAfter(second, '-b:v'), '1165k');
+  assert.equal(valueAfter(second, '-b:a'), '128k');
+  // The inspector prints this line; it must be the same number that is about to
+  // be run, or the preview is a plausible-looking reconstruction after all.
+  assert.equal(plan.note, 'About 1165 kbps of video and 128 kbps of audio.');
+});
+
+test('silencing the output gives the whole budget to the picture', () => {
+  const plan = buildPlan(MINUTE, 'compress', { targetSize: 10, audioBitrate: 128, mute: true });
+  const second = body(plan, 1);
+
+  assert.equal(valueAfter(second, '-b:v'), '1293k', 'the audio was still subtracted from a file with no audio');
+  assert.ok(second.includes('-an'));
+  assert.equal(second.includes('-b:a'), false);
+});
+
+test('an impossible target lands on a floor rather than a negative bitrate', () => {
+  const hour = source('lecture.mp4', { hasVideo: true, hasAudio: true, duration: 3600 });
+  const plan = buildPlan(hour, 'compress', { targetSize: 0.1, audioBitrate: 128 });
+
+  // 0.1 MB over an hour is a fifth of a kilobit per second, and the audio alone
+  // is 128: the honest subtraction is negative, which FFmpeg simply rejects.
+  assert.equal(valueAfter(body(plan, 1), '-b:v'), '64k');
+});
+
+test('compressing a file of unknown length says so instead of guessing', () => {
+  assert.throws(() => buildPlan(UNKNOWN, 'compress', { targetSize: 8 }), /how long the file is/);
+  // A zero-length trim leaves the same hole in the arithmetic.
+  assert.throws(() => buildPlan(source('x.mp4', { hasVideo: true, duration: 0 }), 'compress', {}), /how long the file is/);
+});
+
+/* ------------------------------------------------------------------ *
+ * Splitting a command line
+ * ------------------------------------------------------------------ */
+
+test('a plain command splits on whitespace', () => {
+  assert.deepEqual(splitArguments('-i in.mp4 -c:v libx264 out.mp4'), ['-i', 'in.mp4', '-c:v', 'libx264', 'out.mp4']);
+  assert.deepEqual(splitArguments('   -y \t -vn  \n -an  '), ['-y', '-vn', '-an']);
+  assert.deepEqual(splitArguments(''), []);
+  assert.deepEqual(splitArguments('    '), []);
+});
+
+test('quotes hold a value together, including one that is deliberately empty', () => {
+  assert.deepEqual(splitArguments("-vf 'scale=640:-1,fps=12'"), ['-vf', 'scale=640:-1,fps=12']);
+  assert.deepEqual(splitArguments('-metadata title="My Trip"'), ['-metadata', 'title=My Trip']);
+  // An empty argument is a real thing to pass — `-metadata title=''` clears a
+  // field — so the quotes have to survive as an argument rather than vanish.
+  assert.deepEqual(splitArguments("-metadata title='' -y"), ['-metadata', 'title=', '-y']);
+  assert.deepEqual(splitArguments(`-map "0:v" '0:a'`), ['-map', '0:v', '0:a']);
+});
+
+test('escapes work outside quotes and inside double quotes, and stay literal inside single ones', () => {
+  assert.deepEqual(splitArguments(String.raw`my\ clip.mp4`), ['my clip.mp4']);
+  assert.deepEqual(splitArguments(String.raw`-metadata "title=say \"hi\""`), ['-metadata', 'title=say "hi"']);
+  // A backslash inside single quotes is a backslash, which is what makes single
+  // quotes the safe way to paste a Windows path or a filter with escapes in it.
+  assert.deepEqual(splitArguments(String.raw`'C:\clips\a.mp4'`), [String.raw`C:\clips\a.mp4`]);
+});
+
+test('an unbalanced quote is refused rather than guessed at', () => {
+  // Guessing where the quote was meant to close would silently run something
+  // other than what was typed.
+  assert.throws(() => splitArguments('-i "unclosed.mp4'), /Unbalanced double quote/);
+  assert.throws(() => splitArguments("-i 'unclosed.mp4"), /Unbalanced single quote/);
+});
+
+test('nothing is globbed, expanded or executed', () => {
+  // This is a splitter, not a shell: everything below is one ordinary argument
+  // that FFmpeg will read literally, and none of it reaches an interpreter.
+  assert.deepEqual(splitArguments('-i *.mp4'), ['-i', '*.mp4']);
+  assert.deepEqual(splitArguments('-i $HOME/clip.mp4'), ['-i', '$HOME/clip.mp4']);
+  assert.deepEqual(splitArguments('-i ~/clip.mp4 out?.mp4'), ['-i', '~/clip.mp4', 'out?.mp4']);
+  assert.deepEqual(splitArguments('out.mp4; rm -rf /'), ['out.mp4;', 'rm', '-rf', '/']);
+  assert.deepEqual(splitArguments('$(id) `id`'), ['$(id)', '`id`']);
+});
+
+/* ------------------------------------------------------------------ *
+ * The raw command
+ * ------------------------------------------------------------------ */
+
+test('$in and $out become the names the core knows the files by', () => {
+  const plan = buildPlan(VIDEO, 'raw', { rawArguments: '-i $in -c copy $out.mkv' });
+
+  assert.deepEqual(body(plan), ['-i', 'input.mp4', '-c', 'copy', 'output.mkv']);
+  assert.deepEqual(plan.inputNames, ['input.mp4']);
+  assert.deepEqual(plan.outputs, ['output.mkv']);
+  assert.equal(plan.downloadName, 'holiday.mkv');
+});
+
+test('every $in is substituted, not just the first', () => {
+  const args = body(buildPlan(VIDEO, 'raw', { rawArguments: '-i $in -i $in -filter_complex hstack $out.mp4' }));
+  assert.equal(args.filter((argument) => argument === 'input.mp4').length, 2);
+  assert.equal(args.some((argument) => argument.includes('$in')), false, 'a placeholder survived into the command');
+});
+
+test('the extension written after $out decides what comes out', () => {
+  const outputOf = (rawArguments) => buildPlan(VIDEO, 'raw', { rawArguments }).outputs[0];
+
+  assert.equal(outputOf('-i $in -vn $out.wav'), 'output.wav');
+  assert.equal(outputOf('-i $in $out.gif'), 'output.gif');
+  // With nothing written after it, there is no better guess than the source's
+  // own extension — a `-c copy` remux is the common case, and it is right there.
+  assert.equal(outputOf('-i $in -c copy $out'), 'output.mp4');
+  assert.equal(buildPlan(VIDEO, 'raw', { rawArguments: '-i $in -vn $out.mp3' }).downloadName, 'holiday.mp3');
+});
+
+test('a command that reads nothing, or writes nothing, is refused with a reason', () => {
+  // All three run in the browser against a filesystem holding one file, so
+  // "it did nothing" would be the only other feedback available.
+  assert.throws(() => buildPlan(VIDEO, 'raw', { rawArguments: '-i clip.mp4 $out.mp4' }), /has to read \$in/);
+  assert.throws(() => buildPlan(VIDEO, 'raw', { rawArguments: '-i $in -f null -' }), /has to write \$out/);
+  assert.throws(() => buildPlan(VIDEO, 'raw', { rawArguments: '   ' }), /Nothing to run/);
+});
+
+/* ------------------------------------------------------------------ *
+ * The preview
+ * ------------------------------------------------------------------ */
+
+test('the preview is one line per invocation, each one runnable as written', () => {
+  const plan = buildPlan(VIDEO, 'gif', { gifWidth: 320 });
+  const lines = planToCommand(plan).split('\n');
+
+  assert.equal(lines.length, plan.steps.length, 'two invocations were printed as one command');
+  for (const line of lines) assert.ok(line.startsWith('ffmpeg '), line);
+});
+
+test('the preview quotes exactly what a shell would need quoted', () => {
+  const command = planToCommand(buildPlan(VIDEO, 'convert', { resolution: '720' }));
+
+  // The filter contains quotes and parentheses; copied into a terminal unquoted
+  // it would be a syntax error, and the whole point of the button is that what
+  // is shown is what is run.
+  assert.ok(command.includes(String.raw`'scale='\''min(iw,1280)'\''`), command);
+  // Ordinary arguments stay bare, or the preview becomes unreadable.
+  assert.ok(command.includes(' -i input.mp4 '), command);
+  assert.ok(command.includes(' -c:v libx264 '), command);
+});
+
+test('an argument with a space in it survives the round trip', () => {
+  const plan = buildPlan(VIDEO, 'raw', { rawArguments: '-i $in -metadata "title=My Trip" $out.mp4' });
+  const command = planToCommand(plan);
+
+  assert.ok(command.includes("'title=My Trip'"), command);
+  // Re-splitting the printed line has to give back the arguments it was built
+  // from, which is the only real definition of "quoted correctly".
+  assert.deepEqual(splitArguments(command.replace(/^ffmpeg /, '')), plan.steps[0].args);
+});
+
+/* ------------------------------------------------------------------ *
+ * Which operations are offered
+ * ------------------------------------------------------------------ */
+
+test('an audio file is not offered the operations that need pictures', () => {
+  const offered = operationsFor({ hasVideo: false, hasAudio: true });
+
+  assert.deepEqual(offered.map((operation) => operation.id), ['convert', 'raw']);
+  // Offering "extract audio" or "poster frame" for an MP3 would produce a job
+  // that fails inside FFmpeg, several seconds after the user chose it.
+  assert.equal(offered.some((operation) => operation.accepts === 'video'), false);
+});
+
+test('a video is offered everything, and an unreadable file only the safe two', () => {
+  assert.deepEqual(
+    operationsFor({ hasVideo: true }).map((operation) => operation.id),
+    OPERATIONS.map((operation) => operation.id)
+  );
+  for (const info of [null, undefined, {}]) {
+    assert.deepEqual(operationsFor(info).map((operation) => operation.id), ['convert', 'raw'], String(info));
+  }
+});

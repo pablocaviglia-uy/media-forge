@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="media-forge">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#14b8a6"/>
+      <stop offset="1" stop-color="#0f766e"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <g fill="none" stroke="#ffffff" stroke-width="30" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Conversion cycle: one arrow over the top, its mirror under the bottom. -->
+    <path d="M118 280A140 140 0 0 1 377 186"/>
+    <path d="M330 169L377 186L386 137"/>
+    <path d="M394 232A140 140 0 0 1 135 326"/>
+    <path d="M182 343L135 326L126 375"/>
+  </g>
+  <!-- Play head: what is being converted. -->
+  <path d="M208 188L330 256L208 324Z" fill="#ffffff" stroke="#ffffff" stroke-width="26" stroke-linejoin="round"/>
+</svg>

@@ -1,0 +1,145 @@
+/* Reset and design tokens. */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--ui-font);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--fg);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+h1, h2, h3, h4, h5, h6, p, figure, blockquote, dl, dd { margin: 0; }
+ul[class], ol[class] { list-style: none; margin: 0; padding: 0; }
+img, svg, video { max-width: 100%; height: auto; display: block; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; background: none; border: none; padding: 0; }
+a { color: var(--accent); }
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+::selection { background: var(--selection); }
+
+/* ------------------------------------------------------------------ *
+ * Tokens
+ * ------------------------------------------------------------------ */
+
+:root {
+  --ui-font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono-font: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  --radius: 8px;
+  --radius-lg: 12px;
+  --topbar-height: 46px;
+  --statusbar-height: 26px;
+  --queue-width: 320px;
+  --log-width: 340px;
+
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.06), 0 1px 1px rgb(0 0 0 / 0.04);
+  --shadow-lg: 0 16px 48px -12px rgb(0 0 0 / 0.28), 0 4px 12px -4px rgb(0 0 0 / 0.12);
+
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* Light ------------------------------------------------------------ */
+
+:root, [data-theme="light"] {
+  --bg: #ffffff;
+  --bg-sunken: #f6f7f9;
+  --bg-raised: #ffffff;
+  --bg-hover: #f0f1f4;
+  --bg-active: #e6e8ec;
+  --bg-code: #f6f7f9;
+
+  --fg: #1c2024;
+  --fg-muted: #62676d;
+  --fg-subtle: #8b9096;
+
+  --border: #e3e5e9;
+  --border-strong: #cdd1d7;
+
+  --selection: color-mix(in srgb, var(--accent) 22%, transparent);
+  --overlay: rgb(20 22 26 / 0.42);
+
+  /* Job states. Used for the status dot, the progress bar and the log. */
+  --ok: #0a7d55;
+  --ok-soft: #e7f7ef;
+  --warn: #b3541e;
+  --warn-soft: #fff6ec;
+  --danger: #c92a2a;
+  --danger-soft: #fdecec;
+
+  --log-dim: #7a838c;
+  --log-warn: #b3541e;
+  --log-error: #c92a2a;
+}
+
+/* Dark ------------------------------------------------------------- */
+
+[data-theme="dark"] {
+  --bg: #0d1117;
+  --bg-sunken: #0a0d12;
+  --bg-raised: #161b22;
+  --bg-hover: #1c232c;
+  --bg-active: #262d38;
+  --bg-code: #12171e;
+
+  --fg: #e4e8ee;
+  --fg-muted: #98a1ad;
+  --fg-subtle: #6e7681;
+
+  --border: #21262d;
+  --border-strong: #363c45;
+
+  --overlay: rgb(1 3 6 / 0.62);
+
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.4);
+  --shadow-lg: 0 16px 48px -12px rgb(0 0 0 / 0.6), 0 4px 12px -4px rgb(0 0 0 / 0.4);
+
+  --ok: #56d364;
+  --ok-soft: #12261a;
+  --warn: #f0a868;
+  --warn-soft: #2c2109;
+  --danger: #f85149;
+  --danger-soft: #2a1213;
+
+  --log-dim: #7d8590;
+  --log-warn: #f0a868;
+  --log-error: #f85149;
+}
+
+/* Accents ---------------------------------------------------------- */
+
+:root, [data-accent="teal"] { --accent: #0d9488; --accent-soft: #effcf9; }
+[data-accent="indigo"] { --accent: #4f46e5; --accent-soft: #eef2ff; }
+[data-accent="amber"]  { --accent: #b45309; --accent-soft: #fff8eb; }
+[data-accent="rose"]   { --accent: #be123c; --accent-soft: #fff1f3; }
+[data-accent="slate"]  { --accent: #475569; --accent-soft: #f1f5f9; }
+
+[data-theme="dark"] { --accent: #2dd4bf; --accent-soft: #0d2b2a; }
+[data-theme="dark"][data-accent="indigo"] { --accent: #818cf8; --accent-soft: #1c1f3a; }
+[data-theme="dark"][data-accent="amber"]  { --accent: #fbbf24; --accent-soft: #2c2109; }
+[data-theme="dark"][data-accent="rose"]   { --accent: #fb7185; --accent-soft: #2f1119; }
+[data-theme="dark"][data-accent="slate"]  { --accent: #94a3b8; --accent-soft: #1a1f27; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
