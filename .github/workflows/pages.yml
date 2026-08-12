@@ -83,12 +83,13 @@ jobs:
         with:
           path: .
 
+      # No `timeout:` here, deliberately. The obvious thing to do is raise it,
+      # because Pages deployment lag can mark a working deploy red and the
+      # 32 MB core makes this artifact large enough to be worth worrying
+      # about. It does not work: the action's maximum is 600000 ms, which is
+      # also its default, so any larger value is silently clamped back down
+      # and only earns a warning on every single run. If a deployment takes
+      # longer than ten minutes, this run goes red and the deployment usually
+      # lands anyway.
       - id: deployment
         uses: actions/deploy-pages@v4
-        with:
-          # The action gives up after 10 minutes by default and marks the run
-          # red, even though GitHub usually finishes the deployment afterwards.
-          # Pages deployment lag is common enough that the default turns a
-          # working deploy into a failed build; wait longer instead. The 32 MB
-          # core makes this artifact large, which does not help.
-          timeout: 1200000
