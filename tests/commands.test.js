@@ -20,7 +20,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { OPERATIONS, buildPlan, planToCommand, splitArguments, operationsFor } from '../src/media/commands.js';
-import { AUDIO_FORMATS, AUDIO_ENCODERS, RESOLUTIONS, crfFor } from '../src/media/formats.js';
+import { AUDIO_FORMATS, AUDIO_ENCODERS, RESOLUTIONS, FLAC_COMPRESSION, crfFor, audioFidelity } from '../src/media/formats.js';
 import { formatTimestamp } from '../src/ui/dom.js';
 
 /* ------------------------------------------------------------------ *
@@ -309,13 +309,51 @@ test('each audio format asks for the encoder the table names', () => {
 test('the lossless formats are not offered a bitrate they cannot honour', () => {
   for (const format of AUDIO_FORMATS) {
     const args = body(buildPlan(VIDEO, 'extract-audio', { audioFormat: format.id, audioBitrate: 96 }));
-    const lossless = format.id === 'wav' || format.id === 'flac';
+    const lossless = Boolean(format.lossless);
 
     // `-b:a` to PCM or FLAC is not merely useless: it is a request the encoder
     // cannot satisfy, and asking for it silently produces a file of a different
     // size than the number implies.
     assert.equal(args.includes('-b:a'), !lossless, `${format.id} ${lossless ? 'was given' : 'was denied'} a bitrate`);
     if (!lossless) assert.equal(valueAfter(args, '-b:a'), '96k', format.id);
+  }
+});
+
+test('FLAC is given a compression level, and it is clamped to what the encoder accepts', () => {
+  const level = (options) => valueAfter(body(buildPlan(VIDEO, 'extract-audio', { audioFormat: 'flac', ...options })), '-compression_level');
+
+  assert.equal(level({}), String(FLAC_COMPRESSION.default), 'the default level is not the one the table names');
+  assert.equal(level({ flacCompression: 0 }), '0');
+  assert.equal(level({ flacCompression: 12 }), '12');
+
+  // Out of range is a number FFmpeg refuses outright, so it is brought back in
+  // rather than passed through to fail at the last moment.
+  assert.equal(level({ flacCompression: 99 }), String(FLAC_COMPRESSION.max));
+  assert.equal(level({ flacCompression: -4 }), String(FLAC_COMPRESSION.min));
+  assert.equal(level({ flacCompression: 7.6 }), '8');
+  assert.equal(level({ flacCompression: 'loud' }), String(FLAC_COMPRESSION.default));
+});
+
+test('the compression level is the only thing it changes, because FLAC is lossless', () => {
+  const args = (level) => body(buildPlan(VIDEO, 'extract-audio', { audioFormat: 'flac', flacCompression: level }));
+  const without = (list) => list.filter((argument, index) => argument !== '-compression_level' && list[index - 1] !== '-compression_level');
+
+  // Every level decodes to identical samples. If a level ever started moving
+  // some other argument, that would be a quality setting wearing a disguise.
+  assert.deepEqual(without(args(0)), without(args(12)));
+});
+
+test('codecs are classified only when the answer is known', () => {
+  for (const codec of ['mp3', 'aac', 'opus', 'vorbis', 'ac3', 'wmav2']) {
+    assert.equal(audioFidelity(codec), 'lossy', codec);
+  }
+  for (const codec of ['flac', 'alac', 'pcm_s16le', 'pcm_f32be', 'wavpack']) {
+    assert.equal(audioFidelity(codec), 'lossless', codec);
+  }
+  // A warning built on a guess is worse than no warning, so anything the table
+  // does not recognise says so instead of picking a side.
+  for (const codec of ['', null, undefined, 'something_new']) {
+    assert.equal(audioFidelity(codec), 'unknown', String(codec));
   }
 });
 

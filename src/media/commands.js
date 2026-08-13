@@ -17,7 +17,7 @@
  * output.
  */
 
-import { formatById, crfFor, AUDIO_ENCODERS } from './formats.js';
+import { formatById, crfFor, AUDIO_ENCODERS, FLAC_COMPRESSION } from './formats.js';
 import { formatTimestamp } from '../ui/dom.js';
 
 /**
@@ -111,6 +111,7 @@ export const DEFAULT_OPTIONS = {
   quality: 'balanced',
   speed: 'veryfast',
   audioBitrate: 192,
+  flacCompression: FLAC_COMPRESSION.default,
   mute: false,
   trimStart: null,
   trimEnd: null,
@@ -246,8 +247,15 @@ function audioArguments(formatId, options, { allowNone = true } = {}) {
   switch (encoder) {
     case 'pcm_s16le':
       return ['-c:a', 'pcm_s16le'];
-    case 'flac':
-      return ['-c:a', 'flac', '-compression_level', '5'];
+    case 'flac': {
+      // Not a quality setting: every level decodes to the same samples. It
+      // only decides how hard the encoder looks for a smaller representation.
+      const level = Number(options.flacCompression);
+      const clamped = Number.isFinite(level)
+        ? Math.min(FLAC_COMPRESSION.max, Math.max(FLAC_COMPRESSION.min, Math.round(level)))
+        : FLAC_COMPRESSION.default;
+      return ['-c:a', 'flac', '-compression_level', String(clamped)];
+    }
     case 'libvorbis':
       return ['-c:a', 'libvorbis', '-b:a', `${bitrate}k`];
     default:

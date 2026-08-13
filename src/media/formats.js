@@ -33,13 +33,20 @@ export const VIDEO_FORMATS = [
     encoders: ['libx264', 'aac'],
     note: 'Plays everywhere. The right answer unless you have a reason.',
   },
-  // There is no VP9 entry, and its absence is deliberate. `libvpx-vp9` is
-  // compiled into the core and shows up in `-encoders`, but every attempt to
-  // encode with it — constant quality, fixed bitrate, one thread, no tiling —
-  // kills the WebAssembly instance with "memory access out of bounds" before
-  // the first frame. VP8 through the same library is fine. Offering a format
-  // that reliably crashes would be worse than not offering it, so the WebM
-  // option below is VP8, and the README says so.
+  // There is no VP9 entry, and its absence is deliberate.
+  //
+  // `libvpx-vp9` is compiled into the core and listed by `-encoders`, but on a
+  // freshly instantiated core it traps with "memory access out of bounds"
+  // before the first frame, whatever the settings — constant quality, fixed
+  // bitrate, one thread, no tiling. It is not simply broken: after roughly
+  // forty invocations on the same instance it starts working and keeps
+  // working, which is how it slipped past the first round of testing here.
+  //
+  // That makes it worse than broken, not better. The engine is instantiated
+  // fresh on every page load and replaced whenever a job is cancelled, so a
+  // real first conversion is always in the range where it traps — and a trap
+  // takes the whole instance down rather than failing one job. VP8 through the
+  // same library is unaffected, so the WebM option below is VP8.
   {
     id: 'webm-vp8',
     label: 'WebM · VP8',
@@ -131,6 +138,7 @@ export const AUDIO_FORMATS = [
     mime: 'audio/wav',
     muxer: 'wav',
     encoders: ['pcm_s16le'],
+    lossless: true,
     note: 'Uncompressed. Large, lossless, and universally readable.',
   },
   {
@@ -141,6 +149,7 @@ export const AUDIO_FORMATS = [
     mime: 'audio/flac',
     muxer: 'flac',
     encoders: ['flac'],
+    lossless: true,
     note: 'Lossless and about half the size of WAV.',
   },
 ];
@@ -226,6 +235,46 @@ export const AUDIO_BITRATES = [
   { id: '96', label: '96 kbps', kbps: 96 },
   { id: '64', label: '64 kbps', kbps: 64 },
 ];
+
+/**
+ * FLAC trades encoding time for size at a fixed quality — the audio that comes
+ * back out is identical at every level, because that is what lossless means.
+ *
+ * The default is 5 because the curve flattens hard after it. On a ten-second
+ * sample: level 0 is 182 KB, level 5 is 128 KB, and level 12 is 127.6 KB for
+ * six times the work. The control exists for people who want the last half a
+ * percent, not because most people should touch it.
+ */
+export const FLAC_COMPRESSION = { min: 0, max: 12, default: 5 };
+
+/**
+ * Whether a codec already threw information away.
+ *
+ * Used to warn before wrapping lossy audio in a lossless container, which is
+ * the most common mistake people make with FLAC: it cannot recover anything,
+ * and it roughly triples the file. Unknown codecs report `unknown` rather than
+ * guessing, because a wrong warning is worse than no warning.
+ *
+ * @returns {'lossless'|'lossy'|'unknown'}
+ */
+export function audioFidelity(codec) {
+  const name = String(codec || '').toLowerCase();
+  if (!name) return 'unknown';
+  // Every raw PCM variant, of which FFmpeg has dozens.
+  if (name.startsWith('pcm_')) return 'lossless';
+  if (LOSSLESS_AUDIO.has(name)) return 'lossless';
+  if (LOSSY_AUDIO.has(name)) return 'lossy';
+  return 'unknown';
+}
+
+const LOSSLESS_AUDIO = new Set(['flac', 'alac', 'wavpack', 'tta', 'tak', 'ape', 'mlp', 'truehd', 'ralf', 'shorten']);
+
+const LOSSY_AUDIO = new Set([
+  'mp3', 'mp3float', 'mp2', 'mp1', 'aac', 'aac_latm', 'vorbis', 'opus',
+  'ac3', 'eac3', 'dts', 'wmav1', 'wmav2', 'wmapro', 'wmavoice',
+  'amr_nb', 'amr_wb', 'speex', 'gsm', 'gsm_ms', 'qdm2', 'cook', 'sipr',
+  'atrac1', 'atrac3', 'atrac3p', 'nellymoser', 'musepack7', 'musepack8',
+]);
 
 /** Which encoder each audio format uses, and the arguments it needs. */
 export const AUDIO_ENCODERS = {

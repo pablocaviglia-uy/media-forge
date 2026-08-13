@@ -290,6 +290,18 @@ audio.preview-media { max-height: none; background: none; padding: 0.75rem; }
 
 .control-switch { display: flex; align-items: center; gap: 0.5rem; font-size: 13px; }
 
+/* Not an error, and not a hint either: something the conversion will happily
+   do that the user almost certainly did not mean. */
+.notice {
+  padding: 0.6rem 0.75rem;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--warn);
+  background: var(--warn-soft);
+  border: 1px solid color-mix(in srgb, var(--warn) 32%, transparent);
+  border-radius: var(--radius);
+}
+
 /* Command preview -------------------------------------------------- */
 
 .command {

@@ -200,9 +200,13 @@ Worth knowing before you file an issue:
   refuses anything over 500 MB and warns above 150 MB, and even that is
   optimistic on a phone.
 - **WebM output is VP8, not VP9.** `libvpx-vp9` is compiled into the core and
-  listed by `-encoders`, but every attempt to encode with it kills the
-  WebAssembly instance outright. There is a test that will fail the day a core
-  ships with a working one.
+  listed by `-encoders`, but on a freshly instantiated core it traps with
+  "memory access out of bounds" before the first frame. It is not simply
+  broken: after roughly forty invocations on the same instance it starts
+  working, which is worse — the engine is new on every page load, so a real
+  first conversion always lands in the range where it takes the whole instance
+  down. There is a test that runs it on a fresh core and will fail the day that
+  changes.
 - **There is no HEVC, AV1 or ProRes.** The first two are not in this build's
   encoder list in a usable form; the third never was.
 - **Progress is an estimate.** It comes from the output timestamp FFmpeg has

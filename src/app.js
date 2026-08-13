@@ -24,7 +24,8 @@ import { buildPlan, planToCommand, operationsFor, operationById, DEFAULT_OPTIONS
 import {
   VIDEO_FORMATS, AUDIO_FORMATS, IMAGE_FORMATS,
   RESOLUTIONS, FRAME_RATES, QUALITIES, AUDIO_BITRATES, SPEED_PRESETS,
-  formatById,
+  AUDIO_ENCODERS, FLAC_COMPRESSION,
+  formatById, audioFidelity,
 } from './media/formats.js';
 import { createZip } from './media/zip.js';
 
@@ -515,6 +516,54 @@ export class App {
       const built = this.buildControl(control, job, advanced);
       if (built) container.append(built);
     }
+
+    const notice = this.fidelityNotice(job);
+    if (notice) container.append(notice);
+  }
+
+  /**
+   * The audio format this job will actually produce, or null if it produces
+   * none. Not the same as the format the user picked: choosing MP4 means AAC,
+   * choosing WebM means Vorbis, and choosing FLAC in the Convert menu routes
+   * to the audio builder entirely.
+   */
+  audioTarget(job) {
+    const { options } = job;
+    if (job.operation === 'extract-audio') return formatById(options.audioFormat);
+    if (job.operation !== 'convert') return null;
+
+    const target = formatById(options.format);
+    if (!target) return null;
+    if (target.kind === 'audio') return target;
+    if (options.mute || !job.info?.hasAudio) return null;
+
+    const encoder = target.encoders[1];
+    return AUDIO_FORMATS.find((format) => AUDIO_ENCODERS[format.id] === encoder) || null;
+  }
+
+  /**
+   * Warn before wrapping lossy audio in a lossless container.
+   *
+   * This is the most common mistake people make with FLAC, and it is invisible
+   * without being told: the conversion succeeds, the file gets several times
+   * larger, and not one bit of what the MP3 discarded comes back. The app
+   * already knows both halves — the source codec from the probe and the target
+   * from the menu — so there is no excuse for letting it happen silently.
+   */
+  fidelityNotice(job) {
+    const target = this.audioTarget(job);
+    if (!target?.lossless) return null;
+
+    const source = job.info?.audio?.codec;
+    if (audioFidelity(source) !== 'lossy') return null;
+
+    return el('p', {
+      class: 'notice',
+      text:
+        `This file's audio is ${source.toUpperCase()}, which already threw information away to get small. ` +
+        `Saving it as ${target.label} cannot bring any of it back — it only makes the file several times larger. ` +
+        `${target.label} is worth it when the source is a CD, a master, or another lossless file.`,
+    });
   }
 
   field(label, control, hint) {
@@ -639,14 +688,32 @@ export class App {
             }),
           ]));
         }
-        if (!options.mute || job.operation !== 'convert') {
+
+        const target = this.audioTarget(job);
+        const silent = options.mute && job.operation === 'convert';
+
+        // A bitrate means nothing to a lossless encoder — FLAC and WAV ignore
+        // it entirely — so offering one would be a control that does nothing
+        // whatever the user picks.
+        if (!silent && !target?.lossless) {
           parts.push(this.field('Audio bitrate', this.selectControl(
             AUDIO_BITRATES.map((item) => ({ value: String(item.kbps), label: item.label })),
             String(options.audioBitrate),
             (value) => set('audioBitrate', Number(value))
           )));
         }
-        return el('div', { class: 'control-group' }, parts);
+
+        // FLAC's own knob. Behind the advanced switch because the honest
+        // answer for almost everyone is to leave it where it is.
+        if (!silent && target?.id === 'flac' && advanced) {
+          parts.push(this.field(
+            'Compression effort',
+            this.number(options.flacCompression, { min: FLAC_COMPRESSION.min, max: FLAC_COMPRESSION.max }, (value) => set('flacCompression', value)),
+            `${FLAC_COMPRESSION.min} to ${FLAC_COMPRESSION.max}. The audio is identical at every level — only the search for a smaller file changes. Past ${FLAC_COMPRESSION.default} the gain is under a percent for several times the work.`
+          ));
+        }
+
+        return parts.length ? el('div', { class: 'control-group' }, parts) : null;
       }
 
       case 'trim': {

@@ -95,6 +95,12 @@ function runPlan(plan) {
   }
 }
 
+/** The argument that follows a flag, for asserting on what a plan asks for. */
+const valueAfter = (args, flag) => {
+  const index = args.indexOf(flag);
+  return index >= 0 ? args[index + 1] : undefined;
+};
+
 const sizeOf = (name) => {
   try {
     return core.FS.readFile(name).length;
@@ -254,6 +260,38 @@ describe('every operation runs', { skip: VENDORED ? false : 'core not vendored' 
     });
   }
 
+  test('FLAC compression changes the file but not one sample of the audio', () => {
+    const encode = (level, as) => {
+      const plan = buildPlan(clip, 'extract-audio', { audioFormat: 'flac', flacCompression: level });
+      assert.equal(valueAfter(plan.steps[0].args, '-compression_level'), String(level));
+      runPlan(plan);
+      core.FS.rename(plan.outputs[0], as);
+      return sizeOf(as);
+    };
+
+    const fast = encode(0, 'fast.flac');
+    const small = encode(12, 'small.flac');
+    assert.ok(fast > 0 && small > 0);
+    assert.ok(small <= fast, `level 12 produced ${small} bytes, more than level 0's ${fast}`);
+
+    // The claim FLAC makes is that the samples survive the round trip exactly.
+    // Decoding both back to raw PCM and comparing the bytes is the only way to
+    // check that rather than take it on faith — and it is what makes hiding
+    // the bitrate control for these formats correct rather than merely tidy.
+    for (const [source, target] of [['fast.flac', 'fast.wav'], ['small.flac', 'small.wav']]) {
+      const { code } = exec('-i', source, '-c:a', 'pcm_s16le', '-y', target);
+      assert.equal(code, 0, `could not decode ${source}`);
+    }
+
+    const fastPcm = core.FS.readFile('fast.wav');
+    const smallPcm = core.FS.readFile('small.wav');
+    assert.equal(fastPcm.length, smallPcm.length, 'the two decodes are different lengths');
+    assert.ok(
+      fastPcm.every((byte, index) => byte === smallPcm[index]),
+      'the decoded audio differs between compression levels, which would mean FLAC is not lossless here'
+    );
+  });
+
   test('a GIF is built in two passes and comes out a GIF', () => {
     const plan = buildPlan(clip, 'gif', { gifFps: 8, gifWidth: 120, trimEnd: 1 });
     assert.equal(plan.steps.length, 2);
@@ -310,14 +348,21 @@ describe('every operation runs', { skip: VENDORED ? false : 'core not vendored' 
 });
 
 /**
- * Last, and on its own, because it does not survive.
+ * VP9, on a core that has not been warmed up.
  *
- * `libvpx-vp9` does not fail cleanly in this core — it takes the WebAssembly
- * instance down with a trap, and every later `exec` on the same instance is
- * then meaningless. So this runs after everything else has had its turn.
+ * This needs its own instance, and that is the entire point. `libvpx-vp9`
+ * traps on a freshly instantiated core and keeps trapping for the first few
+ * dozen invocations; somewhere around forty it starts working and then works
+ * every time. Running it at the end of the shared instance — which by then has
+ * a hundred invocations behind it — reports success and tells you nothing
+ * about what a user would see.
+ *
+ * What a user sees is always the fresh case: the engine is instantiated on
+ * page load and replaced whenever a job is cancelled. So the test builds a
+ * core of its own, and does it last because a trap makes that core unusable.
  */
 describe('libvpx-vp9', { skip: VENDORED ? false : 'core not vendored' }, () => {
-  test('is compiled in but cannot encode, which is why no format offers it', () => {
+  test('is compiled in, and traps on a fresh core, which is why no format offers it', async () => {
     assert.ok(
       capabilities.encoders.some((encoder) => encoder.name === 'libvpx-vp9'),
       'the core no longer contains libvpx-vp9 at all'
@@ -328,14 +373,35 @@ describe('libvpx-vp9', { skip: VENDORED ? false : 'core not vendored' }, () => {
       'a format offers VP9 again — if that is deliberate, this test should go'
     );
 
+    const fresh = await loadCore();
+    const run = (...args) => {
+      fresh.reset();
+      try {
+        return { code: fresh.exec(...args) };
+      } catch (error) {
+        return { code: 'trapped', error: error.message };
+      }
+    };
+
+    const made = run(
+      '-f', 'lavfi', '-i', 'testsrc2=size=192x144:rate=15:duration=2',
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-an', 'vp9-input.mp4'
+    );
+    assert.equal(made.code, 0, 'could not make an input on the fresh core');
+
     // Kept as a test rather than a comment so that the day a core ships with a
-    // working VP9, this fails and someone goes and adds WebM/VP9 back.
-    let outcome;
-    try {
-      outcome = exec('-i', 'input.mp4', '-c:v', 'libvpx-vp9', '-b:v', '300k', '-an', '-y', 'vp9-probe.webm').code;
-    } catch (error) {
-      outcome = error.message;
-    }
-    assert.notEqual(outcome, 0, 'libvpx-vp9 encoded successfully — VP9 can be offered again');
+    // VP9 that survives its first invocation, this fails and someone goes and
+    // adds WebM/VP9 back to the format table.
+    const attempt = run('-i', 'vp9-input.mp4', '-c:v', 'libvpx-vp9', '-b:v', '300k', '-an', '-y', 'vp9-probe.webm');
+    assert.notEqual(
+      attempt.code,
+      0,
+      'libvpx-vp9 encoded on a fresh core — VP9 can be offered again'
+    );
+    assert.match(
+      String(attempt.error || ''),
+      /memory access out of bounds|Aborted|unreachable/i,
+      `expected a trap, got ${JSON.stringify(attempt)}`
+    );
   });
 });

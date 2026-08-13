@@ -397,15 +397,20 @@
       <p>
         <span lang="es">
           <strong>El WebM que produce es VP8, no VP9.</strong> <code>libvpx-vp9</code> está
-          compilado en el core y aparece en <code>-encoders</code>, pero cada intento de
-          encodear con él mata la instancia de WebAssembly antes del primer cuadro. Ofrecer un
-          formato que se cae siempre es peor que no ofrecerlo.
+          compilado en el core y aparece en <code>-encoders</code>, pero en un core recién
+          instanciado revienta con «memory access out of bounds» antes del primer cuadro. No
+          está simplemente roto: después de unas cuarenta invocaciones sobre la misma instancia
+          empieza a andar, que es peor — el motor arranca de cero en cada carga de la página, así
+          que una primera conversión real siempre cae en el rango donde se lleva puesta la
+          instancia entera.
         </span>
         <span lang="en">
           <strong>The WebM it produces is VP8, not VP9.</strong> <code>libvpx-vp9</code> is
-          compiled into the core and shows up in <code>-encoders</code>, but every attempt to
-          encode with it kills the WebAssembly instance before the first frame. Offering a
-          format that reliably crashes is worse than not offering it.
+          compiled into the core and shows up in <code>-encoders</code>, but on a freshly
+          instantiated core it traps with "memory access out of bounds" before the first frame.
+          It is not simply broken: after roughly forty invocations on the same instance it
+          starts working, which is worse — the engine is new on every page load, so a real
+          first conversion always lands in the range where it takes the instance down.
         </span>
       </p>
     </div>
