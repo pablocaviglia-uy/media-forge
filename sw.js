@@ -16,7 +16,13 @@
  * the single exception called out at IMMUTABLE.
  */
 
-const CACHE_VERSION = 'v1';
+// v2 adds the timeline, so the app now imports three modules that were not in
+// the previous pre-cache. Stale-while-revalidate would get there on its own,
+// but not before one reload in which a returning visitor holds the new
+// `app.js` and a cache that has never heard of what it imports — fine online,
+// broken offline. A new cache name closes that window by installing the whole
+// set at once.
+const CACHE_VERSION = 'v2';
 const CACHE_NAME = `media-forge-${CACHE_VERSION}`;
 
 /**
@@ -50,9 +56,12 @@ const PRECACHE = [
   './src/media/commands.js',
   './src/media/formats.js',
   './src/media/probe.js',
+  './src/media/timeline.js',
   './src/media/zip.js',
   './src/storage/prefs.js',
   './src/ui/dom.js',
+  './src/ui/filmstrip.js',
+  './src/ui/scrubber.js',
 
   /*
    * The FFmpeg core, minus the part of it that matters most.

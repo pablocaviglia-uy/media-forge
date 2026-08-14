@@ -19,6 +19,7 @@ import {
 } from './ui/dom.js';
 import { prefs, resolveTheme } from './storage/prefs.js';
 import { createEngine, isolationStatus } from './ffmpeg/client.js';
+import { createScrubber } from './ui/scrubber.js';
 import { supportsFormat } from './ffmpeg/capabilities.js';
 import { buildPlan, planToCommand, operationsFor, operationById, DEFAULT_OPTIONS } from './media/commands.js';
 import {
@@ -71,6 +72,7 @@ export class App {
     this.capabilities = null;
     this.engineDetails = null;
     this.previewUrl = null;
+    this.scrubber = null;
 
     this.dom = {
       app: $('#app'),
@@ -408,8 +410,12 @@ export class App {
     this.dom.empty.hidden = Boolean(job);
     if (!job) {
       this.releasePreview();
+      this.releaseScrubber();
       return;
     }
+    // Selecting a different file means the timeline belongs to a file that is
+    // no longer on screen, and its `<video>` is still holding the old one open.
+    if (this.scrubber && this.scrubber.jobId !== job.id) this.releaseScrubber();
 
     this.dom.detailName.textContent = job.name;
     this.dom.detailFacts.textContent = this.describeSource(job);
@@ -452,6 +458,43 @@ export class App {
     if (!this.previewUrl) return;
     URL.revokeObjectURL(this.previewUrl);
     this.previewUrl = null;
+  }
+
+  /**
+   * The timeline for a job, built once and kept.
+   *
+   * `paintDetail` rebuilds the inspector on every change to any option, and a
+   * scrubber rebuilt that often would be unusable: it owns a `<video>` and an
+   * object URL, so each rebuild would re-fetch the file, leak the previous URL,
+   * and — worst of the three — throw away the zoom and the selection someone
+   * was in the middle of setting. So it is cached against the job it belongs
+   * to, and only replaced when that changes.
+   */
+  scrubberFor(job) {
+    if (this.scrubber?.jobId === job.id) return this.scrubber.control.node;
+
+    this.releaseScrubber();
+    const control = createScrubber({
+      file: job.file,
+      info: job.info,
+      onChange: ({ from, to }) => {
+        // Written straight into the options rather than through `set`, because
+        // the whole point of holding on to the control is not repainting the
+        // panel it is sitting in while a handle is still being dragged.
+        job.options.trimStart = from > 0 ? from : null;
+        job.options.trimEnd = to < job.info.duration ? to : null;
+        this.scheduleCommandPreview();
+        this.paintQueue();
+      },
+    });
+
+    this.scrubber = { jobId: job.id, control };
+    return control.node;
+  }
+
+  releaseScrubber() {
+    this.scrubber?.control.destroy();
+    this.scrubber = null;
   }
 
   /**
@@ -744,6 +787,15 @@ export class App {
 
       case 'trim': {
         const duration = job.info?.duration;
+
+        // A timeline, when there is something to see and something to measure
+        // against. Typing timestamps works and is miserable: you cannot tell
+        // what you picked until after the conversion. The fields stay below it
+        // for when the number is already known.
+        const scrubber = job.info?.hasVideo && Number.isFinite(duration) && duration > 0
+          ? this.scrubberFor(job)
+          : null;
+
         const start = this.text(options.trimStart === null ? '' : formatTimestamp(options.trimStart), '0:00', (value) => {
           set('trimStart', value.trim() ? parseTimestamp(value) : null);
         });
@@ -752,11 +804,17 @@ export class App {
         });
         return el('div', { class: 'control-group' }, [
           el('span', { class: 'control-label', text: 'Trim' }),
+          scrubber,
           el('div', { class: 'control-row' }, [
             el('label', { class: 'control-inline' }, [el('span', { text: 'From' }), start]),
             el('label', { class: 'control-inline' }, [el('span', { text: 'To' }), end]),
           ]),
-          el('span', { class: 'control-hint', text: 'Leave either blank for the start or the end. Seconds, or m:ss.' }),
+          el('span', {
+            class: 'control-hint',
+            text: scrubber
+              ? 'Drag the handles, or hold ⌘ and scroll to zoom in. Arrows step a frame, with Shift a second and with Alt ten milliseconds; I and O set the ends, Space loops the selection.'
+              : 'Leave either blank for the start or the end. Seconds, or m:ss.',
+          }),
         ]);
       }
 
