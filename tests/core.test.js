@@ -22,11 +22,14 @@ import { test, before, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
+
+import { isFatal } from '../src/ffmpeg/failures.js';
 
 import { buildPlan } from '../src/media/commands.js';
 import { parseProbeJson, parseProbe } from '../src/media/probe.js';
 import { parseEncoders, parseMuxers, missingFor } from '../src/ffmpeg/capabilities.js';
-import { VIDEO_FORMATS, AUDIO_FORMATS, IMAGE_FORMATS } from '../src/media/formats.js';
+import { VIDEO_FORMATS, AUDIO_FORMATS, IMAGE_FORMATS, remuxTargets } from '../src/media/formats.js';
 
 const CORE_DIRECTORY = new URL('../assets/ffmpeg/', import.meta.url);
 const CORE_SCRIPT = new URL('ffmpeg-core.js', CORE_DIRECTORY);
@@ -348,6 +351,94 @@ describe('every operation runs', { skip: VENDORED ? false : 'core not vendored' 
 });
 
 /**
+ * Repackaging, which is the one operation whose whole claim is about what it
+ * does NOT do.
+ *
+ * Every other operation can be checked by looking at what came out. This one
+ * promises that what came out is what went in, so the test has to prove a
+ * negative: pull the raw H.264 back out of both files and compare the bytes. If
+ * a single one differs, something re-encoded and the operation is lying.
+ */
+describe('repackaging', { skip: VENDORED ? false : 'core not vendored' }, () => {
+  let mkv = null;
+
+  before(() => {
+    if (!VENDORED) return;
+    // Matroska, so that MP4, MOV and M4A are all genuinely somewhere else. The
+    // name matters: `buildPlan` derives `input.mkv` from the source's own
+    // extension, and that is the file the worker would have written.
+    const { code, text } = exec(
+      '-f', 'lavfi', '-i', 'testsrc2=size=192x144:rate=15:duration=3',
+      '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=44100:duration=3',
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac', '-b:a', '64k', '-shortest', '-y', 'input.mkv'
+    );
+    assert.equal(code, 0, `could not synthesise the Matroska source:\n${text.split('\n').slice(-6).join('\n')}`);
+    mkv = source('holiday.mkv', parseProbeJson(ffprobeJson('input.mkv')));
+  });
+
+  test('offers exactly the containers that can hold H.264 and AAC', () => {
+    assert.equal(mkv.info.video.codec, 'h264');
+    assert.equal(mkv.info.audio.codec, 'aac');
+    // Matroska itself is absent because the file is already Matroska, and WebM
+    // because it takes neither of these codecs.
+    assert.deepEqual(remuxTargets(mkv.info).map((container) => container.id), ['mp4', 'mov', 'm4a']);
+  });
+
+  test('moves the streams into MP4 without changing one byte of the video', () => {
+    const plan = buildPlan(mkv, 'remux', { remuxTarget: 'mp4' });
+    runPlan(plan);
+
+    const info = parseProbeJson(ffprobeJson(plan.outputs[0]));
+    assert.equal(info.video.codec, 'h264');
+    assert.equal(info.audio.codec, 'aac');
+    assert.ok(info.formats.some((name) => name.includes('mp4')), `produced ${info.formats.join(',')}`);
+    assert.equal(plan.downloadName, 'holiday.mp4');
+
+    // The claim, tested rather than asserted in a comment. `-f h264` writes the
+    // elementary stream with no container around it, so what comes back is the
+    // encoded video and nothing else.
+    const elementary = (from, to) => {
+      const { code } = exec('-i', from, '-map', '0:v:0', '-c', 'copy', '-f', 'h264', '-y', to);
+      assert.equal(code, 0, `could not read the raw video back out of ${from}`);
+      return core.FS.readFile(to);
+    };
+    const before = elementary('input.mkv', 'before.h264');
+    const after = elementary(plan.outputs[0], 'after.h264');
+
+    assert.equal(after.length, before.length, 'the repackaged video is a different length');
+    assert.ok(
+      before.every((byte, index) => byte === after[index]),
+      'the video bytes changed, so something re-encoded and "nothing is lost" is false'
+    );
+  });
+
+  test('lifts the AAC into an M4A and leaves the pictures behind', () => {
+    const plan = buildPlan(mkv, 'remux', { remuxTarget: 'm4a' });
+    runPlan(plan);
+
+    const info = parseProbeJson(ffprobeJson(plan.outputs[0]));
+    assert.equal(info.hasVideo, false, 'the video came along');
+    assert.equal(info.audio.codec, 'aac', 'the audio was re-encoded on the way out');
+    assert.equal(plan.downloadName, 'holiday.m4a');
+  });
+
+  test('a container the streams do not fit is never what actually runs', () => {
+    // WebM cannot hold H.264 or AAC, and asking the core to try is a job that
+    // fails a few seconds after someone chose it. The builder substitutes a
+    // container that fits and says so, and this proves the substitute runs.
+    const plan = buildPlan(mkv, 'remux', { remuxTarget: 'webm' });
+    assert.equal(plan.container, 'mp4');
+    runPlan(plan);
+    assert.ok(sizeOf(plan.outputs[0]) > 0);
+
+    // And the refusal it avoided is real, not theoretical.
+    const { code } = exec('-i', 'input.mkv', '-map', '0:v:0?', '-map', '0:a:0?', '-c', 'copy', '-f', 'webm', '-y', 'refused.webm');
+    assert.notEqual(code, 0, 'WebM now accepts H.264 — the container table should be revisited');
+  });
+});
+
+/**
  * VP9, on a core that has not been warmed up.
  *
  * This needs its own instance, and that is the entire point. `libvpx-vp9`
@@ -403,5 +494,138 @@ describe('libvpx-vp9', { skip: VENDORED ? false : 'core not vendored' }, () => {
       /memory access out of bounds|Aborted|unreachable/i,
       `expected a trap, got ${JSON.stringify(attempt)}`
     );
+  });
+});
+
+/**
+ * libx265, which is compiled in, listed, and must never be offered.
+ *
+ * `-encoders` reports `libx265`, `formats.js` carries CRF values for it, and
+ * the configure line in the manifest asks for `--enable-libx265`. Everything
+ * says HEVC output is available. It is not: asking this core to encode a single
+ * frame of it never returns. Not slowly — at all. No error, no exit code, no
+ * CPU. Four argument shapes were measured — bare, with a preset and CRF, with
+ * x265's own logging turned off, and with `pools=none:frame-threads=1` — and
+ * all four hang identically, so it is not the arguments and not simply a thread
+ * pool waiting for threads this build does not have. Only the first is run
+ * here, because each one costs the suite its whole timeout to prove a negative.
+ *
+ * That makes it worse than the VP9 trap next door. A trap at least ends: the
+ * heap is poisoned, the worker reports it, the client replaces the instance. A
+ * call that never returns takes the worker's event loop with it, so cancelling
+ * cannot be heard, progress stops, and the only way out is terminating the
+ * worker from the outside — which the user has no reason to think of, because
+ * from the page it looks like a conversion that is merely taking a while.
+ *
+ * It has to be tested in a process of its own for the same reason: a
+ * synchronous call into WebAssembly cannot be interrupted from the thread it is
+ * running on, so a test that called it directly would hang the suite.
+ */
+/**
+ * The child, as source, because it has to run in its own process and the suite
+ * is `tests/*.test.js` — a second file beside it would either be collected as a
+ * test that is not one, or hidden in a directory for a single string.
+ *
+ * It prints STARTED before entering the encode and ENCODED after leaving it.
+ * Reaching the first and never the second is the whole finding.
+ */
+const CHILD = `
+  import { readFileSync } from 'node:fs';
+  const [directory, encoder, ...extra] = process.argv.slice(1);
+  const script = new URL('ffmpeg-core.js', 'file://' + directory);
+  globalThis.self = globalThis;
+  globalThis.location = new URL(script);
+  const { default: createFFmpegCore } = await import(script.href);
+  const core = await createFFmpegCore({ wasmBinary: readFileSync(new URL('ffmpeg-core.wasm', 'file://' + directory)) });
+  core.setLogger(() => {});
+  core.reset();
+  console.log('STARTED');
+  const code = core.exec(
+    '-hide_banner', '-loglevel', 'error',
+    '-f', 'lavfi', '-i', 'testsrc2=size=128x96:rate=15:duration=1',
+    '-c:v', encoder, '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', ...extra,
+    '-an', '-y', 'out.mp4'
+  );
+  let bytes = 0;
+  try { bytes = core.FS.readFile('out.mp4').length; } catch {}
+  console.log(code === 0 && bytes > 0 ? 'ENCODED ' + bytes : 'REFUSED ' + code);
+`;
+
+describe('libx265', { skip: VENDORED ? false : 'core not vendored' }, () => {
+  test('is compiled in, and never returns, which is why no format offers HEVC', () => {
+    assert.ok(
+      capabilities.encoders.some((encoder) => encoder.name === 'libx265'),
+      'the core no longer contains libx265 at all'
+    );
+    assert.equal(
+      VIDEO_FORMATS.some((format) => format.encoders.includes('libx265')),
+      false,
+      'a format offers libx265 again — if that is deliberate, this test should go'
+    );
+
+    // The control and the suspect run the same way, so a timeout that fired for
+    // both would mean the clock is too short rather than that x265 hangs.
+    // Generous next to the control, which finishes in a fifth of a second, and
+    // short enough that proving a negative does not dominate the suite.
+    const attempt = (encoder) => spawnSync(
+      process.execPath,
+      ['--input-type=module', '-e', CHILD, fileURLToPath(CORE_DIRECTORY), encoder],
+      { timeout: 15_000, killSignal: 'SIGKILL', encoding: 'utf8' }
+    );
+
+    const control = attempt('libx264');
+    assert.match(control.stdout || '', /ENCODED/, `libx264 did not encode, so this test proves nothing:\n${control.stderr}`);
+
+    const result = attempt('libx265');
+    // Killed on the deadline: no exit code, and the signal in its place.
+    assert.equal(
+      result.signal,
+      'SIGKILL',
+      `libx265 returned — HEVC may be offerable now, and this test should be revisited: ${result.stdout}`
+    );
+    assert.match(result.stdout || '', /STARTED/, 'the child never reached the encode, so the timeout means nothing');
+  });
+});
+
+/**
+ * One core does not last forever, whatever it is asked to do.
+ *
+ * Running nothing but `-version` on a single instance traps at around the
+ * seventieth call; a small MP3 encode at about the same; a small video encode
+ * at roughly a hundred and sixty. The counts move between runs and the cause is
+ * upstream, but every kind of work gets there eventually, and the app keeps one
+ * instance for the whole session.
+ *
+ * Two things are worth pinning down. That it happens at all, so this fails the
+ * day a core stops leaking and someone can delete the machinery around it. And
+ * that the failure is one the worker recognises as fatal — because the app
+ * surviving it depends entirely on that classification being right.
+ */
+describe('a long-lived core', { skip: VENDORED ? false : 'core not vendored' }, () => {
+  test('eventually traps, and says so in words the worker treats as fatal', async () => {
+    const own = await loadCore();
+    const LIMIT = 400;
+
+    let trappedAt = null;
+    let message = '';
+    for (let i = 1; i <= LIMIT; i += 1) {
+      own.reset();
+      try {
+        own.exec('-hide_banner', '-loglevel', 'error', '-version');
+      } catch (error) {
+        trappedAt = i;
+        message = error.message;
+        break;
+      }
+    }
+
+    assert.ok(
+      trappedAt !== null,
+      `the core survived ${LIMIT} invocations. If that is real rather than luck, the leak is fixed and ` +
+      'the queue no longer needs to expect a dead engine mid-session.'
+    );
+    // The load-bearing half: the client only replaces the instance when the
+    // worker marks the failure fatal, and it decides that from this string.
+    assert.equal(isFatal(message), true, `the worker would carry on with a poisoned core after: ${message}`);
   });
 });

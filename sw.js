@@ -45,6 +45,7 @@ const PRECACHE = [
   './src/app.js',
   './src/ffmpeg/client.js',
   './src/ffmpeg/capabilities.js',
+  './src/ffmpeg/failures.js',
   './src/worker/ffmpeg.worker.js',
   './src/media/commands.js',
   './src/media/formats.js',

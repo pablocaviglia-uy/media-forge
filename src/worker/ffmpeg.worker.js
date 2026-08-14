@@ -31,6 +31,7 @@ import {
   progressFromReport,
 } from '../media/probe.js';
 import { parseEncoders, parseMuxers } from '../ffmpeg/capabilities.js';
+import { isFatal } from '../ffmpeg/failures.js';
 
 /** Where the core's own `.wasm` (and, for the threaded build, its worker) live. */
 const CORE_BASE = new URL('../../assets/ffmpeg/', import.meta.url);
@@ -373,6 +374,8 @@ self.addEventListener('message', async (event) => {
   } catch (error) {
     // An abort inside the WebAssembly heap leaves the core unusable, so the
     // client is told to replace this worker rather than send it more work.
-    send({ type: 'failed', id: message.id, error: error.message, fatal: /abort|memory|RuntimeError/i.test(error.message) });
+    // This core traps of its own accord once an instance has run long enough,
+    // so the path is exercised in ordinary use, not only after a bad file.
+    send({ type: 'failed', id: message.id, error: error.message, fatal: isFatal(error) });
   }
 });

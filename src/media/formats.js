@@ -285,3 +285,244 @@ export const AUDIO_ENCODERS = {
   wav: 'pcm_s16le',
   flac: 'flac',
 };
+
+/* ------------------------------------------------------------------ *
+ * Repackaging
+ * ------------------------------------------------------------------ */
+
+/**
+ * Which codecs each container will carry untouched.
+ *
+ * Changing an MKV of H.264 and AAC into an MP4 does not require encoding
+ * anything: the same two streams move into a different box. That takes seconds
+ * instead of minutes and, unlike every other operation here, cannot lose a
+ * single bit — which is the whole argument for having it.
+ *
+ * The table matters more than it looks, for two reasons.
+ *
+ * The first is that it decides what gets offered, and an offer that FFmpeg
+ * then refuses is worse than no offer. Every `yes` below was produced by
+ * running `-c copy` on this vendored core and checking that a non-empty file
+ * came out; the refusals come back as a clean exit 1 and leave the core usable,
+ * but they are still a job that failed for a reason the app could have known.
+ *
+ * The second is that the muxer accepting a stream is necessary and not
+ * sufficient. This core will happily write AAC into a `.wav` and Vorbis into an
+ * `.mp4` — both were tested and both succeeded — and neither file is one you
+ * could hand to anybody. So these lists are the intersection of what the binary
+ * accepted with what actually plays, and the second half is a judgement rather
+ * than a measurement. Where they differ, a comment says so.
+ *
+ * This is also the only path in the app to codecs it cannot encode. `libx265`
+ * is compiled in and listed by `-encoders`, and asking it to encode hangs the
+ * core outright — no error, no CPU, no way out but terminating the worker — so
+ * there is no HEVC output format and there should not be one. Copying never
+ * invokes an encoder, so HEVC from a phone can still be repackaged. The same
+ * goes for VP9, whose encoder traps on a fresh core.
+ *
+ * @typedef {object} Container
+ * @property {string} id
+ * @property {string} label
+ * @property {string} extension
+ * @property {string} muxer
+ * @property {string} mime
+ * @property {'video'|'audio'} kind   audio containers drop the picture
+ * @property {string[]} [video]       video codecs it will carry
+ * @property {string[]} audio         audio codecs it will carry
+ * @property {string} [note]
+ */
+
+/** @type {Container[]} */
+export const REMUX_CONTAINERS = [
+  {
+    id: 'mp4',
+    label: 'MP4',
+    extension: 'mp4',
+    muxer: 'mp4',
+    mime: 'video/mp4',
+    kind: 'video',
+    // VP9 muxes into MP4 here and is deliberately left out: it is legal, and
+    // outside Chromium almost nothing opens it. WebM and MKV are where a VP9
+    // stream belongs.
+    video: ['h264', 'hevc', 'mpeg4'],
+    audio: ['aac', 'mp3', 'alac', 'ac3', 'eac3'],
+    note: 'Plays everywhere, and carries HEVC from a phone as-is.',
+  },
+  {
+    id: 'mov',
+    label: 'MOV',
+    extension: 'mov',
+    muxer: 'mov',
+    mime: 'video/quicktime',
+    kind: 'video',
+    video: ['h264', 'hevc', 'mpeg4', 'prores'],
+    audio: ['aac', 'mp3', 'alac', 'ac3', 'eac3', 'pcm'],
+    note: 'The container ProRes and uncompressed audio belong in.',
+  },
+  {
+    id: 'mkv',
+    label: 'MKV',
+    extension: 'mkv',
+    muxer: 'matroska',
+    mime: 'video/x-matroska',
+    kind: 'video',
+    // Matroska took every stream it was offered, which is the point of it.
+    video: ['h264', 'hevc', 'vp8', 'vp9', 'mpeg4', 'prores'],
+    audio: ['aac', 'mp3', 'alac', 'ac3', 'eac3', 'vorbis', 'opus', 'flac', 'pcm'],
+    note: 'Takes anything. The safe answer when nothing else fits.',
+  },
+  {
+    id: 'webm',
+    label: 'WebM',
+    extension: 'webm',
+    muxer: 'webm',
+    mime: 'video/webm',
+    kind: 'video',
+    video: ['vp8', 'vp9'],
+    audio: ['vorbis', 'opus'],
+    note: 'Strict about what it holds, and refuses the rest outright.',
+  },
+  {
+    id: 'm4a',
+    label: 'M4A · audio only',
+    extension: 'm4a',
+    muxer: 'ipod',
+    mime: 'audio/mp4',
+    kind: 'audio',
+    // AC-3 muxes into `.m4a` and is left out: nothing that plays music opens it.
+    audio: ['aac', 'alac'],
+    note: 'The AAC track lifted out of a video, untouched.',
+  },
+  {
+    id: 'mp3',
+    label: 'MP3 · audio only',
+    extension: 'mp3',
+    muxer: 'mp3',
+    mime: 'audio/mpeg',
+    kind: 'audio',
+    audio: ['mp3'],
+  },
+  {
+    id: 'ogg',
+    label: 'OGG · audio only',
+    extension: 'ogg',
+    muxer: 'ogg',
+    mime: 'audio/ogg',
+    kind: 'audio',
+    audio: ['vorbis', 'opus', 'flac'],
+  },
+  {
+    id: 'opus',
+    label: 'Opus · audio only',
+    extension: 'opus',
+    muxer: 'opus',
+    mime: 'audio/ogg',
+    kind: 'audio',
+    // Vorbis and FLAC both mux into a `.opus` file. Neither should.
+    audio: ['opus'],
+  },
+  {
+    id: 'flac',
+    label: 'FLAC · audio only',
+    extension: 'flac',
+    muxer: 'flac',
+    mime: 'audio/flac',
+    kind: 'audio',
+    audio: ['flac'],
+  },
+  {
+    id: 'wav',
+    label: 'WAV · audio only',
+    extension: 'wav',
+    muxer: 'wav',
+    mime: 'audio/wav',
+    kind: 'audio',
+    audio: ['pcm'],
+  },
+];
+
+/**
+ * FFmpeg names every PCM variant after its sample format — `pcm_s16le`,
+ * `pcm_s24le`, `pcm_f32be` and a few dozen more — and the containers that take
+ * one take all of them. Collapsing the family to `pcm` keeps the table from
+ * being mostly PCM.
+ */
+export function remuxCodec(codec) {
+  const name = String(codec || '').toLowerCase();
+  return name.startsWith('pcm_') ? 'pcm' : name;
+}
+
+/**
+ * Every container that can hold this file's streams without re-encoding.
+ *
+ * A video container has to carry both streams; an audio container carries the
+ * sound and drops the picture, which is how an AAC track comes out of an MP4
+ * without being encoded a second time. The source's own container is left out,
+ * because repackaging something as what it already is does nothing.
+ *
+ * @param {{hasVideo: boolean, hasAudio: boolean, video: object|null,
+ *   audio: object|null, formats: string[], name?: string}} info
+ * @param {string} [name] the file's own name, when it is not on `info`
+ * @returns {Container[]}
+ */
+export function remuxTargets(info, name = info?.name) {
+  if (!info) return [];
+
+  const video = info.hasVideo ? remuxCodec(info.video?.codec) : null;
+  const audio = info.hasAudio ? remuxCodec(info.audio?.codec) : null;
+  if (!video && !audio) return [];
+
+  return REMUX_CONTAINERS.filter((container) => {
+    if (container.kind === 'audio') {
+      // Dropping the picture is a deliberate choice, so it is only worth
+      // offering when there is sound to keep.
+      return Boolean(audio) && container.audio.includes(audio);
+    }
+    if (video && !(container.video || []).includes(video)) return false;
+    if (audio && !container.audio.includes(audio)) return false;
+    return true;
+  }).filter((container) => !isSameContainer(container, info, name));
+}
+
+/**
+ * Every container the ISO base media format's one demuxer answers to.
+ *
+ * `ffprobe` reports a format as the list of names its demuxer handles, and MP4,
+ * MOV, M4A and 3GP all share one — so an MP4 and a MOV are described by exactly
+ * the same string and cannot be told apart from it.
+ */
+const MP4_FAMILY = ['mp4', 'mov', 'm4a', '3gp', '3g2'];
+
+const extensionOf = (name) => (/\.([A-Za-z0-9]{1,8})$/.exec(String(name || ''))?.[1] || '').toLowerCase();
+
+/**
+ * Whether the file is already in this container, so that repackaging it as
+ * itself is never offered.
+ *
+ * Straightforward everywhere except the MP4 family, where the format list says
+ * `mov,mp4,m4a,3gp,3g2,mj2` whatever the file actually is. Taking that at face
+ * value ruled out both MP4 and MOV for every file in the family, which quietly
+ * removed the most useful case there is: turning a MOV from a camera into an
+ * MP4. Inside the family the extension is the only thing that distinguishes
+ * them — and it is also what the person who called it a MOV meant by it.
+ */
+function isSameContainer(container, info, name) {
+  const names = (info.formats || []).map((format) => format.toLowerCase());
+  if (!names.length) return false;
+
+  // An audio container is never a no-op for a file that still has pictures:
+  // dropping them is the point of choosing it.
+  if (container.kind === 'audio' && info.hasVideo) return false;
+
+  const ambiguous = MP4_FAMILY.filter((format) => names.includes(format)).length > 1;
+  if (ambiguous && MP4_FAMILY.includes(container.extension)) {
+    return extensionOf(name) === container.extension;
+  }
+
+  return names.includes(container.muxer);
+}
+
+const REMUX_BY_ID = new Map(REMUX_CONTAINERS.map((container) => [container.id, container]));
+
+/** @returns {Container|null} */
+export const remuxContainerById = (id) => REMUX_BY_ID.get(id) || null;

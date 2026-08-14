@@ -25,7 +25,7 @@ import {
   VIDEO_FORMATS, AUDIO_FORMATS, IMAGE_FORMATS,
   RESOLUTIONS, FRAME_RATES, QUALITIES, AUDIO_BITRATES, SPEED_PRESETS,
   AUDIO_ENCODERS, FLAC_COMPRESSION,
-  formatById, audioFidelity,
+  formatById, audioFidelity, remuxTargets,
 } from './media/formats.js';
 import { createZip } from './media/zip.js';
 
@@ -638,6 +638,32 @@ export class App {
           set('audioFormat', value);
           this.paintDetail();
         }), formatById(options.audioFormat)?.note);
+
+      case 'remuxTarget': {
+        // Built from the file rather than from the format table: which
+        // containers can hold these streams untouched depends on what the
+        // streams are, so the menu is different for every file. No capability
+        // filter, because copying asks the core for no encoder at all — which
+        // is exactly how HEVC and VP9 get out of here despite having no usable
+        // encoder in this build.
+        const targets = remuxTargets(job.info, job.name);
+        if (!targets.length) return null;
+
+        const chosen = targets.find((container) => container.id === options.remuxTarget) || targets[0];
+        const streams = [
+          job.info?.hasVideo ? job.info.video.codec : null,
+          job.info?.hasAudio ? job.info.audio.codec : null,
+        ].filter(Boolean).join(' and ');
+
+        return this.field('Repackage as', this.selectControl(
+          targets.map((container) => ({ value: container.id, label: container.label })),
+          chosen.id,
+          (value) => {
+            set('remuxTarget', value);
+            this.paintDetail();
+          }
+        ), chosen.note || `Keeps the ${streams} exactly as it is.`);
+      }
 
       case 'imageFormat':
         return this.field('Image format', this.selectControl(this.usable(IMAGE_FORMATS), options.imageFormat, (value) => set('imageFormat', value)));

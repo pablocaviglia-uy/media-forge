@@ -207,8 +207,28 @@ Worth knowing before you file an issue:
   first conversion always lands in the range where it takes the whole instance
   down. There is a test that runs it on a fresh core and will fail the day that
   changes.
-- **There is no HEVC, AV1 or ProRes.** The first two are not in this build's
-  encoder list in a usable form; the third never was.
+- **There is no HEVC output, and `libx265` is the reason rather than the
+  remedy.** It is compiled in and listed by `-encoders`, and asking it to encode
+  a single frame never returns — not slowly, at all: no error, no exit code, no
+  CPU. That is worse than the VP9 trap above, because a trap at least ends and
+  the worker can report it, while a call that never returns takes the worker's
+  event loop with it, so cancelling cannot be heard and progress simply stops.
+  Four argument shapes were measured, including `pools=none:frame-threads=1`,
+  and all four hang the same way. There is a test that runs it in a process with
+  a clock on it and will fail the day it returns.
+- **HEVC and VP9 files can still be repackaged**, because copying a stream never
+  invokes an encoder. An MP4 of HEVC from a phone becomes an MKV in seconds with
+  nothing decoded, which is the only thing this app can usefully do with one.
+- **There is no AV1 or ProRes output.** AV1 has no encoder here at all. ProRes
+  has three, and none is offered: the format exists to be edited, and a ProRes
+  file large enough to be worth making is far past the heap ceiling above.
+- **One engine does not last a whole session.** Whatever it is asked to do, a
+  single instance eventually traps with "memory access out of bounds" — around
+  the seventieth invocation for `-version` or a small MP3 encode, around the
+  hundred and sixtieth for a small video encode. The counts move between runs.
+  The app notices, throws the instance away and builds a fresh one, so the cost
+  is one failed job and a few seconds recompiling rather than a broken tab, but
+  a long queue can meet it.
 - **Progress is an estimate.** It comes from the output timestamp FFmpeg has
   reached, so a two-pass job reports each pass as half the work whether or not
   it takes half the time.

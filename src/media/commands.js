@@ -17,7 +17,14 @@
  * output.
  */
 
-import { formatById, crfFor, AUDIO_ENCODERS, FLAC_COMPRESSION } from './formats.js';
+import {
+  formatById,
+  crfFor,
+  AUDIO_ENCODERS,
+  FLAC_COMPRESSION,
+  remuxTargets,
+  remuxContainerById,
+} from './formats.js';
 import { formatTimestamp } from '../ui/dom.js';
 
 /**
@@ -47,6 +54,18 @@ export const OPERATIONS = [
     summary: 'Change the format, the resolution, the quality or all three.',
     accepts: 'any',
     controls: ['format', 'resolution', 'fps', 'quality', 'audio', 'trim', 'rotate'],
+  },
+  {
+    id: 'remux',
+    label: 'Repackage',
+    summary: 'Move the same streams into a different container. Seconds, and nothing is lost.',
+    accepts: 'any',
+    // Offered only when some container can take this file's streams as they
+    // are. There is no general answer — it depends entirely on what is inside.
+    available: (info) => remuxTargets(info).length > 0,
+    // No trimming here, and that is a decision rather than an omission. See the
+    // note on `buildRemux`.
+    controls: ['remuxTarget'],
   },
   {
     id: 'extract-audio',
@@ -99,12 +118,22 @@ export const operationById = (id) => OPERATIONS_BY_ID.get(id) || null;
 /** Which operations make sense for this file. */
 export function operationsFor(info) {
   const hasVideo = Boolean(info?.hasVideo);
-  return OPERATIONS.filter((operation) => operation.accepts === 'any' || (operation.accepts === 'video' && hasVideo));
+  return OPERATIONS.filter((operation) => {
+    if (operation.accepts === 'video' && !hasVideo) return false;
+    // Some operations depend on what is inside the file rather than merely on
+    // whether it has pictures: repackaging is only possible when a container
+    // exists that can carry these exact streams.
+    return operation.available ? operation.available(info) : true;
+  });
 }
 
 export const DEFAULT_OPTIONS = {
   format: 'mp4-h264',
   audioFormat: 'mp3',
+  // Null rather than a container id: which containers are possible depends on
+  // the file, so the builder picks the first one that fits rather than carrying
+  // a default that might not apply to what was dropped.
+  remuxTarget: null,
   imageFormat: 'png',
   resolution: 'source',
   fps: 'source',
@@ -300,6 +329,82 @@ function buildConvert(source, options, names) {
     mime: format.mime,
     downloadName: `${stemOf(source.name)}.${format.extension}`,
     duration,
+  };
+}
+
+/**
+ * The same streams, in a different container.
+ *
+ * Nothing is decoded and nothing is encoded, so this is bounded by how fast the
+ * bytes can be copied rather than by how fast a codec runs — seconds where a
+ * conversion is minutes, and bit-for-bit identical output. It is also the only
+ * way this app can deal with HEVC or VP9 at all, because both are codecs whose
+ * encoders are unusable here while their streams copy perfectly well.
+ *
+ * The streams are mapped explicitly instead of relying on a bare `-c copy`.
+ * `-c copy` takes everything the source has, including subtitle and data
+ * tracks, and a subtitle track that the destination muxer will not accept
+ * fails the whole job — for a stream nobody asked about, in a file the
+ * inspector never mentioned. `0:v:0?` and `0:a:0?` take the first of each, and
+ * the trailing `?` makes each one optional so an audio-only source does not
+ * fail for want of a picture.
+ *
+ * There is deliberately no trimming.
+ *
+ * It looks nearly free — the same copy with `-ss` and `-t` in front — and it is
+ * not. A copied stream cannot be cut anywhere except a keyframe, so the cut
+ * moves to the previous one, and on a ten-second clip with a keyframe every two
+ * seconds, asking for 3.00→5.00 gives a file that reports 2.02 seconds and
+ * carries 144 KB where an accurate cut of the same range is 56 KB: the extra
+ * second before the mark is in there, hidden ahead of the start offset. Seeking
+ * after `-i` instead reports the length correctly and produces the smaller
+ * file, but it can leave the output beginning on a frame that references a
+ * keyframe which is no longer present, which plays as garbage rather than as a
+ * clean cut.
+ *
+ * Neither is wrong, exactly; both are surprising, and which one is right
+ * depends on a keyframe map the user cannot see. So trimming stays with
+ * `convert`, where it re-encodes and lands where it was asked to, until there
+ * is a timeline that can draw the keyframes and let someone choose against
+ * them knowingly.
+ */
+function buildRemux(source, options, names) {
+  const targets = remuxTargets(source.info, source.name);
+  if (!targets.length) {
+    throw new Error('Nothing here can hold these streams as they are. Convert it instead.');
+  }
+
+  // Resolved against what this file can actually become, not against the whole
+  // table: a container remembered from the last file may be impossible for this
+  // one, and offering it would be a job that fails for a knowable reason.
+  const chosen = targets.find((container) => container.id === options.remuxTarget) || targets[0];
+  const requested = remuxContainerById(options.remuxTarget);
+
+  const output = `output.${chosen.extension}`;
+  const keepsVideo = chosen.kind === 'video' && Boolean(source.info?.hasVideo);
+
+  const args = [
+    '-i', names.input,
+    ...(keepsVideo ? ['-map', '0:v:0?'] : []),
+    ...(source.info?.hasAudio ? ['-map', '0:a:0?'] : []),
+    '-c', 'copy',
+    ...faststart(chosen),
+    output,
+  ];
+
+  return {
+    steps: [{ args, label: `Repackaging as ${chosen.label}` }],
+    inputNames: [names.input],
+    outputs: [output],
+    mime: chosen.mime,
+    downloadName: `${stemOf(source.name)}.${chosen.extension}`,
+    // The whole file, always: the progress bar has a total even though a copy
+    // finishes long before anyone reads it.
+    duration: Number.isFinite(source.info?.duration) ? source.info.duration : null,
+    container: chosen.id,
+    note: requested && requested.id !== chosen.id
+      ? `${requested.label} cannot hold these streams, so this is ${chosen.label}.`
+      : undefined,
   };
 }
 
@@ -566,6 +671,7 @@ function buildRaw(source, options, names) {
 
 const BUILDERS = {
   convert: buildConvert,
+  remux: buildRemux,
   'extract-audio': buildExtractAudio,
   gif: buildGif,
   compress: buildCompress,

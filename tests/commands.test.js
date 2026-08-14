@@ -20,7 +20,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { OPERATIONS, buildPlan, planToCommand, splitArguments, operationsFor } from '../src/media/commands.js';
-import { AUDIO_FORMATS, AUDIO_ENCODERS, RESOLUTIONS, FLAC_COMPRESSION, crfFor, audioFidelity } from '../src/media/formats.js';
+import { AUDIO_FORMATS, AUDIO_ENCODERS, RESOLUTIONS, FLAC_COMPRESSION, crfFor, audioFidelity, remuxTargets } from '../src/media/formats.js';
 import { formatTimestamp } from '../src/ui/dom.js';
 
 /* ------------------------------------------------------------------ *
@@ -29,13 +29,21 @@ import { formatTimestamp } from '../src/ui/dom.js';
 
 const source = (name, info) => ({ name, info });
 
-/** Two minutes of 1080p with a stereo track: the ordinary case. */
+/**
+ * Two minutes of 1080p with a stereo track: the ordinary case.
+ *
+ * It names its codecs and its container because a real file does, and because
+ * repackaging is offered on the strength of exactly those two facts. A source
+ * that leaves them out is a probe that failed, which is a different case and
+ * has its own fixtures below.
+ */
 const VIDEO = source('holiday.mp4', {
   hasVideo: true,
   hasAudio: true,
   duration: 120,
-  video: { width: 1920, height: 1080, fps: 30 },
-  audio: { channels: 2, sampleRate: 48_000 },
+  formats: ['mov', 'mp4', 'm4a', '3gp', '3g2', 'mj2'],
+  video: { codec: 'h264', width: 1920, height: 1080, fps: 30 },
+  audio: { codec: 'aac', channels: 2, sampleRate: 48_000 },
 });
 
 /** A minute of video with no audio stream at all. */
@@ -49,6 +57,21 @@ const MINUTE = source('clip.mp4', { hasVideo: true, hasAudio: true, duration: 60
  * a probe that fails leaves the app in the same position.
  */
 const UNKNOWN = source('stream.mkv', { hasVideo: true, hasAudio: true, duration: null });
+
+/**
+ * The ordinary case for repackaging: H.264 and AAC sitting in a Matroska file,
+ * which is the pair every container in the table has an opinion about. Unlike
+ * the sources above it names its codecs and its container, because that is
+ * exactly what decides whether a stream can be copied anywhere.
+ */
+const REMUXABLE = source('holiday.mkv', {
+  hasVideo: true,
+  hasAudio: true,
+  duration: 120,
+  formats: ['matroska', 'webm'],
+  video: { codec: 'h264', width: 1920, height: 1080, fps: 30 },
+  audio: { codec: 'aac', channels: 2, sampleRate: 48_000 },
+});
 
 /* ------------------------------------------------------------------ *
  * Reading a plan
@@ -661,11 +684,151 @@ test('an audio file is not offered the operations that need pictures', () => {
 });
 
 test('a video is offered everything, and an unreadable file only the safe two', () => {
+  // Everything, once the codecs are known. Repackaging is offered on what the
+  // streams *are*, so a source that only says "there are pictures" cannot have
+  // it: there is no way to tell which containers would take them.
+  assert.deepEqual(
+    operationsFor(REMUXABLE.info).map((operation) => operation.id),
+    OPERATIONS.map((operation) => operation.id)
+  );
   assert.deepEqual(
     operationsFor({ hasVideo: true }).map((operation) => operation.id),
-    OPERATIONS.map((operation) => operation.id)
+    OPERATIONS.filter((operation) => operation.id !== 'remux').map((operation) => operation.id)
   );
   for (const info of [null, undefined, {}]) {
     assert.deepEqual(operationsFor(info).map((operation) => operation.id), ['convert', 'raw'], String(info));
   }
+});
+
+/* ------------------------------------------------------------------ *
+ * Repackaging
+ * ------------------------------------------------------------------ */
+
+test('a container is offered only when it can carry these exact streams', () => {
+  // H.264 and AAC: MP4 and MOV take both, M4A takes the sound on its own, and
+  // WebM takes neither. Matroska is absent because the file is already one.
+  assert.deepEqual(remuxTargets(REMUXABLE.info).map((container) => container.id), ['mp4', 'mov', 'm4a']);
+
+  // VP8 and Vorbis are the mirror image: Matroska and Ogg, and nothing Apple.
+  const webm = {
+    hasVideo: true, hasAudio: true, duration: 10,
+    formats: ['matroska', 'webm'], video: { codec: 'vp8' }, audio: { codec: 'vorbis' },
+  };
+  assert.deepEqual(remuxTargets(webm).map((container) => container.id), ['ogg']);
+});
+
+test('HEVC can be repackaged, which is the only way this app can touch it at all', () => {
+  // There is no HEVC output format and there must not be one: `libx265` is
+  // compiled in, listed by `-encoders`, and hangs the core outright when asked
+  // to encode. Copying never asks for an encoder, so the stream still moves.
+  const phone = {
+    hasVideo: true, hasAudio: true, duration: 30,
+    formats: ['mov', 'mp4', 'm4a'], video: { codec: 'hevc' }, audio: { codec: 'aac' },
+  };
+  // MP4 above all: an HEVC recording is already in the MP4 family, and the one
+  // thing everybody wants from it is the extension every player recognises.
+  assert.deepEqual(remuxTargets(phone, 'IMG_4021.mov').map((container) => container.id), ['mp4', 'mkv', 'm4a']);
+
+  const plan = buildPlan(source('IMG_4021.mov', phone), 'remux', { remuxTarget: 'mp4' });
+  assert.deepEqual(body(plan), [
+    '-i', 'input.mov', '-map', '0:v:0?', '-map', '0:a:0?', '-c', 'copy', '-movflags', '+faststart', 'output.mp4',
+  ]);
+  assert.equal(plan.downloadName, 'IMG_4021.mp4');
+});
+
+test('repackaging copies both streams and asks for no encoder', () => {
+  const plan = buildPlan(REMUXABLE, 'remux', { remuxTarget: 'mp4' });
+
+  assert.deepEqual(body(plan), [
+    '-i', 'input.mkv', '-map', '0:v:0?', '-map', '0:a:0?', '-c', 'copy', '-movflags', '+faststart', 'output.mp4',
+  ]);
+  assert.equal(plan.steps.length, 1);
+  assert.equal(plan.downloadName, 'holiday.mp4');
+
+  // The promise the operation makes. If any of these turns up, it is not a
+  // repackage any more and the "nothing is lost" claim is false.
+  for (const flag of ['-c:v', '-c:a', '-crf', '-b:v', '-vf', '-preset', '-ss', '-t']) {
+    assert.equal(body(plan).includes(flag), false, `${flag} means something is being processed`);
+  }
+});
+
+test('an audio container drops the picture and keeps the sound untouched', () => {
+  const plan = buildPlan(REMUXABLE, 'remux', { remuxTarget: 'm4a' });
+
+  assert.deepEqual(body(plan), ['-i', 'input.mkv', '-map', '0:a:0?', '-c', 'copy', '-movflags', '+faststart', 'output.m4a']);
+  assert.equal(body(plan).includes('0:v:0?'), false, 'the video stream is still being mapped in');
+  assert.equal(plan.mime, 'audio/mp4');
+});
+
+test('a container that cannot hold these streams falls back, and says which one it used', () => {
+  // A target left over from the previous file, impossible for this one. The
+  // alternative is emitting a command FFmpeg refuses several seconds later.
+  const plan = buildPlan(REMUXABLE, 'remux', { remuxTarget: 'webm' });
+
+  assert.equal(plan.container, 'mp4');
+  assert.match(plan.note, /WebM cannot hold these streams/);
+  assert.equal(plan.downloadName, 'holiday.mp4');
+});
+
+test('the file is never offered the container it is already in', () => {
+  const matroska = {
+    hasVideo: true, hasAudio: true, duration: 10,
+    formats: ['matroska', 'webm'], video: { codec: 'h264' }, audio: { codec: 'aac' },
+  };
+  const offered = remuxTargets(matroska, 'holiday.mkv').map((container) => container.id);
+
+  assert.equal(offered.includes('mkv'), false, 'repackaging an MKV as an MKV does nothing');
+  assert.equal(offered.includes('mp4'), true);
+});
+
+test('inside the MP4 family the extension decides, because the format list cannot', () => {
+  // One demuxer serves MP4, MOV, M4A and 3GP, so `ffprobe` describes all of
+  // them with the same string. Believing it ruled out both MP4 and MOV for
+  // every file in the family, which removed the most useful case there is.
+  const family = {
+    hasVideo: true, hasAudio: true, duration: 10,
+    formats: ['mov', 'mp4', 'm4a', '3gp', '3g2', 'mj2'], video: { codec: 'h264' }, audio: { codec: 'aac' },
+  };
+
+  const fromMov = remuxTargets(family, 'IMG_4021.mov').map((container) => container.id);
+  assert.equal(fromMov.includes('mp4'), true, 'a MOV must be offerable as an MP4');
+  assert.equal(fromMov.includes('mov'), false, 'and not as another MOV');
+
+  const fromMp4 = remuxTargets(family, 'holiday.mp4').map((container) => container.id);
+  assert.equal(fromMp4.includes('mov'), true);
+  assert.equal(fromMp4.includes('mp4'), false);
+
+  // Lifting the AAC out is worth offering either way: the point of an audio
+  // container is dropping the picture, which is never a no-op.
+  assert.equal(fromMov.includes('m4a'), true);
+  assert.equal(fromMp4.includes('m4a'), true);
+});
+
+test('the name can travel on the info, which is where the worker puts it', () => {
+  // `probe` sends back `{...info, size, name}`, so the common case needs no
+  // second argument at all.
+  const info = {
+    hasVideo: true, hasAudio: true, duration: 10, name: 'IMG_4021.mov',
+    formats: ['mov', 'mp4', 'm4a'], video: { codec: 'h264' }, audio: { codec: 'aac' },
+  };
+  assert.equal(remuxTargets(info).map((container) => container.id).includes('mp4'), true);
+  assert.equal(remuxTargets(info).map((container) => container.id).includes('mov'), false);
+});
+
+test('every PCM flavour is treated as one, because the containers treat it that way', () => {
+  for (const codec of ['pcm_s16le', 'pcm_s24le', 'pcm_f32be']) {
+    const raw = { hasVideo: false, hasAudio: true, duration: 5, formats: ['mov'], audio: { codec } };
+    assert.equal(remuxTargets(raw).map((container) => container.id).includes('wav'), true, codec);
+  }
+});
+
+test('a file whose codecs nothing will carry is not offered the operation', () => {
+  const exotic = {
+    hasVideo: true, hasAudio: true, duration: 10,
+    formats: ['avi'], video: { codec: 'cinepak' }, audio: { codec: 'qdm2' },
+  };
+
+  assert.deepEqual(remuxTargets(exotic), []);
+  assert.equal(operationsFor(exotic).some((operation) => operation.id === 'remux'), false);
+  assert.throws(() => buildPlan(source('old.avi', exotic), 'remux', {}), /Convert it instead/);
 });
