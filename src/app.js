@@ -29,6 +29,17 @@ import {
   formatById, audioFidelity, remuxTargets,
 } from './media/formats.js';
 import { createZip } from './media/zip.js';
+import {
+  defaultResizeResolution,
+  describeFocusedQuickTransformation,
+  describeTrimRange,
+  focusedQuickTool,
+  normalizeFocusedQuickOptions,
+  quickVideoFormat,
+  supportsFocusedQuickTool,
+  trimRange,
+  trimOptionsForRun,
+} from './media/quick-tools.js';
 
 /**
  * Where the app refuses rather than letting FFmpeg run out of heap.
@@ -72,6 +83,8 @@ export class App {
     this.capabilities = null;
     this.engineDetails = null;
     this.previewUrl = null;
+    this.quickSourcePreview = null;
+    this.quickOutputPreview = null;
     this.scrubber = null;
 
     this.dom = {
@@ -83,6 +96,7 @@ export class App {
       detail: $('#detail'),
       detailName: $('#detail-name'),
       detailFacts: $('#detail-facts'),
+      quickFootSummary: $('#quick-foot-summary'),
       preview: $('#preview'),
       controls: $('#controls'),
       commandBlock: $('#command-block'),
@@ -253,7 +267,10 @@ export class App {
     this.paintDetail();
 
     for (const job of accepted) this.enqueue(() => this.probeJob(job));
-    if (prefs.get('autoStart')) this.enqueue(() => this.runQueue());
+    // Focused tools need one explicit choice/confirmation. Auto-start remains
+    // useful for the generic converter, but must not rotate or resize a file
+    // merely because it has just finished probing.
+    if (prefs.get('autoStart')) this.enqueue(() => this.runQueue({ skipFocused: true }));
   }
 
   /** Serialise everything that uses the worker; it can only do one thing. */
@@ -269,6 +286,17 @@ export class App {
     try {
       job.info = await this.engine.probe(job.file);
       job.status = 'ready';
+
+      const quickTool = focusedQuickTool(job.forgeToolId);
+      if (quickTool && supportsFocusedQuickTool(quickTool.id, job.info)) {
+        job.operation = quickTool.operation;
+        this.initialiseQuickTool(job, quickTool);
+      } else if (quickTool) {
+        job.forgeToolId = null;
+        this.toast(`${quickTool.title} necesita un archivo de video. Abrimos el conversor general para este archivo.`, {
+          duration: 7000,
+        });
+      }
 
       // A file with no stream FFmpeg recognises is not a conversion waiting to
       // happen; it is a file the user picked by mistake.
@@ -290,6 +318,7 @@ export class App {
     } catch (error) {
       job.status = 'failed';
       job.error = error.message;
+      job.forgeToolId = null;
     }
     this.paintQueue();
     if (job.id === this.selectedId) this.paintDetail();
@@ -404,34 +433,140 @@ export class App {
    * The inspector
    * ------------------------------------------------------------------ */
 
+  initialiseQuickTool(job, tool) {
+    if (job.quickToolInitialised === tool.id) return;
+    job.options.format = quickVideoFormat(job.options.format);
+    job.options.trimStart = null;
+    job.options.trimEnd = null;
+    job.options.fps = 'source';
+
+    if (tool.id === 'video-rotate') {
+      job.options.rotate = tool.defaultOptions.rotate;
+      job.options.flip = 'none';
+      job.options.resolution = 'source';
+    } else if (tool.id === 'video-flip') {
+      job.options.rotate = 0;
+      job.options.flip = tool.defaultOptions.flip;
+      job.options.resolution = 'source';
+    } else if (tool.id === 'video-resize') {
+      job.options.rotate = 0;
+      job.options.flip = 'none';
+      job.options.resolution = defaultResizeResolution(job.info);
+      if (!job.options.resolution) {
+        job.validationError = 'Este video ya está en el tamaño mínimo disponible.';
+      }
+    }
+
+    job.quickToolInitialised = tool.id;
+  }
+
+  quickToolFor(job) {
+    if (!job) return null;
+    const tool = focusedQuickTool(job.forgeToolId);
+    if (!tool) return null;
+    if (job.status === 'probing') return tool;
+    return supportsFocusedQuickTool(tool.id, job.info) ? tool : null;
+  }
+
   renderDetail() {
     const job = this.selected;
+    const quickTool = this.quickToolFor(job);
     this.dom.detail.hidden = !job;
     this.dom.empty.hidden = Boolean(job);
     if (!job) {
+      this.dom.detail.dataset.workspace = 'converter';
+      this.dom.detail.dataset.status = 'empty';
+      this.dom.quickFootSummary.hidden = true;
       this.releasePreview();
+      this.releaseQuickSourcePreview();
+      this.releaseQuickOutputPreview();
       this.releaseScrubber();
       return;
     }
+
+    this.dom.detail.dataset.workspace = quickTool ? 'quick-tool' : 'converter';
+    this.dom.detail.dataset.status = job.status === 'done' && job.dirtySinceOutput ? 'ready' : job.status;
+    if (quickTool) this.dom.detail.dataset.tool = quickTool.id;
+    else delete this.dom.detail.dataset.tool;
+
     // Selecting a different file means the timeline belongs to a file that is
     // no longer on screen, and its `<video>` is still holding the old one open.
     if (this.scrubber && this.scrubber.jobId !== job.id) this.releaseScrubber();
+    if (this.quickSourcePreview && this.quickSourcePreview.jobId !== job.id) this.releaseQuickSourcePreview();
+    if (this.quickOutputPreview && this.quickOutputPreview.jobId !== job.id) this.releaseQuickOutputPreview();
 
-    this.dom.detailName.textContent = job.name;
-    this.dom.detailFacts.textContent = this.describeSource(job);
+    this.dom.detailName.textContent = quickTool?.title || job.name;
+    this.dom.detailFacts.textContent = quickTool
+      ? `${job.name} · ${this.describeSource(job)}`
+      : this.describeSource(job);
 
-    this.renderPreview(job);
+    if (quickTool) {
+      this.releasePreview();
+      this.dom.preview.replaceChildren();
+      delete this.dom.preview.dataset.job;
+    } else {
+      this.releaseQuickSourcePreview();
+      this.releaseQuickOutputPreview();
+      this.renderPreview(job);
+    }
     this.renderControls(job);
     this.renderCommand();
+    this.renderQuickFooter(job, quickTool);
 
     const advanced = prefs.get('advanced');
     this.dom.commandBlock.hidden = !advanced || job.status === 'probing';
 
+    this.renderDetailActions(job, quickTool);
+    this.restoreQuickFocus(job);
+  }
+
+  restoreQuickFocus(job) {
+    if (job.pendingQuickTab) {
+      const action = job.pendingQuickTab === 'result' ? 'preview-result' : 'preview-source';
+      this.dom.controls.querySelector(`[data-action="${action}"]`)?.focus({ preventScroll: true });
+      delete job.pendingQuickTab;
+      return;
+    }
+
+    const pending = job.pendingQuickFocus;
+    if (!pending) return;
+    const candidates = Array.from(this.dom.controls.querySelectorAll('[data-quick-option]'));
+    const exact = candidates.find((node) => (
+      node.dataset.quickOption === pending.key && node.dataset.quickValue === pending.value
+    ));
+    const field = exact || candidates.find((node) => node.dataset.quickOption === pending.key);
+    field?.focus({ preventScroll: true });
+    delete job.pendingQuickFocus;
+  }
+
+  renderDetailActions(job, quickTool) {
+    const start = this.dom.detail.querySelector('[data-action="start-one"]');
+    const cancel = this.dom.detail.querySelector('[data-action="cancel-one"]');
+    const download = this.dom.detail.querySelector('[data-action="download-one"]');
+    const remove = this.dom.detail.querySelector('[data-action="remove-one"]');
     const running = job.status === 'running';
-    $('[data-action="start-one"]').hidden = running || job.status === 'probing';
-    $('[data-action="start-one"]').textContent = job.status === 'done' ? 'Convert again' : 'Convert';
-    $('[data-action="cancel-one"]').hidden = !running;
-    $('[data-action="download-one"]').hidden = job.status !== 'done';
+    const queued = job.status === 'queued';
+
+    start.hidden = running || queued || job.status === 'probing' || !job.info;
+    start.disabled = quickTool ? !this.quickJobRunnable(job, quickTool) : false;
+    start.textContent = quickTool
+      ? (job.status === 'done'
+          ? (job.dirtySinceOutput ? 'Actualizar resultado' : 'Crear otra versión')
+          : (job.outputs?.length ? 'Reintentar' : 'Crear resultado'))
+      : (job.status === 'done' ? 'Convert again' : 'Convert');
+    cancel.hidden = !running;
+    cancel.textContent = quickTool ? 'Cancelar' : 'Cancel';
+    download.hidden = !job.outputs?.length;
+    download.textContent = quickTool
+      ? (job.dirtySinceOutput || job.status !== 'done' ? 'Descargar versión anterior' : 'Descargar resultado')
+      : 'Download';
+    remove.textContent = quickTool ? 'Quitar archivo' : 'Remove';
+
+    const downloadIsPrimary = Boolean(quickTool && job.status === 'done' && !job.dirtySinceOutput && job.outputs?.length);
+    start.classList.toggle('primary-button', !downloadIsPrimary);
+    start.classList.toggle('text-button', downloadIsPrimary);
+    download.classList.toggle('primary-button', downloadIsPrimary);
+    download.classList.toggle('text-button', !downloadIsPrimary);
   }
 
   describeSource(job) {
@@ -460,6 +595,149 @@ export class App {
     this.previewUrl = null;
   }
 
+  releaseQuickOutputPreview() {
+    if (!this.quickOutputPreview) return;
+    const { media } = this.quickOutputPreview;
+    media.pause();
+    media.removeAttribute('src');
+    media.load();
+    URL.revokeObjectURL(this.quickOutputPreview.url);
+    this.quickOutputPreview = null;
+  }
+
+  pauseQuickOutputPreview() {
+    this.quickOutputPreview?.media.pause();
+  }
+
+  releaseQuickSourcePreview() {
+    if (!this.quickSourcePreview) return;
+    const { media, url } = this.quickSourcePreview;
+    media.pause();
+    media.removeAttribute('src');
+    media.load();
+    URL.revokeObjectURL(url);
+    this.quickSourcePreview = null;
+  }
+
+  pauseQuickSourcePreview() {
+    this.quickSourcePreview?.media.pause();
+  }
+
+  quickOutputPreviewFor(job) {
+    const output = job.outputs?.[0];
+    if (!output) return el('p', { class: 'preview-note', text: 'El resultado todavía no está disponible.' });
+    if (this.quickOutputPreview?.jobId === job.id && this.quickOutputPreview.blob === output.blob) {
+      return this.quickOutputPreview.node;
+    }
+
+    this.releaseQuickOutputPreview();
+    const url = URL.createObjectURL(output.blob);
+    const media = el('video', {
+      class: 'quick-result-media',
+      src: url,
+      controls: true,
+      playsInline: true,
+      preload: 'metadata',
+    });
+    const fallback = el('p', {
+      class: 'preview-note',
+      hidden: true,
+      text: 'El resultado está listo, pero este navegador no puede reproducir este formato. Podés descargarlo normalmente.',
+    });
+    const node = el('div', { class: 'quick-result-preview' }, [media, fallback]);
+    media.addEventListener('error', () => {
+      media.hidden = true;
+      fallback.hidden = false;
+    });
+    this.quickOutputPreview = { jobId: job.id, blob: output.blob, url, node, media };
+    return node;
+  }
+
+  quickTransformDimensions(job, options = job.options) {
+    const video = job.info?.video;
+    if (!video?.width || !video?.height) return null;
+
+    const metadataRotation = ((Number(video.rotation) || 0) % 360 + 360) % 360;
+    let width = video.width;
+    let height = video.height;
+    if (metadataRotation === 90 || metadataRotation === 270) [width, height] = [height, width];
+    const source = { width, height };
+
+    const requestedRotation = ((Number(options.rotate) || 0) % 360 + 360) % 360;
+    if (requestedRotation === 90 || requestedRotation === 270) [width, height] = [height, width];
+
+    const target = RESOLUTIONS.find((item) => item.id === options.resolution);
+    if (target?.height) {
+      const capWidth = Math.round(((target.height * 16) / 9) / 2) * 2;
+      const scale = Math.min(1, capWidth / width, target.height / height);
+      width = Math.max(2, Math.round((width * scale) / 2) * 2);
+      height = Math.max(2, Math.round((height * scale) / 2) * 2);
+    }
+
+    return { source, output: { width, height } };
+  }
+
+  quickTransformDescription(job, tool) {
+    return describeFocusedQuickTransformation(tool.id, job.options, job.info) || tool.title;
+  }
+
+  quickSourcePreviewFor(job, tool) {
+    if (this.quickSourcePreview?.jobId !== job.id) {
+      this.releaseQuickSourcePreview();
+      const url = URL.createObjectURL(job.file);
+      const media = el('video', {
+        class: 'quick-transform-media',
+        src: url,
+        playsInline: true,
+        preload: 'metadata',
+        loop: true,
+        attrs: { 'aria-label': `Vista previa de ${job.name}` },
+      });
+      const overlay = el('span', { class: 'quick-transform-overlay' });
+      const play = el('button', {
+        type: 'button',
+        class: 'text-button quick-transform-play',
+        text: 'Reproducir vista previa',
+      });
+      const stage = el('div', {
+        class: 'quick-transform-stage',
+        attrs: { 'aria-label': 'Vista previa de la transformación' },
+      }, [media, overlay, play]);
+
+      const syncPlayLabel = () => {
+        play.textContent = media.paused ? 'Reproducir vista previa' : 'Pausar vista previa';
+      };
+      play.addEventListener('click', () => {
+        if (media.paused) media.play().catch(syncPlayLabel);
+        else media.pause();
+      });
+      media.addEventListener('play', syncPlayLabel);
+      media.addEventListener('pause', syncPlayLabel);
+      media.addEventListener('error', () => {
+        overlay.textContent = 'Vista previa no disponible · el procesamiento local sigue funcionando';
+        play.hidden = true;
+      });
+      this.quickSourcePreview = { jobId: job.id, url, media, overlay, play, stage };
+    }
+
+    const preview = this.quickSourcePreview;
+    const rotation = tool.id === 'video-rotate' ? Number(job.options.rotate) || 0 : 0;
+    const flip = tool.id === 'video-flip' ? job.options.flip : 'none';
+    preview.media.style.setProperty('--quick-rotation', `${rotation}deg`);
+    preview.media.style.setProperty('--quick-flip-x', flip === 'horizontal' ? '-1' : '1');
+    preview.media.style.setProperty('--quick-flip-y', flip === 'vertical' ? '-1' : '1');
+    preview.stage.dataset.sideways = String(rotation === 90 || rotation === 270);
+    preview.stage.dataset.focus = 'input';
+    preview.overlay.textContent = this.quickTransformDescription(job, tool);
+
+    const locked = job.status === 'running' || job.status === 'queued';
+    preview.stage.inert = locked;
+    preview.stage.setAttribute('aria-disabled', String(locked));
+    preview.play.disabled = locked;
+    if (locked) preview.media.pause();
+    return preview.stage;
+  }
+
   /**
    * The timeline for a job, built once and kept.
    *
@@ -471,24 +749,36 @@ export class App {
    * to, and only replaced when that changes.
    */
   scrubberFor(job) {
-    if (this.scrubber?.jobId === job.id) return this.scrubber.control.node;
+    if (this.scrubber?.jobId === job.id) {
+      this.scrubber.control.setDisabled?.(job.status === 'running' || job.status === 'queued');
+      return this.scrubber.control.node;
+    }
 
     this.releaseScrubber();
+    const range = trimRange(job.info, job.options);
     const control = createScrubber({
       file: job.file,
       info: job.info,
+      initialSelection: range.to === null ? null : { from: range.from, to: range.to },
+      mediaControls: job.forgeToolId === 'video-trim',
+      locale: job.forgeToolId === 'video-trim' ? 'es' : 'en',
       onChange: ({ from, to }) => {
         // Written straight into the options rather than through `set`, because
         // the whole point of holding on to the control is not repainting the
         // panel it is sitting in while a handle is still being dragged.
         job.options.trimStart = from > 0 ? from : null;
         job.options.trimEnd = to < job.info.duration ? to : null;
+        job.previewMode = 'source';
+        job.validationError = null;
+        if (job.status === 'done') job.dirtySinceOutput = true;
         this.scheduleCommandPreview();
         this.paintQueue();
+        this.updateQuickRangeSummary(job);
       },
     });
 
     this.scrubber = { jobId: job.id, control };
+    control.setDisabled?.(job.status === 'running' || job.status === 'queued');
     return control.node;
   }
 
@@ -534,9 +824,599 @@ export class App {
    * Controls
    * ------------------------------------------------------------------ */
 
+  quickInvalidMessage(tool) {
+    switch (tool?.focus) {
+      case 'trim':
+        return 'El inicio y el final tienen que dejar al menos un instante de video seleccionado.';
+      case 'rotate':
+        return 'Elegí un giro de 90°, 180° o 270°.';
+      case 'flip':
+        return 'Elegí si querés voltear el video en horizontal o en vertical.';
+      case 'resize':
+        return 'Elegí un tamaño que reduzca realmente este video.';
+      default:
+        return 'Revisá los ajustes antes de crear el resultado.';
+    }
+  }
+
+  quickJobRunnable(job, tool = this.quickToolFor(job)) {
+    if (!tool || !job?.info) return false;
+    if (tool.focus === 'trim') return Boolean(trimOptionsForRun(job.info, job.options));
+    return Boolean(normalizeFocusedQuickOptions(tool.id, job.options, job.info));
+  }
+
+  quickStatusCopy(job) {
+    const tool = this.quickToolFor(job);
+    const isTrim = tool?.focus === 'trim';
+    if (job.validationError) {
+      return { title: isTrim ? 'Revisá el recorte' : 'Revisá los ajustes', detail: job.validationError };
+    }
+    if (job.status === 'probing') {
+      return { title: 'Analizando el archivo', detail: 'Leyendo duración, formato y pistas sin subir nada.' };
+    }
+    if (job.status === 'queued') {
+      return { title: 'En cola', detail: 'El resultado empezará cuando el motor quede libre.' };
+    }
+    if (job.status === 'running') {
+      const percent = Math.round(job.progress * 100);
+      const remaining = job.remaining !== null ? ` · ${formatDuration(job.remaining)} restantes` : '';
+      return { title: `Creando resultado · ${percent}%`, detail: `Procesamiento local${remaining}` };
+    }
+    if (job.status === 'done') {
+      if (job.dirtySinceOutput) {
+        return {
+          title: 'Cambios sin procesar',
+          detail: 'El resultado disponible corresponde a los ajustes anteriores.',
+        };
+      }
+      return {
+        title: 'Resultado listo',
+        detail: `${formatBytes(job.outputSize || 0)} · listo para revisar o descargar.`,
+      };
+    }
+    if (job.status === 'failed') {
+      const previous = job.outputs?.length ? ' El resultado anterior sigue disponible.' : '';
+      return {
+        title: 'No pudimos crear el resultado',
+        detail: `${job.error || 'Revisá los ajustes e intentá de nuevo.'}${previous}`,
+      };
+    }
+    if (job.status === 'cancelled') {
+      const previous = job.outputs?.length ? ' El resultado anterior sigue disponible.' : '';
+      return {
+        title: 'Procesamiento cancelado',
+        detail: `Tus ajustes siguen intactos y podés volver a intentarlo.${previous}`,
+      };
+    }
+    return { title: 'Listo para procesar', detail: 'El resultado se creará en este dispositivo.' };
+  }
+
+  quickProcessingCard(job) {
+    const copy = this.quickStatusCopy(job);
+    const visualStatus = job.validationError ? 'failed' : (job.dirtySinceOutput ? 'ready' : job.status);
+    const progress = el('progress', {
+      class: 'quick-progress',
+      max: 1,
+      value: job.status === 'done' ? 1 : job.progress || 0,
+      hidden: job.status !== 'running' && job.status !== 'queued',
+    });
+    return el('div', {
+      class: 'quick-processing-card',
+      dataset: { status: visualStatus },
+      attrs: { 'aria-live': 'polite' },
+    }, [
+      el('strong', { text: copy.title, dataset: { quickProgressTitle: '' } }),
+      el('span', { text: copy.detail, dataset: { quickProgressDetail: '' } }),
+      progress,
+    ]);
+  }
+
+  quickFormatNote(formatId) {
+    return ({
+      'mp4-h264': 'La opción más compatible para reproducir, compartir y editar.',
+      'webm-vp8': 'Formato abierto para la web; suele generar archivos más grandes.',
+      'mkv-h264': 'Contenedor flexible para conservar pistas y metadatos.',
+      'mov-h264': 'Pensado para flujos de edición que usan QuickTime.',
+    })[formatId] || '';
+  }
+
+  quickResolutionOptions() {
+    return RESOLUTIONS.map((item) => ({
+      value: item.id,
+      label: item.id === 'source' ? 'Igual que el original' : item.label,
+    }));
+  }
+
+  quickQualityOptions() {
+    const labels = { high: 'Alta', balanced: 'Equilibrada', small: 'Archivo liviano' };
+    return QUALITIES.map((item) => ({ value: item.id, label: labels[item.id] || item.label }));
+  }
+
+  quickOutputSection(job, { includeResolution = true } = {}) {
+    const formatControl = this.selectControl(
+      this.usable(VIDEO_FORMATS.filter((item) => item.kind === 'video')),
+      job.options.format,
+      (value) => this.setJobOption(job, 'format', value)
+    );
+    formatControl.dataset.quickOption = 'format';
+    const format = this.field('Formato de salida', formatControl, this.quickFormatNote(job.options.format));
+
+    const advancedFields = el('div', { class: 'quick-output-fields' });
+    if (includeResolution) {
+      const resolutionControl = this.selectControl(
+        this.quickResolutionOptions(),
+        job.options.resolution,
+        (value) => this.setJobOption(job, 'resolution', value)
+      );
+      resolutionControl.dataset.quickOption = 'resolution';
+      advancedFields.append(this.field('Resolución', resolutionControl, 'Nunca se agranda un video más chico.'));
+    }
+    const qualityControl = this.selectControl(
+      this.quickQualityOptions(),
+      job.options.quality,
+      (value) => this.setJobOption(job, 'quality', value)
+    );
+    qualityControl.dataset.quickOption = 'quality';
+    advancedFields.append(this.field('Calidad', qualityControl));
+    if (job.info?.hasAudio) {
+      const muteControl = this.checkbox(
+        job.options.mute,
+        'Quitar el audio',
+        (value) => this.setJobOption(job, 'mute', value)
+      );
+      muteControl.querySelector('input').dataset.quickOption = 'mute';
+      advancedFields.append(el('div', { class: 'control' }, [
+        muteControl,
+      ]));
+    }
+
+    const advanced = el('details', {
+      class: 'quick-advanced',
+      open: Boolean(job.quickAdvancedOpen),
+    }, [
+      el('summary', { text: 'Opciones avanzadas' }),
+      advancedFields,
+    ]);
+    advanced.addEventListener('toggle', () => {
+      job.quickAdvancedOpen = advanced.open;
+    });
+
+    const section = el('section', { class: 'quick-inspector-section' }, [
+      el('h3', { text: 'Resultado' }),
+      el('div', { class: 'quick-output-fields' }, [format]),
+      advanced,
+    ]);
+    const locked = job.status === 'running' || job.status === 'queued';
+    for (const input of section.querySelectorAll('input, select, button')) input.disabled = locked;
+    return section;
+  }
+
+  wireQuickTabs(job, sourceTab, resultTab) {
+    const tabs = [sourceTab, resultTab];
+    for (const tab of tabs) {
+      tab.addEventListener('click', () => {
+        job.pendingQuickTab = tab.dataset.action === 'preview-result' ? 'result' : 'source';
+      });
+      tab.addEventListener('keydown', (event) => {
+        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+        const enabled = tabs.filter((candidate) => !candidate.disabled);
+        if (enabled.length < 2) return;
+        const current = enabled.indexOf(tab);
+        let next = current;
+        if (event.key === 'Home') next = 0;
+        else if (event.key === 'End') next = enabled.length - 1;
+        else next = (current + (event.key === 'ArrowRight' ? 1 : -1) + enabled.length) % enabled.length;
+        event.preventDefault();
+        enabled[next].click();
+      });
+    }
+  }
+
+  renderQuickToolControls(job, tool) {
+    if (tool.id !== 'video-trim') {
+      this.renderQuickTransformControls(job, tool);
+      return;
+    }
+    const container = this.dom.controls;
+    const hasInfo = Boolean(job.info);
+    if (hasInfo) job.options.format = quickVideoFormat(job.options.format);
+    const resultAvailable = Boolean(job.outputs?.length);
+    if (!resultAvailable && job.previewMode === 'result') job.previewMode = 'source';
+    const showingResult = resultAvailable && job.previewMode === 'result';
+    if (!showingResult) this.pauseQuickOutputPreview();
+    const panelId = `quick-preview-panel-${job.id}`;
+    const sourceTabId = `quick-preview-source-${job.id}`;
+    const resultTabId = `quick-preview-result-${job.id}`;
+
+    const sourceTab = el('button', {
+      id: sourceTabId,
+      type: 'button',
+      class: `quick-preview-tab${showingResult ? '' : ' is-active'}`,
+      text: 'Original',
+      tabIndex: showingResult ? -1 : 0,
+      dataset: { action: 'preview-source' },
+      attrs: { role: 'tab', 'aria-selected': String(!showingResult), 'aria-controls': panelId },
+    });
+    const resultTab = el('button', {
+      id: resultTabId,
+      type: 'button',
+      class: `quick-preview-tab${showingResult ? ' is-active' : ''}`,
+      text: resultAvailable && (job.dirtySinceOutput || job.status !== 'done') ? 'Resultado anterior' : 'Resultado',
+      disabled: !resultAvailable,
+      tabIndex: showingResult ? 0 : -1,
+      dataset: { action: 'preview-result' },
+      attrs: { role: 'tab', 'aria-selected': String(showingResult), 'aria-controls': panelId },
+    });
+    this.wireQuickTabs(job, sourceTab, resultTab);
+
+    const previewContent = el('div', {
+      id: panelId,
+      class: 'quick-preview-content',
+      attrs: { role: 'tabpanel', 'aria-labelledby': showingResult ? resultTabId : sourceTabId },
+    });
+    if (!hasInfo) {
+      previewContent.append(this.quickProcessingCard(job));
+    } else if (showingResult) {
+      this.scrubber?.control.setDisabled?.(true);
+      previewContent.append(this.quickOutputPreviewFor(job));
+    } else if (Number.isFinite(job.info.duration) && job.info.duration > 0) {
+      previewContent.append(this.scrubberFor(job));
+    } else {
+      previewContent.append(el('p', {
+        class: 'preview-note',
+        text: 'No pudimos medir la duración de este video. Usá el conversor general para procesarlo.',
+      }));
+    }
+
+    const canvas = el('section', { class: 'quick-canvas' }, [
+      el('header', { class: 'quick-preview-head' }, [
+        el('div', { class: 'quick-preview-copy' }, [
+          el('strong', { text: job.name }),
+          el('span', {
+            text: showingResult
+              ? `${formatBytes(job.outputSize || 0)} · resultado procesado`
+              : (hasInfo ? this.describeSource(job) : 'Preparando la vista previa…'),
+          }),
+          el('small', { text: 'Local · el archivo no sale de este dispositivo' }),
+        ]),
+        el('div', {
+          class: 'quick-preview-switch',
+          attrs: { role: 'tablist', 'aria-label': 'Vista previa' },
+        }, [sourceTab, resultTab]),
+      ]),
+      previewContent,
+    ]);
+
+    const inspector = el('aside', { class: 'quick-inspector', attrs: { 'aria-label': 'Ajustes del recorte' } });
+    if (!hasInfo) {
+      inspector.append(el('section', { class: 'quick-inspector-section' }, [
+        el('h3', { text: 'Preparando el recorte' }),
+        el('p', { text: 'Cuando termine el análisis vas a poder elegir el inicio, el final y el formato de salida.' }),
+        this.quickProcessingCard(job),
+      ]));
+    } else {
+      const range = describeTrimRange(job.info, job.options);
+      const trimSection = el('section', { class: 'quick-inspector-section' }, [
+        el('h3', { text: 'Recorte' }),
+        el('p', { text: 'Mové los extremos del timeline o escribí un tiempo exacto.' }),
+        el('div', { class: 'quick-range-grid' }, [
+          el('div', { class: 'quick-range-value' }, [
+            el('span', { text: 'Inicio' }),
+            el('output', { text: range.from, dataset: { quickRange: 'from' } }),
+          ]),
+          el('div', { class: 'quick-range-value' }, [
+            el('span', { text: 'Final' }),
+            el('output', { text: range.to || '—', dataset: { quickRange: 'to' } }),
+          ]),
+          el('div', { class: 'quick-range-value quick-range-duration' }, [
+            el('span', { text: 'Duración del resultado' }),
+            el('output', { text: range.duration || '—', dataset: { quickRange: 'duration' } }),
+          ]),
+        ]),
+      ]);
+
+      const outputSection = this.quickOutputSection(job);
+
+      inspector.append(trimSection, outputSection, el('section', { class: 'quick-inspector-section' }, [
+        this.quickProcessingCard(job),
+      ]));
+    }
+
+    const layout = el('div', {
+      class: 'quick-tool-layout',
+      attrs: { 'aria-busy': String(job.status === 'probing' || job.status === 'queued' || job.status === 'running') },
+    }, [canvas, inspector]);
+    container.append(layout);
+    this.updateQuickRangeSummary(job);
+  }
+
+  quickTransformChoiceConfig(job, tool) {
+    if (tool.id === 'video-rotate') {
+      return {
+        key: 'rotate',
+        title: 'Orientación',
+        description: 'Elegí cómo querés girar el cuadro.',
+        columns: 3,
+        items: [
+          { value: 90, label: '90° derecha', meta: 'Horario' },
+          { value: 180, label: '180°', meta: 'Media vuelta' },
+          { value: 270, label: '90° izquierda', meta: 'Antihorario' },
+        ],
+      };
+    }
+    if (tool.id === 'video-flip') {
+      return {
+        key: 'flip',
+        title: 'Dirección del espejo',
+        description: 'Invertí el cuadro de izquierda a derecha o de arriba hacia abajo.',
+        columns: 2,
+        items: [
+          { value: 'horizontal', label: 'Horizontal', meta: 'Izquierda ↔ derecha' },
+          { value: 'vertical', label: 'Vertical', meta: 'Arriba ↕ abajo' },
+        ],
+      };
+    }
+
+    const items = RESOLUTIONS
+      .filter((resolution) => resolution.height !== null)
+      .filter((resolution) => normalizeFocusedQuickOptions(
+        tool.id,
+        { resolution: resolution.id },
+        job.info
+      ))
+      .map((resolution) => {
+        const dimensions = this.quickTransformDimensions(job, {
+          ...job.options,
+          resolution: resolution.id,
+        });
+        return {
+          value: resolution.id,
+          label: resolution.label,
+          meta: dimensions ? `${dimensions.output.width}×${dimensions.output.height}` : `Hasta ${resolution.height}p`,
+          preset: true,
+        };
+      });
+    return {
+      key: 'resolution',
+      title: 'Tamaño máximo',
+      description: 'Mostramos sólo tamaños que realmente reducen este video.',
+      columns: 2,
+      variant: 'presets',
+      items,
+    };
+  }
+
+  quickChoiceGrid(job, config) {
+    const locked = job.status === 'running' || job.status === 'queued';
+    const grid = el('div', {
+      class: 'quick-choice-grid',
+      dataset: {
+        columns: String(config.columns),
+        ...(config.variant ? { variant: config.variant } : {}),
+      },
+      attrs: { role: 'radiogroup', 'aria-label': config.title },
+    });
+    for (const item of config.items) {
+      const active = String(job.options[config.key]) === String(item.value);
+      const button = el('button', {
+        type: 'button',
+        class: `quick-choice${active ? ' is-active' : ''}`,
+        disabled: locked,
+        tabIndex: active ? 0 : -1,
+        dataset: {
+          ...(item.preset ? { preset: '' } : {}),
+          quickOption: config.key,
+          quickValue: String(item.value),
+        },
+        attrs: { role: 'radio', 'aria-checked': String(active) },
+      }, [
+        el('strong', { text: item.label }),
+        el('small', { text: item.meta }),
+      ]);
+      button.addEventListener('click', () => this.setJobOption(job, config.key, item.value));
+      button.addEventListener('keydown', (event) => {
+        if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+        const buttons = Array.from(grid.querySelectorAll('[role="radio"]'));
+        const current = buttons.indexOf(button);
+        let next = current;
+        if (event.key === 'Home') next = 0;
+        else if (event.key === 'End') next = buttons.length - 1;
+        else {
+          const forward = event.key === 'ArrowRight' || event.key === 'ArrowDown';
+          next = (current + (forward ? 1 : -1) + buttons.length) % buttons.length;
+        }
+        event.preventDefault();
+        buttons[next].click();
+      });
+      grid.append(button);
+    }
+    return grid;
+  }
+
+  quickDimensionSummary(job) {
+    const dimensions = this.quickTransformDimensions(job);
+    if (!dimensions) return null;
+    return el('div', { class: 'quick-dimension-summary' }, [
+      el('div', {}, [
+        el('span', { text: 'Original' }),
+        el('strong', { text: `${dimensions.source.width}×${dimensions.source.height}` }),
+      ]),
+      el('span', { class: 'quick-dimension-arrow', text: '→', attrs: { 'aria-hidden': 'true' } }),
+      el('div', {}, [
+        el('span', { text: 'Resultado estimado' }),
+        el('output', { text: `${dimensions.output.width}×${dimensions.output.height}` }),
+      ]),
+    ]);
+  }
+
+  renderQuickTransformControls(job, tool) {
+    const container = this.dom.controls;
+    const hasInfo = Boolean(job.info);
+    if (hasInfo) job.options.format = quickVideoFormat(job.options.format);
+    const resultAvailable = Boolean(job.outputs?.length);
+    if (!resultAvailable && job.previewMode === 'result') job.previewMode = 'source';
+    const showingResult = resultAvailable && job.previewMode === 'result';
+    const panelId = `quick-preview-panel-${job.id}`;
+    const sourceTabId = `quick-preview-source-${job.id}`;
+    const resultTabId = `quick-preview-result-${job.id}`;
+
+    const sourceTab = el('button', {
+      id: sourceTabId,
+      type: 'button',
+      class: `quick-preview-tab${showingResult ? '' : ' is-active'}`,
+      text: 'Vista previa',
+      tabIndex: showingResult ? -1 : 0,
+      dataset: { action: 'preview-source' },
+      attrs: { role: 'tab', 'aria-selected': String(!showingResult), 'aria-controls': panelId },
+    });
+    const resultTab = el('button', {
+      id: resultTabId,
+      type: 'button',
+      class: `quick-preview-tab${showingResult ? ' is-active' : ''}`,
+      text: resultAvailable && (job.dirtySinceOutput || job.status !== 'done') ? 'Resultado anterior' : 'Resultado',
+      disabled: !resultAvailable,
+      tabIndex: showingResult ? 0 : -1,
+      dataset: { action: 'preview-result' },
+      attrs: { role: 'tab', 'aria-selected': String(showingResult), 'aria-controls': panelId },
+    });
+    this.wireQuickTabs(job, sourceTab, resultTab);
+
+    const previewContent = el('div', {
+      id: panelId,
+      class: 'quick-preview-content',
+      attrs: { role: 'tabpanel', 'aria-labelledby': showingResult ? resultTabId : sourceTabId },
+    });
+    if (!hasInfo) {
+      previewContent.append(this.quickProcessingCard(job));
+    } else if (showingResult) {
+      this.pauseQuickSourcePreview();
+      previewContent.append(this.quickOutputPreviewFor(job));
+    } else {
+      this.pauseQuickOutputPreview();
+      previewContent.append(this.quickSourcePreviewFor(job, tool));
+    }
+
+    const canvas = el('section', { class: 'quick-canvas' }, [
+      el('header', { class: 'quick-preview-head' }, [
+        el('div', { class: 'quick-preview-copy' }, [
+          el('strong', { text: job.name }),
+          el('span', {
+            text: showingResult
+              ? `${formatBytes(job.outputSize || 0)} · resultado procesado`
+              : (hasInfo ? `${this.describeSource(job)} · ${this.quickTransformDescription(job, tool)}` : 'Preparando la vista previa…'),
+          }),
+          el('small', { text: 'Local · el archivo no sale de este dispositivo' }),
+        ]),
+        el('div', {
+          class: 'quick-preview-switch',
+          attrs: { role: 'tablist', 'aria-label': 'Vista previa' },
+        }, [sourceTab, resultTab]),
+      ]),
+      previewContent,
+    ]);
+
+    const inspector = el('aside', {
+      class: 'quick-inspector',
+      attrs: { 'aria-label': `Ajustes de ${tool.title.toLowerCase()}` },
+    });
+    if (!hasInfo) {
+      inspector.append(el('section', { class: 'quick-inspector-section' }, [
+        el('h3', { text: `Preparando: ${tool.title}` }),
+        el('p', { text: 'Cuando termine el análisis vas a poder elegir el cambio y revisar la salida.' }),
+        this.quickProcessingCard(job),
+      ]));
+    } else {
+      const config = this.quickTransformChoiceConfig(job, tool);
+      const focusSection = el('section', { class: 'quick-inspector-section' }, [
+        el('h3', { text: config.title }),
+        el('p', { text: config.description }),
+      ]);
+      if (config.items.length) focusSection.append(this.quickChoiceGrid(job, config));
+      else focusSection.append(el('p', {
+        class: 'preview-note',
+        text: 'Este video ya está en el tamaño mínimo que ofrecen los presets seguros.',
+      }));
+      const dimensions = this.quickDimensionSummary(job);
+      if (dimensions) focusSection.append(dimensions);
+
+      inspector.append(
+        focusSection,
+        this.quickOutputSection(job, { includeResolution: tool.id !== 'video-resize' }),
+        el('section', { class: 'quick-inspector-section' }, [this.quickProcessingCard(job)])
+      );
+    }
+
+    container.append(el('div', {
+      class: 'quick-tool-layout',
+      attrs: { 'aria-busy': String(job.status === 'probing' || job.status === 'queued' || job.status === 'running') },
+    }, [canvas, inspector]));
+  }
+
+  updateQuickRangeSummary(job) {
+    const tool = this.quickToolFor(job);
+    if (!job?.info || this.selectedId !== job.id || tool?.focus !== 'trim') return;
+    const range = describeTrimRange(job.info, job.options);
+    for (const key of ['from', 'to', 'duration']) {
+      const output = this.dom.controls.querySelector(`[data-quick-range="${key}"]`);
+      if (output) output.textContent = range[key] || '—';
+    }
+    this.renderQuickFooter(job, tool);
+
+    this.renderDetailActions(job, tool);
+  }
+
+  updateQuickProgress(job) {
+    if (this.selectedId !== job.id || !this.quickToolFor(job)) return;
+    const card = this.dom.controls.querySelector('.quick-processing-card');
+    if (card) {
+      const copy = this.quickStatusCopy(job);
+      card.dataset.status = job.validationError ? 'failed' : (job.dirtySinceOutput ? 'ready' : job.status);
+      const title = card.querySelector('[data-quick-progress-title]');
+      const detail = card.querySelector('[data-quick-progress-detail]');
+      const progress = card.querySelector('progress');
+      if (title) title.textContent = copy.title;
+      if (detail) detail.textContent = copy.detail;
+      if (progress) {
+        progress.hidden = job.status !== 'running' && job.status !== 'queued';
+        progress.value = job.progress || 0;
+      }
+    }
+    this.renderQuickFooter(job, this.quickToolFor(job));
+  }
+
+  renderQuickFooter(job, tool) {
+    const summary = this.dom.quickFootSummary;
+    if (!tool || !job) {
+      summary.hidden = true;
+      summary.replaceChildren();
+      return;
+    }
+
+    summary.hidden = false;
+    const range = job.info && tool.focus === 'trim' ? describeTrimRange(job.info, job.options) : null;
+    const transformation = job.info && tool.focus !== 'trim'
+      ? describeFocusedQuickTransformation(tool.id, job.options, job.info)
+      : null;
+    const copy = this.quickStatusCopy(job);
+    const showStatus = job.status !== 'ready' || Boolean(job.validationError);
+    summary.replaceChildren(
+      el('strong', {
+        text: showStatus
+          ? copy.title
+          : (tool.focus === 'trim' ? `${range?.duration || '—'} seleccionados` : (transformation || 'Elegí un ajuste')),
+      }),
+      el('span', { text: showStatus ? copy.detail : 'Procesamiento local · original intacto' })
+    );
+  }
+
   renderControls(job) {
     const container = this.dom.controls;
     container.textContent = '';
+    const quickTool = this.quickToolFor(job);
+    if (quickTool) {
+      this.renderQuickToolControls(job, quickTool);
+      return;
+    }
     if (job.status === 'probing') return;
 
     const operations = operationsFor(job.info);
@@ -649,6 +1529,20 @@ export class App {
     return el('span', { class: 'control-switch' }, [input, el('span', { text: label })]);
   }
 
+  setJobOption(job, key, value) {
+    if (this.dom.controls.contains(document.activeElement)) {
+      job.pendingQuickFocus = { key, value: String(value) };
+    }
+    job.options[key] = value;
+    job.previewMode = 'source';
+    job.validationError = null;
+    if (job.status === 'done') job.dirtySinceOutput = true;
+    if (key === 'format') prefs.set('preset', value);
+    this.scheduleCommandPreview();
+    this.paintQueue();
+    if (this.quickToolFor(job) && this.selectedId === job.id) this.paintDetail();
+  }
+
   /** Formats the loaded core can actually produce, with the rest left out. */
   usable(formats) {
     return formats
@@ -657,12 +1551,7 @@ export class App {
   }
 
   buildControl(control, job, advanced) {
-    const set = (key, value) => {
-      job.options[key] = value;
-      if (key === 'format') prefs.set('preset', value);
-      this.scheduleCommandPreview();
-      this.paintQueue();
-    };
+    const set = (key, value) => this.setJobOption(job, key, value);
     const options = job.options;
 
     switch (control) {
@@ -880,6 +1769,12 @@ export class App {
   renderCommand() {
     const job = this.selected;
     if (!job || !job.info) return;
+    const quickTool = this.quickToolFor(job);
+    if (quickTool && !this.quickJobRunnable(job, quickTool)) {
+      this.dom.commandText.textContent = this.quickInvalidMessage(quickTool);
+      this.dom.commandText.dataset.invalid = 'true';
+      return;
+    }
     try {
       const plan = buildPlan({ name: job.name, info: job.info }, job.operation, job.options);
       this.dom.commandText.textContent = planToCommand(plan);
@@ -894,17 +1789,61 @@ export class App {
    * Converting
    * ------------------------------------------------------------------ */
 
-  async runQueue() {
+  validateQuickJob(job, { notify = true } = {}) {
+    const tool = this.quickToolFor(job);
+    if (!tool) return true;
+    if (!job.info) return false;
+
+    const normalised = tool.focus === 'trim'
+      ? trimOptionsForRun(job.info, job.options)
+      : normalizeFocusedQuickOptions(tool.id, job.options, job.info);
+    if (!normalised) {
+      job.validationError = this.quickInvalidMessage(tool);
+      if (notify) this.toast(job.validationError, { kind: 'error', duration: 6500 });
+      this.paintDetail();
+      return false;
+    }
+
+    // Write exactly the validated values into the command options. Focused
+    // tools deliberately own only their primary transformation, so unrelated
+    // settings from a previous generic conversion cannot leak into the result.
+    Object.assign(job.options, normalised);
+    if (tool.focus === 'rotate') job.options.flip = 'none';
+    if (tool.focus === 'flip') job.options.rotate = 0;
+    if (tool.focus === 'resize') {
+      job.options.rotate = 0;
+      job.options.flip = 'none';
+    }
+
+    // A Quick Video job must never inherit MP3/FLAC from the converter's last
+    // global preset. Keep an existing video target, otherwise use the broadest
+    // supported default.
+    job.options.format = quickVideoFormat(job.options.format);
+    job.validationError = null;
+    return true;
+  }
+
+  async runQueue({ skipFocused = false } = {}) {
     this.stopRequested = false;
     for (const job of this.jobs) {
       if (this.stopRequested) break;
       if (job.status !== 'ready' && job.status !== 'queued') continue;
+      if (skipFocused && focusedQuickTool(job.forgeToolId)) continue;
       await this.runJob(job);
     }
   }
 
   async runJob(job) {
-    if (!job.info || job.status === 'running') return;
+    // A queued task closes over its job object. It may have been removed while
+    // waiting for the single FFmpeg instance; never spend CPU on a file the
+    // user has already dismissed.
+    if (!this.jobs.includes(job) || !job.info || job.status === 'running') return;
+    if (!this.validateQuickJob(job, { notify: job.status !== 'queued' })) {
+      if (job.status === 'queued') job.status = 'ready';
+      this.paintQueue();
+      this.paintDetail();
+      return;
+    }
 
     let plan;
     try {
@@ -921,6 +1860,10 @@ export class App {
     job.progress = 0;
     job.error = null;
     job.log = [];
+    if (this.quickToolFor(job)) {
+      job.previewMode = 'source';
+      if (this.quickOutputPreview?.jobId === job.id) this.releaseQuickOutputPreview();
+    }
     this.runningId = job.id;
     const startedAt = performance.now();
     this.paintQueue();
@@ -939,6 +1882,7 @@ export class App {
         const elapsed = (performance.now() - startedAt) / 1000;
         job.remaining = message.fraction > 0.05 ? (elapsed * (1 - message.fraction)) / message.fraction : null;
         this.paintQueue();
+        this.updateQuickProgress(job);
       },
       onStep: (message) => {
         this.appendLog(`— ${plan.steps[message.step].label} —`);
@@ -960,6 +1904,8 @@ export class App {
       job.downloadName = plan.downloadName;
       job.status = 'done';
       job.progress = 1;
+      job.dirtySinceOutput = false;
+      if (this.quickToolFor(job)) job.previewMode = 'result';
 
       const seconds = (performance.now() - startedAt) / 1000;
       this.appendLog(`Finished in ${formatDuration(seconds)} · ${formatBytes(job.outputSize)}`);
@@ -1034,7 +1980,22 @@ export class App {
     on(document, 'keydown', (event) => this.onKeydown(event));
     on(window, 'online', () => this.updateOfflineBadge());
     on(window, 'offline', () => this.updateOfflineBadge());
-    on(window, 'pagehide', () => prefs.flush());
+    on(window, 'pagehide', (event) => {
+      prefs.flush();
+      // A page entering the back/forward cache keeps its DOM alive. Destroying
+      // media here would restore a timeline whose listeners and blob URL are
+      // gone when the user comes back.
+      if (event.persisted) return;
+      this.releaseQuickSourcePreview();
+      this.releaseQuickOutputPreview();
+      this.releasePreview();
+      this.releaseScrubber();
+    });
+    on(window, 'pageshow', (event) => {
+      if (!event.persisted) return;
+      this.paintQueue();
+      this.paintDetail();
+    });
 
     on(this.dom.fileInput, 'change', () => {
       this.addFiles(Array.from(this.dom.fileInput.files || []));
@@ -1094,15 +2055,30 @@ export class App {
         this.enqueue(() => this.runQueue());
         return true;
       case 'start-one':
-        if (job) {
+        if (job && !['probing', 'queued', 'running'].includes(job.status) && this.validateQuickJob(job)) {
           // Reset here rather than only inside `runJob`: the run is queued
           // behind whatever else is using the engine, and until it starts the
           // row would otherwise still show the previous result's full bar.
           job.progress = 0;
           job.remaining = null;
           job.status = 'queued';
+          job.previewMode = 'source';
+          this.releaseQuickOutputPreview();
           this.paintQueue();
+          this.paintDetail();
           this.enqueue(() => this.runJob(job));
+        }
+        return true;
+      case 'preview-source':
+        if (job) {
+          job.previewMode = 'source';
+          this.paintDetail();
+        }
+        return true;
+      case 'preview-result':
+        if (job?.outputs?.length) {
+          job.previewMode = 'result';
+          this.paintDetail();
         }
         return true;
       case 'cancel-one':
@@ -1139,7 +2115,7 @@ export class App {
 
   onKeydown(event) {
     const meta = event.metaKey || event.ctrlKey;
-    const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(event.target.tagName);
+    const interactive = /^(INPUT|TEXTAREA|SELECT|BUTTON|A)$/.test(event.target.tagName) || event.target.isContentEditable;
 
     if (meta && event.key.toLowerCase() === 'o') {
       event.preventDefault();
@@ -1172,7 +2148,7 @@ export class App {
       this.syncSettings();
       return;
     }
-    if (typing) return;
+    if (interactive) return;
 
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       const index = this.jobs.findIndex((job) => job.id === this.selectedId);

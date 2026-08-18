@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="en" data-theme="light">
+<html lang="es" data-theme="light" data-interface="forge">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>media-forge — convert video and audio in your browser</title>
-<meta name="description" content="A video and audio converter that runs entirely in your browser, on FFmpeg compiled to WebAssembly. No server, no upload, no tracking. Works offline.">
+<title>MediaForge — tu taller multimedia en el navegador</title>
+<meta name="description" content="Editá y convertí video y audio directamente en tu navegador. Sin subir tus archivos, sin tracking y con soporte offline.">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0d1117" media="(prefers-color-scheme: dark)">
@@ -28,15 +28,18 @@
 
 <link rel="stylesheet" href="./assets/css/base.css">
 <link rel="stylesheet" href="./assets/css/app.css">
+<link rel="stylesheet" href="./assets/css/forge.css">
 
 <script>
   // Apply the stored theme before first paint so there is no flash.
+  const root = document.documentElement;
+  const params = new URLSearchParams(location.search);
+  root.dataset.interface = params.get('ui') === 'legacy' ? 'legacy' : 'forge';
   try {
     const stored = JSON.parse(localStorage.getItem('media-forge:prefs') || '{}');
     const theme = stored.theme === 'light' || stored.theme === 'dark'
       ? stored.theme
       : (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-    const root = document.documentElement;
     root.dataset.theme = theme;
     if (stored.accent) root.dataset.accent = stored.accent;
   } catch (_) { /* first visit */ }
@@ -44,7 +47,7 @@
 </head>
 
 <body>
-<a class="skip-link" href="#inspector">Skip to the controls</a>
+<a class="skip-link" href="#inspector">Ir al área de trabajo</a>
 
 <div class="app" id="app" data-queue="shown" data-log="hidden" data-empty="true">
 
@@ -57,7 +60,7 @@
           <path d="M13.4 6.6a5.6 5.6 0 01-9.2 4.1" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
           <path d="M6.4 11.4l-2.2-.7-.3 2.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
-        media-forge
+        MediaForge
       </span>
       <button type="button" class="icon-button" data-action="toggle-queue" aria-label="Toggle the queue" aria-pressed="true" title="Queue (⌘B)">
         <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M2 3h12v1.6H2zM2 7.2h12v1.6H2zM2 11.4h12V13H2z"/></svg>
@@ -65,11 +68,19 @@
     </div>
 
     <div class="topbar-group topbar-actions">
-      <button type="button" class="text-button" data-action="add-files">Add files</button>
-      <button type="button" class="primary-button" data-action="start-all" disabled>Convert all</button>
+      <button type="button" class="forge-command-trigger forge-only" data-forge-action="open-launcher">
+        <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="8.7" cy="8.7" r="5.4" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m12.8 12.8 4 4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        <span>Buscar una acción</span>
+        <kbd>⌘K</kbd>
+      </button>
+      <button type="button" class="text-button legacy-only" data-action="add-files">Add files</button>
+      <button type="button" class="primary-button" data-action="start-all" disabled><span class="forge-only">Procesar cola</span><span class="legacy-only">Convert all</span></button>
     </div>
 
     <div class="topbar-group">
+      <span class="forge-local-pill forge-only" title="El motor actual procesa los archivos en este dispositivo">
+        Local
+      </span>
       <button type="button" class="icon-button" data-action="toggle-log" aria-label="Toggle the FFmpeg log" aria-pressed="false" title="Log (⌘L)">
         <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M2 2.5h12V4H2zM2 6h8v1.5H2zM2 9.5h12V11H2zM2 13h6v1.5H2z"/></svg>
       </button>
@@ -84,6 +95,29 @@
   </header>
 
   <div class="workspace" id="workspace">
+
+    <nav class="forge-rail forge-only" aria-label="Espacios de trabajo">
+      <button type="button" class="forge-nav-item is-active" data-forge-action="home" aria-current="page">
+        <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><path d="M3 9.2 10 3l7 6.2v7.3a.5.5 0 0 1-.5.5h-4.2v-5H7.7v5H3.5a.5.5 0 0 1-.5-.5z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+        <span>Inicio</span>
+      </button>
+      <button type="button" class="forge-nav-item" data-forge-workspace="quick">
+        <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><path d="m11.2 2.5-7 9h5l-.9 6 7.5-9.5h-5.2z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+        <span>Rápidas</span>
+      </button>
+      <button type="button" class="forge-nav-item" data-forge-workspace="studio">
+        <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><rect x="2.5" y="4" width="15" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M6 2.5v3M14 2.5v3M7.5 8l5 2-5 2z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+        <span>Studio</span>
+      </button>
+      <button type="button" class="forge-nav-item" data-forge-workspace="documents">
+        <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><path d="M5 2.5h7l3 3V17H5z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M12 2.5V6h3M7.5 9h5M7.5 12h5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        <span>Docs</span>
+      </button>
+      <button type="button" class="forge-nav-item" data-forge-workspace="batch">
+        <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><rect x="3" y="3" width="5" height="5" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="12" y="3" width="5" height="5" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="3" y="12" width="5" height="5" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="12" y="12" width="5" height="5" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+        <span>Batch</span>
+      </button>
+    </nav>
 
     <aside class="queue" id="queue" aria-label="Queue">
       <div class="queue-head">
@@ -100,24 +134,94 @@
 
     <main class="inspector" id="inspector" tabindex="-1">
       <div class="empty-state" id="empty-state">
-        <svg viewBox="0 0 64 64" width="56" height="56" aria-hidden="true">
-          <rect x="6" y="14" width="52" height="36" rx="6" fill="none" stroke="currentColor" stroke-width="3"/>
-          <path d="M26 26l14 8-14 8z" fill="currentColor"/>
-          <path d="M6 24h52M14 14v-4M50 14v-4" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
-        </svg>
-        <h1>Drop video or audio here</h1>
-        <p>Everything happens in this tab. Your files are never uploaded, and there is
-          no server to upload them to.</p>
-        <div class="empty-actions">
-          <button type="button" class="primary-button" data-action="add-files">Choose files</button>
-          <button type="button" class="text-button" data-action="load-sample">Make a test clip</button>
+        <div class="legacy-only">
+          <svg viewBox="0 0 64 64" width="56" height="56" aria-hidden="true">
+            <rect x="6" y="14" width="52" height="36" rx="6" fill="none" stroke="currentColor" stroke-width="3"/>
+            <path d="M26 26l14 8-14 8z" fill="currentColor"/>
+            <path d="M6 24h52M14 14v-4M50 14v-4" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+          </svg>
+          <h1>Drop video or audio here</h1>
+          <p>Everything happens in this tab. Your files are never uploaded, and there is no server to upload them to.</p>
+          <div class="empty-actions">
+            <button type="button" class="primary-button" data-action="add-files">Choose files</button>
+            <button type="button" class="text-button" data-action="load-sample">Make a test clip</button>
+          </div>
+          <p class="empty-note"><a href="./about.html">How it works</a></p>
         </div>
-        <p class="empty-note" id="engine-note">
-          <a href="./about.html">How it works</a>
-        </p>
+
+        <div class="forge-home forge-only">
+          <section class="forge-home-hero" aria-labelledby="forge-home-title">
+            <p class="forge-eyebrow">Taller multimedia · privado por diseño</p>
+            <h1 id="forge-home-title">¿Qué querés hacer con tus archivos?</h1>
+            <p>Describí el resultado o empezá por un archivo. MediaForge te lleva al espacio correcto.</p>
+            <form class="forge-intent-form" id="forge-intent-form" role="search">
+              <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><circle cx="8.7" cy="8.7" r="5.4" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m12.8 12.8 4 4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+              <label class="sr-only" for="forge-intent">Buscar una acción</label>
+              <input class="forge-intent-input" id="forge-intent" type="search" autocomplete="off" placeholder="Ej: cortar un video, unir PDFs, convertir a MP3…">
+              <button type="submit" class="primary-button">Buscar</button>
+            </form>
+          </section>
+
+          <div class="forge-home-grid">
+            <section class="forge-dropzone" aria-labelledby="forge-drop-title">
+              <div class="forge-drop-icon" aria-hidden="true">
+                <svg viewBox="0 0 28 28" width="28" height="28"><path d="M14 18V5m0 0L9.5 9.5M14 5l4.5 4.5M5 17v4.5A1.5 1.5 0 0 0 6.5 23h15a1.5 1.5 0 0 0 1.5-1.5V17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </div>
+              <p class="forge-eyebrow">Archivo primero</p>
+              <h2 id="forge-drop-title">Soltá video o audio para empezar</h2>
+              <p>Analizamos el archivo y te mostramos sólo acciones compatibles.</p>
+              <div class="forge-drop-actions">
+                <button type="button" class="primary-button" data-action="add-files">Elegir archivos</button>
+                <button type="button" class="text-button" data-action="load-sample">Probar sin archivo</button>
+              </div>
+              <p class="forge-local-note">Se procesa en este dispositivo. Nada se sube.</p>
+            </section>
+
+            <section class="forge-continue" aria-labelledby="forge-ready-title">
+              <div class="forge-section-head">
+                <div>
+                  <p class="forge-eyebrow">Disponible ahora</p>
+                  <h2 id="forge-ready-title">Acciones listas para usar</h2>
+                </div>
+                <button type="button" class="text-button" data-forge-action="open-launcher" data-availability="available">Ver todas</button>
+              </div>
+              <div class="forge-suggestions" aria-label="Acciones disponibles">
+                <button type="button" class="forge-tool-chip" data-tool-id="video-converter"><span>Convertir video</span><small>Formatos, calidad y resolución</small></button>
+                <button type="button" class="forge-tool-chip" data-tool-id="video-trim"><span>Cortar video</span><small>Elegí el rango visualmente</small></button>
+                <button type="button" class="forge-tool-chip" data-tool-id="audio-converter"><span>Convertir o extraer audio</span><small>MP3, M4A, WAV, FLAC y OGG</small></button>
+                <button type="button" class="forge-tool-chip" data-tool-id="video-resize"><span>Redimensionar video</span><small>Presets seguros, sin agrandar</small></button>
+              </div>
+            </section>
+          </div>
+
+          <section class="forge-suggestion-strip" aria-labelledby="forge-suggestions-title">
+            <div class="forge-section-head">
+              <div>
+                <p class="forge-eyebrow">Un solo sistema</p>
+                <h2 id="forge-suggestions-title">55 acciones, cuatro espacios de trabajo</h2>
+              </div>
+              <button type="button" class="text-button" data-forge-action="open-launcher">Explorar catálogo</button>
+            </div>
+            <div class="forge-workspace-summary">
+              <button type="button" data-forge-workspace="quick"><strong>Rápidas</strong><span>Una intención, un resultado</span></button>
+              <button type="button" data-forge-workspace="studio"><strong>Studio</strong><span>Composición y timeline</span></button>
+              <button type="button" data-forge-workspace="documents"><strong>Documentos</strong><span>Páginas, seguridad y PDF</span></button>
+              <button type="button" data-forge-workspace="batch"><strong>Batch</strong><span>Carpetas, formatos y presets</span></button>
+            </div>
+          </section>
+
+          <p class="empty-note" id="engine-note"><a href="./about.html">Cómo funciona el procesamiento local</a></p>
+        </div>
       </div>
 
       <div class="detail" id="detail" hidden>
+        <div class="forge-workspace-toolbar forge-only">
+          <div>
+            <span class="forge-eyebrow">Herramienta activa</span>
+            <strong id="forge-active-tool">Conversión multimedia</strong>
+          </div>
+          <button type="button" class="text-button" data-forge-action="open-launcher" data-availability="available">Cambiar acción</button>
+        </div>
         <header class="detail-head">
           <h2 class="detail-name" id="detail-name"></h2>
           <p class="detail-facts" id="detail-facts"></p>
@@ -136,6 +240,7 @@
         </details>
 
         <div class="detail-foot">
+          <span class="quick-foot-summary forge-only" id="quick-foot-summary" hidden></span>
           <button type="button" class="primary-button" data-action="start-one">Convert</button>
           <button type="button" class="text-button" data-action="cancel-one" hidden>Cancel</button>
           <button type="button" class="text-button" data-action="download-one" hidden>Download</button>
@@ -161,6 +266,32 @@
     <span class="status-item status-offline" id="status-offline" hidden>offline ready</span>
   </footer>
 </div>
+
+<dialog class="sheet forge-launcher" id="tool-launcher" aria-labelledby="tool-launcher-title">
+  <div class="forge-launcher-head">
+    <div>
+      <p class="forge-eyebrow">Catálogo MediaForge</p>
+      <h2 id="tool-launcher-title">Encontrá la acción, no la aplicación</h2>
+    </div>
+    <button type="button" class="icon-button" data-forge-action="close-launcher" aria-label="Cerrar catálogo">✕</button>
+  </div>
+  <form class="forge-launcher-search" id="forge-launcher-form" role="search">
+    <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><circle cx="8.7" cy="8.7" r="5.4" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m12.8 12.8 4 4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+    <label class="sr-only" for="forge-launcher-query">Buscar herramientas</label>
+    <input id="forge-launcher-query" type="search" autocomplete="off" placeholder="Ej: achicar PDF, extraer audio, MOV a MP4…">
+  </form>
+  <div class="forge-filter-row" aria-label="Filtrar por espacio de trabajo">
+    <button type="button" class="forge-filter is-active" data-filter-workspace="all">Todas</button>
+    <button type="button" class="forge-filter" data-filter-workspace="quick">Rápidas</button>
+    <button type="button" class="forge-filter" data-filter-workspace="studio">Studio</button>
+    <button type="button" class="forge-filter" data-filter-workspace="documents">Documentos</button>
+    <button type="button" class="forge-filter" data-filter-workspace="batch">Batch</button>
+    <span class="forge-filter-separator" aria-hidden="true"></span>
+    <button type="button" class="forge-filter" data-filter-availability="available">Disponibles hoy</button>
+  </div>
+  <p class="forge-result-summary" id="forge-result-summary" aria-live="polite"></p>
+  <div class="forge-tool-list" id="forge-tool-list"></div>
+</dialog>
 
 <div class="drop-overlay" id="drop-overlay" hidden>
   <div class="drop-card">
@@ -254,5 +385,6 @@
 </noscript>
 
 <script type="module" src="./src/main.js"></script>
+<script type="module" src="./src/forge-shell.js"></script>
 </body>
 </html>

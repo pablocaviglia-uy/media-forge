@@ -16,13 +16,9 @@
  * the single exception called out at IMMUTABLE.
  */
 
-// v2 adds the timeline, so the app now imports three modules that were not in
-// the previous pre-cache. Stale-while-revalidate would get there on its own,
-// but not before one reload in which a returning visitor holds the new
-// `app.js` and a cache that has never heard of what it imports — fine online,
-// broken offline. A new cache name closes that window by installing the whole
-// set at once.
-const CACHE_VERSION = 'v2';
+// v5 expands the focused workspace from trimming to the three geometric video
+// tools. A new cache keeps their controller, styles and command state atomic.
+const CACHE_VERSION = 'v5';
 const CACHE_NAME = `media-forge-${CACHE_VERSION}`;
 
 /**
@@ -40,6 +36,7 @@ const PRECACHE = [
   './manifest.webmanifest',
   './assets/css/base.css',
   './assets/css/app.css',
+  './assets/css/forge.css',
   './assets/css/about.css',
   './assets/icons/icon.svg',
   './assets/icons/icon-180.png',
@@ -49,6 +46,8 @@ const PRECACHE = [
   './assets/og.png',
   './src/main.js',
   './src/app.js',
+  './src/forge-shell.js',
+  './src/catalog/tool-catalog.js',
   './src/ffmpeg/client.js',
   './src/ffmpeg/capabilities.js',
   './src/ffmpeg/failures.js',
@@ -56,6 +55,7 @@ const PRECACHE = [
   './src/media/commands.js',
   './src/media/formats.js',
   './src/media/probe.js',
+  './src/media/quick-tools.js',
   './src/media/timeline.js',
   './src/media/zip.js',
   './src/storage/prefs.js',

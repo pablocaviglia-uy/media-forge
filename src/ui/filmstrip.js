@@ -40,20 +40,27 @@ export const canDraw = (video) =>
  * the event that means the new one is ready. The timeout is there because a
  * seek past the end, or into a damaged region, never fires it at all.
  */
-function seek(video, time) {
+function seek(video, time, signal) {
   return new Promise((resolve) => {
     let settled = false;
     const done = (ok) => {
       if (settled) return;
       settled = true;
       video.removeEventListener('seeked', onSeeked);
+      signal?.removeEventListener('abort', onAbort);
       clearTimeout(timer);
       resolve(ok);
     };
     const onSeeked = () => done(true);
+    const onAbort = () => done(false);
     const timer = setTimeout(() => done(false), 2000);
 
+    if (signal?.aborted) {
+      done(false);
+      return;
+    }
     video.addEventListener('seeked', onSeeked);
+    signal?.addEventListener('abort', onAbort, { once: true });
     try {
       video.currentTime = Math.max(0, Math.min(time, video.duration - 0.001));
     } catch {
@@ -87,7 +94,7 @@ export async function drawStrip(video, { from, to, count, signal }) {
     // whole-file strip should be a frame from the film, not the black one that
     // so many files open on.
     const time = from + (span * (i + 0.5)) / count;
-    if (!(await seek(video, time))) continue;
+    if (!(await seek(video, time, signal))) continue;
     if (signal?.aborted) break;
 
     const canvas = document.createElement('canvas');

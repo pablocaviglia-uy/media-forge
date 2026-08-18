@@ -22,7 +22,6 @@
  *                                       · done {id, outputs} | failed {id, error}
  */
 
-import createFFmpegCore from '../../assets/ffmpeg/ffmpeg-core.js';
 import {
   parseProbe,
   parseProbeJson,
@@ -31,7 +30,7 @@ import {
   progressFromReport,
 } from '../media/probe.js';
 import { parseEncoders, parseMuxers } from '../ffmpeg/capabilities.js';
-import { isFatal } from '../ffmpeg/failures.js';
+import { failedMessage } from '../ffmpeg/failures.js';
 
 /** Where the core's own `.wasm` (and, for the threaded build, its worker) live. */
 const CORE_BASE = new URL('../../assets/ffmpeg/', import.meta.url);
@@ -39,6 +38,11 @@ const CORE_BASE = new URL('../../assets/ffmpeg/', import.meta.url);
 let core = null;
 let log = [];
 let currentJob = null;
+// Once WebAssembly traps, even inspecting its filesystem is unsafe. The client
+// will terminate this worker after receiving `fatal: true`; retaining the
+// failure here also prevents an already-queued message from reaching the core
+// in the small window before that termination arrives.
+let fatalFailure = null;
 
 /** Collected so a failure can show the last thing FFmpeg said before it died. */
 const LOG_LIMIT = 400;
@@ -50,6 +54,20 @@ function record(entry) {
 
 function send(message, transfer = []) {
   self.postMessage(message, transfer);
+}
+
+/**
+ * Report a request failure and quarantine a core whose heap can no longer be
+ * trusted. The returned flag lets callers avoid cleanup through that core.
+ */
+function fail(id, error, details = {}) {
+  const message = failedMessage(id, error, details);
+  if (message.fatal) {
+    fatalFailure = error instanceof Error ? error : new Error(message.error);
+    core = null;
+  }
+  send(message);
+  return message.fatal;
 }
 
 /* ------------------------------------------------------------------ *
@@ -72,6 +90,10 @@ async function chooseVariant() {
 
 async function load() {
   const { manifest, variant, isolated } = await chooseVariant();
+  const descriptor = manifest.variants[variant];
+  const coreUrl = new URL(descriptor.files.core.path, CORE_BASE);
+  const variantBase = new URL('./', coreUrl);
+  const { default: createFFmpegCore } = await import(coreUrl.href);
 
   core = await createFFmpegCore({
     // Without this the runtime resolves `ffmpeg-core.wasm` against this
@@ -79,7 +101,10 @@ async function load() {
     // Nothing else is overridden: `print` and `printErr` in particular must be
     // left alone, because the runtime restores whatever was passed in over the
     // core's own versions, and the core's versions are what feed `setLogger`.
-    locateFile: (path) => new URL(path, CORE_BASE).href,
+    // Resolve beside the selected glue module. The multi-threaded artefacts
+    // live under `assets/ffmpeg/mt/`; using CORE_BASE here would silently load
+    // the single-threaded wasm while reporting the `mt` manifest entry.
+    locateFile: (path) => new URL(path, variantBase).href,
   });
 
   core.setLogger(({ type, message }) => {
@@ -103,7 +128,7 @@ async function load() {
     if (currentJob && Number.isFinite(time) && time > 0) reportProgress({ time: time / 1e6, speed: null });
   });
 
-  return { variant, isolated, threads: manifest.variants[variant].threads, capabilities: probeCapabilities() };
+  return { variant, isolated, threads: descriptor.threads, capabilities: probeCapabilities() };
 }
 
 /** Ask the core what it can actually encode, rather than assuming. */
@@ -316,10 +341,17 @@ async function run(id, plan, file) {
       outputs.map((output) => output.bytes.buffer)
     );
   } catch (error) {
-    send({ type: 'failed', id, error: error.message, log: log.map((entry) => entry.message).slice(-40) });
+    // This catch intentionally owns ordinary conversion failures, but traps
+    // must still cross the worker boundary as fatal so the client replaces the
+    // instance rather than reusing a poisoned heap.
+    fail(id, error, { log: log.map((entry) => entry.message).slice(-40) });
   } finally {
     currentJob = null;
-    for (const name of listWorkingFiles()) removeQuietly(name);
+    // A trapped core cannot safely answer even `FS.readdir`; the whole worker
+    // is about to be discarded by the client, which also discards its heap.
+    if (!fatalFailure) {
+      for (const name of listWorkingFiles()) removeQuietly(name);
+    }
     log = [];
   }
 }
@@ -353,6 +385,10 @@ self.addEventListener('message', async (event) => {
   const message = event.data;
 
   try {
+    // Normally the client terminates us as soon as it sees `fatal: true`. This
+    // guard covers requests that were already queued before that reply arrived.
+    if (fatalFailure) throw fatalFailure;
+
     switch (message.type) {
       case 'load': {
         const details = await load();
@@ -376,6 +412,6 @@ self.addEventListener('message', async (event) => {
     // client is told to replace this worker rather than send it more work.
     // This core traps of its own accord once an instance has run long enough,
     // so the path is exercised in ordinary use, not only after a bad file.
-    send({ type: 'failed', id: message.id, error: error.message, fatal: isFatal(error) });
+    fail(message.id, error);
   }
 });

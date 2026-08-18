@@ -234,8 +234,9 @@ Worth knowing before you file an issue:
   it takes half the time.
 - **Everything is per tab.** Closing it loses the queue. Nothing is persisted
   because nothing should be: these are your files.
-- Browsers vary: module workers need Firefox 114+ or Safari 15+, and the
-  threaded core needs headers no static host sends by default.
+- Browsers vary: module workers need Firefox 114+, MediaForge's SIMD core needs
+  Safari 16.4+, and the threaded core needs headers no static host sends by
+  default.
 
 ## Contributing
 

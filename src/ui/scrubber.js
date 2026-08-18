@@ -28,34 +28,68 @@ import { drawStrip, fitCount, canDraw } from './filmstrip.js';
 const WHEEL = 0.88;
 
 /**
- * @param {{file: File, info: object, onChange?: (selection: {from: number, to: number}) => void}} options
- * @returns {{node: HTMLElement, destroy: () => void, selection: () => {from: number, to: number}}}
+ * @param {{file: File, info: object,
+ *   initialSelection?: {from: number, to: number}, mediaControls?: boolean,
+ *   locale?: 'en' | 'es',
+ *   onChange?: (selection: {from: number, to: number}) => void}} options
+ * @returns {{node: HTMLElement, destroy: () => void,
+ *   selection: () => {from: number, to: number}, setDisabled: (disabled: boolean) => void}}
  */
-export function createScrubber({ file, info, onChange }) {
+export function createScrubber({ file, info, initialSelection = null, mediaControls = false, locale = 'en', onChange }) {
   const duration = Number.isFinite(info?.duration) ? info.duration : 0;
   const fps = info?.video?.fps || null;
   const least = step('frame', fps);
+  const copy = locale === 'es'
+    ? {
+        from: 'Inicio de la selección',
+        to: 'Final de la selección',
+        timeline: 'Timeline del video',
+        whole: 'archivo completo',
+        zoom: 'de zoom',
+        decodeError: 'Este navegador no puede reproducir el archivo, por eso no hay miniaturas ni vista previa. El timeline y el procesamiento siguen disponibles.',
+      }
+    : {
+        from: 'Selection start',
+        to: 'Selection end',
+        timeline: 'Video timeline',
+        whole: 'whole file',
+        zoom: 'zoom',
+        decodeError: 'This browser cannot decode this file, so there are no thumbnails and no preview. The timeline still works, and so does everything downstream of it.',
+      };
 
   let view = fit(duration);
   let selection = selectAll(duration);
-  let playhead = 0;
+  if (initialSelection) {
+    selection = setFrom(selection, initialSelection.from, { duration, least });
+    selection = setTo(selection, initialSelection.to, { duration, least });
+  }
+  let playhead = selection.from;
   let looping = false;
+  let disabled = false;
+  let stripSeeks = 0;
   let strip = null; // AbortController for the filmstrip being drawn
+  let stopDrag = null;
 
   const url = URL.createObjectURL(file);
-  const video = el('video', { class: 'scrub-video', src: url, preload: 'auto', playsInline: true });
+  const video = el('video', {
+    class: 'scrub-video',
+    src: url,
+    preload: 'auto',
+    playsInline: true,
+    controls: mediaControls,
+  });
   video.muted = false;
 
   const frames = el('div', { class: 'scrub-frames' });
   const shade = el('div', { class: 'scrub-shade' });
   const band = el('div', { class: 'scrub-band' });
-  const handleFrom = el('div', { class: 'scrub-handle scrub-handle-from', attrs: { role: 'slider', tabindex: '0', 'aria-label': 'Selection start' } });
-  const handleTo = el('div', { class: 'scrub-handle scrub-handle-to', attrs: { role: 'slider', tabindex: '0', 'aria-label': 'Selection end' } });
+  const handleFrom = el('div', { class: 'scrub-handle scrub-handle-from', attrs: { role: 'slider', tabindex: '0', 'aria-label': copy.from } });
+  const handleTo = el('div', { class: 'scrub-handle scrub-handle-to', attrs: { role: 'slider', tabindex: '0', 'aria-label': copy.to } });
   const needle = el('div', { class: 'scrub-needle' });
-  const track = el('div', { class: 'scrub-track', attrs: { tabindex: '0' } }, [frames, shade, band, handleFrom, handleTo, needle]);
+  const track = el('div', { class: 'scrub-track', attrs: { tabindex: '0', 'aria-label': copy.timeline } }, [frames, shade, band, handleFrom, handleTo, needle]);
 
-  const fromField = el('input', { class: 'scrub-time', attrs: { 'aria-label': 'Selection start', spellcheck: 'false' } });
-  const toField = el('input', { class: 'scrub-time', attrs: { 'aria-label': 'Selection end', spellcheck: 'false' } });
+  const fromField = el('input', { class: 'scrub-time', attrs: { 'aria-label': copy.from, spellcheck: 'false' } });
+  const toField = el('input', { class: 'scrub-time', attrs: { 'aria-label': copy.to, spellcheck: 'false' } });
   const lengthOut = el('span', { class: 'scrub-length' });
   const zoomOut = el('span', { class: 'scrub-zoom' });
   const note = el('p', { class: 'scrub-note' });
@@ -100,8 +134,15 @@ export function createScrubber({ file, info, onChange }) {
     if (document.activeElement !== toField) toField.value = formatTimestamp(selection.to);
     lengthOut.textContent = `${lengthOf(selection).toFixed(2)}s`;
 
+    for (const [handle, value] of [[handleFrom, selection.from], [handleTo, selection.to]]) {
+      handle.setAttribute('aria-valuemin', '0');
+      handle.setAttribute('aria-valuemax', String(duration));
+      handle.setAttribute('aria-valuenow', String(value));
+      handle.setAttribute('aria-valuetext', formatTimestamp(value));
+    }
+
     const times = duration / spanOf(view);
-    zoomOut.textContent = times < 1.02 ? 'whole file' : `${times < 10 ? times.toFixed(1) : Math.round(times)}× zoom`;
+    zoomOut.textContent = times < 1.02 ? copy.whole : `${times < 10 ? times.toFixed(1) : Math.round(times)}× ${copy.zoom}`;
   }
 
   /** The strip is redrawn whenever the window changes, but not while it is still changing. */
@@ -114,21 +155,35 @@ export function createScrubber({ file, info, onChange }) {
   async function renderStrip() {
     if (!canDraw(video)) return;
     strip?.abort();
-    strip = new AbortController();
+    const controller = new AbortController();
+    strip = controller;
 
     const width = track.clientWidth || 640;
     const count = fitCount(width);
-    const drawn = await drawStrip(video, { from: view.start, to: view.end, count, signal: strip.signal });
-    if (strip.signal.aborted) return;
+    stripSeeks += 1;
+    try {
+      const drawn = await drawStrip(video, {
+        from: view.start,
+        to: view.end,
+        count,
+        signal: controller.signal,
+      });
+      // A newer zoom owns the strip now. Checking the local controller (and
+      // its identity) prevents an older async draw from painting over it.
+      if (controller.signal.aborted || strip !== controller) return;
 
-    frames.textContent = '';
-    for (const frame of drawn) {
-      frame.canvas.className = 'scrub-frame';
-      frames.append(frame.canvas);
+      frames.textContent = '';
+      for (const frame of drawn) {
+        frame.canvas.className = 'scrub-frame';
+        frames.append(frame.canvas);
+      }
+    } finally {
+      stripSeeks = Math.max(0, stripSeeks - 1);
+      // Thumbnail seeks are implementation detail, not user navigation. The
+      // desired playhead may have changed while drawing, so restore its latest
+      // value rather than whichever thumbnail happened to be drawn last.
+      if (!controller.signal.aborted && strip === controller) video.currentTime = playhead;
     }
-    // Seeking to build the strip moved the playhead; put the picture back where
-    // the person left it.
-    video.currentTime = playhead;
   }
 
   /* ---------------------------------------------------------------- *
@@ -152,10 +207,34 @@ export function createScrubber({ file, info, onChange }) {
     paint();
   }
 
+  function commitField(field, which) {
+    const time = parseTimestamp(field.value);
+    if (time === null) {
+      paint();
+      return;
+    }
+
+    const before = selection[which];
+    if (which === 'from') selection = setFrom(selection, time, { duration, least });
+    else selection = setTo(selection, time, { duration, least });
+    setPlayhead(selection[which]);
+    if (Math.abs(selection[which] - before) > 0.0005) change();
+    else paint();
+  }
+
+  function commitOnEnter(event, field, which) {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    commitField(field, which);
+    field.select();
+  }
+
   /** Dragging: whichever handle is grabbed, or the playhead on bare track. */
   function startDrag(event, what) {
+    if (disabled) return;
     event.preventDefault();
     track.focus();
+    stopDrag?.();
 
     const move = (moveEvent) => {
       const time = timeAtEvent(moveEvent);
@@ -169,9 +248,13 @@ export function createScrubber({ file, info, onChange }) {
     const stop = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', stop);
+      window.removeEventListener('pointercancel', stop);
+      if (stopDrag === stop) stopDrag = null;
     };
+    stopDrag = stop;
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', stop);
+    window.addEventListener('pointercancel', stop);
   }
 
   /* ---------------------------------------------------------------- *
@@ -181,12 +264,15 @@ export function createScrubber({ file, info, onChange }) {
   const off = [
     on(handleFrom, 'pointerdown', (event) => startDrag(event, 'from')),
     on(handleTo, 'pointerdown', (event) => startDrag(event, 'to')),
+    on(handleFrom, 'keydown', (event) => nudgeHandle(event, 'from')),
+    on(handleTo, 'keydown', (event) => nudgeHandle(event, 'to')),
     on(track, 'pointerdown', (event) => {
       if (event.target === handleFrom || event.target === handleTo) return;
       startDrag(event, 'playhead');
     }),
 
     on(track, 'wheel', (event) => {
+      if (disabled) return;
       // Only when it is a zoom gesture; a plain vertical wheel should still
       // scroll the page it is sitting on.
       if (!event.ctrlKey && !event.metaKey && Math.abs(event.deltaX) <= Math.abs(event.deltaY)) return;
@@ -198,6 +284,7 @@ export function createScrubber({ file, info, onChange }) {
     }, { passive: false }),
 
     on(track, 'keydown', (event) => {
+      if (disabled) return;
       const size = event.altKey ? step('fine', fps) : event.shiftKey ? step('second', fps) : step('frame', fps);
       const key = event.key;
 
@@ -240,24 +327,17 @@ export function createScrubber({ file, info, onChange }) {
 
     // Typed timestamps, for when the number is already known and dragging to it
     // would be silly.
-    on(fromField, 'change', () => {
-      const time = parseTimestamp(fromField.value);
-      if (time === null) { paint(); return; }
-      selection = setFrom(selection, time, { duration, least });
-      setPlayhead(selection.from);
-      change();
-    }),
-    on(toField, 'change', () => {
-      const time = parseTimestamp(toField.value);
-      if (time === null) { paint(); return; }
-      selection = setTo(selection, time, { duration, least });
-      setPlayhead(selection.to);
-      change();
-    }),
+    on(fromField, 'change', () => commitField(fromField, 'from')),
+    on(toField, 'change', () => commitField(toField, 'to')),
+    on(fromField, 'blur', () => commitField(fromField, 'from')),
+    on(toField, 'blur', () => commitField(toField, 'to')),
+    on(fromField, 'keydown', (event) => commitOnEnter(event, fromField, 'from')),
+    on(toField, 'keydown', (event) => commitOnEnter(event, toField, 'to')),
 
     // Looping the selection is the only way to actually check the edges before
     // committing to them, which is what most simple trimmers leave out.
     on(video, 'timeupdate', () => {
+      if (stripSeeks > 0) return;
       playhead = video.currentTime;
       if (looping && playhead >= selection.to) {
         video.currentTime = selection.from;
@@ -275,12 +355,33 @@ export function createScrubber({ file, info, onChange }) {
     on(video, 'loadedmetadata', paint),
     on(video, 'loadeddata', () => { renderStrip(); paint(); }),
     on(video, 'error', () => {
-      note.textContent =
-        'This browser cannot decode this file, so there are no thumbnails and no preview. ' +
-        'The timeline still works, and so does everything downstream of it.';
+      note.textContent = copy.decodeError;
       note.hidden = false;
     }),
   ];
+
+  function nudgeHandle(event, which) {
+    if (disabled) return;
+    const size = event.altKey ? step('fine', fps) : event.shiftKey ? step('second', fps) : step('frame', fps);
+    let target = null;
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') {
+      target = selection[which] - size;
+    } else if (event.key === 'ArrowRight' || event.key === 'ArrowUp') {
+      target = selection[which] + size;
+    } else if (event.key === 'Home') {
+      target = which === 'from' ? 0 : selection.from;
+    } else if (event.key === 'End') {
+      target = which === 'to' ? duration : selection.to;
+    }
+    if (target === null) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    if (which === 'from') selection = setFrom(selection, target, { duration, least });
+    else selection = setTo(selection, target, { duration, least });
+    setPlayhead(selection[which]);
+    change();
+  }
 
   function toggleLoop() {
     looping = !looping;
@@ -301,7 +402,20 @@ export function createScrubber({ file, info, onChange }) {
   return {
     node,
     selection: () => ({ ...selection }),
+    setDisabled(value) {
+      disabled = Boolean(value);
+      if (disabled) video.pause();
+      node.inert = disabled;
+      node.dataset.disabled = String(disabled);
+      node.setAttribute('aria-disabled', String(disabled));
+      track.tabIndex = disabled ? -1 : 0;
+      handleFrom.tabIndex = disabled ? -1 : 0;
+      handleTo.tabIndex = disabled ? -1 : 0;
+      fromField.disabled = disabled;
+      toField.disabled = disabled;
+    },
     destroy() {
+      stopDrag?.();
       for (const remove of off) remove?.();
       clearTimeout(stripTimer);
       strip?.abort();

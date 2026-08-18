@@ -12,7 +12,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isFatal } from '../src/ffmpeg/failures.js';
+import { failedMessage, isFatal } from '../src/ffmpeg/failures.js';
 
 test('a trap inside WebAssembly means the instance is finished', () => {
   // The one this core produces on its own once an instance has been alive long
@@ -52,4 +52,44 @@ test('it takes a message as readily as an error, and refuses to guess at nothing
   for (const nothing of ['', null, undefined, 0, {}, []]) {
     assert.equal(isFatal(nothing), false, String(nothing));
   }
+});
+
+test('worker failure replies make traps part of the recovery protocol', () => {
+  const reply = failedMessage('job-7', new WebAssembly.RuntimeError('memory access out of bounds'), {
+    log: ['frame=12', 'memory access out of bounds'],
+  });
+
+  assert.deepEqual(reply, {
+    type: 'failed',
+    id: 'job-7',
+    error: 'memory access out of bounds',
+    fatal: true,
+    log: ['frame=12', 'memory access out of bounds'],
+  });
+});
+
+test('ordinary FFmpeg refusals use the same reply without discarding the core', () => {
+  const reply = failedMessage('job-8', new Error('Invalid argument'), { log: ['Invalid argument'] });
+
+  assert.equal(reply.type, 'failed');
+  assert.equal(reply.id, 'job-8');
+  assert.equal(reply.error, 'Invalid argument');
+  assert.equal(reply.fatal, false);
+  assert.deepEqual(reply.log, ['Invalid argument']);
+});
+
+test('failure reply invariants cannot be overwritten by incidental details', () => {
+  const reply = failedMessage('job-9', new Error('RuntimeError: unreachable'), {
+    type: 'done',
+    id: 'another-job',
+    error: 'looks fine',
+    fatal: false,
+  });
+
+  assert.deepEqual(reply, {
+    type: 'failed',
+    id: 'job-9',
+    error: 'RuntimeError: unreachable',
+    fatal: true,
+  });
 });

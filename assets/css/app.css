@@ -1,5 +1,10 @@
 /* Application chrome: the shell, the queue, the inspector and the log. */
 
+html:not([data-interface="forge"]) .forge-only,
+html[data-interface="forge"] .legacy-only {
+  display: none !important;
+}
+
 /* ------------------------------------------------------------------ *
  * Shell
  * ------------------------------------------------------------------ */

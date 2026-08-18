@@ -51,3 +51,33 @@ export function isFatal(error) {
   if (typeof message !== 'string' || !message) return false;
   return FATAL.test(message);
 }
+
+/**
+ * Build the worker protocol's failure reply in one place.
+ *
+ * A fatal flag is part of the recovery contract rather than optional
+ * decoration: the client uses it to terminate the worker and instantiate a
+ * fresh core. Keeping that decision next to `isFatal` makes it much harder for
+ * an inner catch (such as the one around a conversion) to accidentally swallow
+ * a trap and hand the poisoned instance to the next job.
+ *
+ * @param {string|undefined} id request being answered
+ * @param {unknown} error thrown value
+ * @param {object} [details] extra protocol fields such as the FFmpeg log
+ * @returns {{type: 'failed', id: string|undefined, error: string, fatal: boolean}}
+ */
+export function failedMessage(id, error, details = {}) {
+  const message = error instanceof Error
+    ? error.message
+    : typeof error === 'string'
+      ? error
+      : 'FFmpeg failed.';
+
+  return {
+    ...details,
+    type: 'failed',
+    id,
+    error: message || 'FFmpeg failed.',
+    fatal: isFatal(error),
+  };
+}

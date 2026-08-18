@@ -262,6 +262,20 @@ test('frames are dropped first, then the picture is turned, then it is scaled', 
   assert.ok(chain.includes("scale='min(iw,854)':'min(ih,480)'"), chain);
 });
 
+test('focused transformations can repair odd output dimensions at the end', () => {
+  const chain = chainOf({ rotate: 90, resolution: '480', evenDimensions: true });
+  const pad = 'pad=ceil(iw/2)*2:ceil(ih/2)*2';
+
+  assert.ok(chain.endsWith(pad), chain);
+  assert.ok(chain.indexOf('transpose=') < chain.indexOf('scale='), chain);
+  assert.ok(chain.indexOf('scale=') < chain.indexOf(pad), chain);
+});
+
+test('even-dimension padding is strictly opt in', () => {
+  assert.equal(chainOf({ rotate: 90 }).includes('pad='), false);
+  assert.equal(chainOf({ rotate: 90, evenDimensions: true }), 'transpose=1,pad=ceil(iw/2)*2:ceil(ih/2)*2');
+});
+
 test('rotation and flips map to the filters FFmpeg actually has', () => {
   assert.equal(chainOf({ rotate: 90 }), 'transpose=1');
   assert.equal(chainOf({ rotate: 270 }), 'transpose=2');

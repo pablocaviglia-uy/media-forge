@@ -146,6 +146,7 @@ export const DEFAULT_OPTIONS = {
   trimEnd: null,
   rotate: 0, // degrees clockwise: 0, 90, 180, 270
   flip: 'none', // none | horizontal | vertical
+  evenDimensions: false,
   gifFps: 12,
   gifWidth: 480,
   dither: true,
@@ -234,6 +235,8 @@ function rotationFilters(options) {
  * drop frames first so nothing downstream works on frames that get thrown
  * away, then rotate, then scale — so a chosen height describes the picture
  * the user will actually see, not the one before it was turned on its side.
+ * Optional padding stays last so it repairs the dimensions produced by every
+ * earlier geometric transformation without changing their proportions.
  */
 function videoFilters(options, { height = null, fps = null } = {}) {
   const filters = [];
@@ -241,6 +244,7 @@ function videoFilters(options, { height = null, fps = null } = {}) {
   filters.push(...rotationFilters(options));
   const scale = scaleFilter(height);
   if (scale) filters.push(scale);
+  if (options.evenDimensions) filters.push('pad=ceil(iw/2)*2:ceil(ih/2)*2');
   return filters;
 }
 
