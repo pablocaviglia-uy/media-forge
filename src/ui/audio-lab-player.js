@@ -9,20 +9,16 @@
 
 import { el, formatDuration, formatTimestamp, on, parseTimestamp } from './dom.js';
 import {
+  MIN_SPAN,
   fit,
-  followPlayback,
   fractionOf,
   lengthOf,
   nudge,
   pan,
-  reveal,
   selectAll,
-  setFrom,
-  setTo,
   spanOf,
   step,
   timeAt,
-  zoom,
 } from '../media/timeline.js';
 
 export const AUDIO_LAB_MIN_SELECTION = 0.01;
@@ -30,6 +26,7 @@ export const AUDIO_LAB_MIN_SELECTION = 0.01;
 const WHEEL_ZOOM = 0.82;
 const BUTTON_SEEK_SECONDS = 10;
 const LOOP_EPSILON = 0.008;
+const REGION_DRAG_THRESHOLD_PX = 6;
 
 let nextAudioLabPlayerId = 1;
 
@@ -52,20 +49,40 @@ const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
  * cross. Missing ranges mean the whole file, matching MediaForge's scrubber.
  */
 export function normalizeAudioSelection(selection, duration, least = AUDIO_LAB_MIN_SELECTION) {
+  return normalizeBoundedAudioSelection(selection, duration, null, least);
+}
+
+function normalizeAudioSelectionBounds(bounds, duration) {
   const total = finiteDuration(duration);
   if (!total) return { from: 0, to: 0 };
 
-  const minimum = Math.min(total, Math.max(0, finiteTime(least, AUDIO_LAB_MIN_SELECTION)));
-  if (!selection) return selectAll(total);
+  if (!bounds || typeof bounds !== 'object') return selectAll(total);
+  const requestedFrom = Number(bounds.from ?? bounds.start);
+  const requestedTo = Number(bounds.to ?? bounds.end);
+  if (!Number.isFinite(requestedFrom) || !Number.isFinite(requestedTo) || requestedTo <= requestedFrom) {
+    return selectAll(total);
+  }
+  const from = clamp(requestedFrom, 0, total);
+  const to = clamp(requestedTo, from, total);
+  return to > from ? { from, to } : selectAll(total);
+}
 
-  const requestedFrom = finiteTime(selection.from, 0);
-  const requestedTo = finiteTime(selection.to, total);
-  let normalized = selectAll(total);
+function normalizeBoundedAudioSelection(selection, duration, bounds, least = AUDIO_LAB_MIN_SELECTION) {
+  const total = finiteDuration(duration);
+  if (!total) return { from: 0, to: 0 };
+
+  const limits = normalizeAudioSelectionBounds(bounds, total);
+  const available = Math.max(0, limits.to - limits.from);
+  const minimum = Math.min(available, Math.max(0, finiteTime(least, AUDIO_LAB_MIN_SELECTION)));
+  if (!selection) return { ...limits };
+
+  const requestedFrom = finiteTime(selection.from, limits.from);
+  const requestedTo = finiteTime(selection.to, limits.to);
   // Set the far edge first. If an inverted external range arrives, the start
   // is then stopped just before it instead of silently swapping edge roles.
-  normalized = setTo(normalized, requestedTo, { duration: total, least: minimum });
-  normalized = setFrom(normalized, requestedFrom, { duration: total, least: minimum });
-  return normalized;
+  const to = clamp(requestedTo, limits.from + minimum, limits.to);
+  const from = clamp(requestedFrom, limits.from, to - minimum);
+  return { from, to };
 }
 
 /** Normalize amplitudes to min/max pairs in the browser-audio range. */
@@ -169,6 +186,20 @@ function clockLabel(current, duration) {
   return `${formatDuration(current)} / ${formatDuration(duration)}`;
 }
 
+function formatAudioLabDuration(value) {
+  const seconds = Math.max(0, finiteTime(value));
+  return seconds < 1 ? `${seconds.toFixed(3)} s` : formatDuration(seconds);
+}
+
+function formatAudioLabDurationAria(value) {
+  const seconds = Math.max(0, finiteTime(value));
+  if (seconds < 1) {
+    const milliseconds = Math.round(seconds * 1000);
+    return `${milliseconds} ${milliseconds === 1 ? 'milisegundo' : 'milisegundos'}`;
+  }
+  return formatDuration(seconds);
+}
+
 function button(label, action, text, attrs = {}) {
   return el('button', {
     type: 'button',
@@ -190,11 +221,15 @@ function button(label, action, text, attrs = {}) {
  * @param {number|null} [options.duration]
  * @param {Iterable<number|[number, number]|{min: number, max: number}>|null} [options.peaks]
  * @param {AudioLabSelection|null} [options.selection]
+ * @param {AudioLabSelection|null} [options.selectionBounds] Allowed range of the active fragment, on the root clock.
  * @param {boolean} [options.loop]
+ * @param {boolean} [options.preferSelectionPlayback]
+ * @param {number} [options.fragmentDepth]
+ * @param {'source'|0|1|2|3|4|5} [options.fragmentAccent]
  * @param {boolean} [options.disabled]
  * @param {(selection: AudioLabSelection, context: {source: string, commit: boolean}) => void} [options.onSelectionChange]
  * @param {(loop: boolean, context: {source: 'button'|'shortcut'}) => void} [options.onLoopChange]
- * @param {(selection: AudioLabSelection, context: {name: string, duration: number}) => void} [options.onCreateFragment]
+ * @param {(selection: AudioLabSelection, context: {name: string, duration: number}) => boolean|void|Promise<boolean>} [options.onCreateFragment]
  * @param {(state: {selection: AudioLabSelection, view: AudioLabView, currentTime: number, loop: boolean}) => void} [options.onOpenLab]
  * @returns {{
  *   node: HTMLElement,
@@ -203,6 +238,7 @@ function button(label, action, text, attrs = {}) {
  *   selection: () => AudioLabSelection,
  *   view: () => AudioLabView,
  *   seek: (seconds: number) => void,
+ *   togglePlayback: () => void,
  *   setSelection: (selection: AudioLabSelection, notify?: boolean) => void,
  *   focus: () => void,
  *   destroy: () => void,
@@ -219,7 +255,11 @@ export function createAudioLabPlayer(options = {}) {
     duration: null,
     peaks: null,
     selection: null,
+    selectionBounds: null,
     loop: false,
+    preferSelectionPlayback: false,
+    fragmentDepth: 0,
+    fragmentAccent: 'source',
     disabled: false,
     onSelectionChange: null,
     onLoopChange: null,
@@ -229,9 +269,12 @@ export function createAudioLabPlayer(options = {}) {
   };
   let duration = finiteDuration(config.duration);
   let pendingSelection = config.selection ? { ...config.selection } : null;
-  let selection = normalizeAudioSelection(config.selection, duration);
-  let selectionFollowsDuration = config.selection == null;
-  let view = fit(duration);
+  let selection = normalizeBoundedAudioSelection(config.selection, duration, config.selectionBounds);
+  let selectionFollowsBounds = config.selection == null;
+  const initialLimits = normalizeAudioSelectionBounds(config.selectionBounds, duration);
+  let view = initialLimits.to > initialLimits.from
+    ? { start: initialLimits.from, end: initialLimits.to }
+    : fit(duration);
   let peaks = normalizeAudioPeaks(config.peaks);
   let looping = Boolean(config.loop);
   let disabled = Boolean(config.disabled);
@@ -244,6 +287,7 @@ export function createAudioLabPlayer(options = {}) {
   let stopPointerDrag = null;
   let destroyed = false;
   let resizeObserver = null;
+  let fragmentCreationPending = false;
 
   const media = el('audio', {
     class: 'audio-lab-media sr-only',
@@ -259,7 +303,7 @@ export function createAudioLabPlayer(options = {}) {
   const help = el('p', {
     id: helpId,
     class: 'sr-only',
-    text: 'Espacio reproduce o pausa. L activa el loop. I y O marcan inicio y final. Las flechas mueven el cabezal; Shift mueve un segundo y Alt diez milisegundos.',
+    text: 'Arrastrá sobre la onda para seleccionar. Un clic mueve el cabezal. Espacio reproduce o pausa. L activa el loop. I y O marcan inicio y final. Las flechas mueven el cabezal; Shift mueve un segundo y Alt diez milisegundos.',
   });
 
   const canvas = el('canvas', {
@@ -272,7 +316,11 @@ export function createAudioLabPlayer(options = {}) {
     class: 'audio-lab-waveform-fallback',
     text: 'La forma de onda todavía no está disponible. Podés reproducir y elegir tiempos igualmente.',
   });
-  const selectionBand = el('span', { class: 'audio-lab-selection-band', attrs: { 'aria-hidden': 'true' } });
+  const selectionBadge = el('span', { class: 'audio-lab-selection-badge' });
+  const selectionBand = el('span', {
+    class: 'audio-lab-selection-band',
+    attrs: { 'aria-hidden': 'true' },
+  }, [selectionBadge]);
   const playhead = el('span', { class: 'audio-lab-playhead', attrs: { 'aria-hidden': 'true' } });
   const fromHandle = el('span', {
     class: 'audio-lab-selection-handle audio-lab-selection-from',
@@ -305,19 +353,27 @@ export function createAudioLabPlayer(options = {}) {
       'aria-keyshortcuts': 'ArrowLeft ArrowRight ArrowUp ArrowDown PageUp PageDown Home End',
     },
   });
+  const guidanceId = `${instanceId}-waveform-guidance`;
+  const waveformGuidance = el('p', {
+    id: guidanceId,
+    class: 'audio-lab-waveform-guidance',
+  }, [
+    el('span', { class: 'audio-lab-waveform-hint', text: 'Arrastrá para seleccionar · clic para mover el cabezal' }),
+    el('span', { class: 'audio-lab-shortcut-hint', text: 'Espacio: reproducir/pausar' }),
+  ]);
   const track = el('div', {
     class: 'audio-lab-waveform-track',
     attrs: {
       role: 'group',
       'aria-label': 'Forma de onda y selección',
+      'aria-describedby': guidanceId,
     },
-  }, [canvas, selectionBand, playhead, seekControl, fromHandle, toHandle, fallback]);
+  }, [canvas, selectionBand, playhead, seekControl, fromHandle, toHandle, fallback, waveformGuidance]);
 
   const playButton = button('Reproducir', 'play', '▶', { 'aria-keyshortcuts': 'Space' });
   const backButton = button(`Retroceder ${BUTTON_SEEK_SECONDS} segundos`, 'back', `−${BUTTON_SEEK_SECONDS}`);
   const forwardButton = button(`Avanzar ${BUTTON_SEEK_SECONDS} segundos`, 'forward', `+${BUTTON_SEEK_SECONDS}`);
   const timeOutput = el('output', { class: 'audio-lab-time', text: clockLabel(0, duration), attrs: { 'aria-live': 'off' } });
-  const playSelectionButton = button('Reproducir la selección', 'play-selection', 'Reproducir selección');
   const loopButton = button('Repetir la selección', 'loop', 'Loop', { 'aria-pressed': 'false', 'aria-keyshortcuts': 'L' });
   const zoomOutButton = button('Alejar la forma de onda', 'zoom-out', '−');
   const zoomInButton = button('Acercar la forma de onda', 'zoom-in', '+');
@@ -355,6 +411,7 @@ export function createAudioLabPlayer(options = {}) {
       'aria-labelledby': titleId,
       'aria-describedby': helpId,
       'aria-disabled': String(disabled),
+      'aria-keyshortcuts': 'Space L I O ArrowLeft ArrowRight',
       tabindex: '0',
     },
   }, [
@@ -368,14 +425,15 @@ export function createAudioLabPlayer(options = {}) {
     ]),
     track,
     el('div', { class: 'audio-lab-transport', attrs: { role: 'group', 'aria-label': 'Controles de reproducción' } }, [
+      el('span', { class: 'audio-lab-control-label', text: 'Transporte', attrs: { 'aria-hidden': 'true' } }),
       backButton,
       playButton,
       forwardButton,
       timeOutput,
-      playSelectionButton,
       loopButton,
     ]),
     el('div', { class: 'audio-lab-zoom-controls', attrs: { role: 'group', 'aria-label': 'Zoom de la forma de onda' } }, [
+      el('span', { class: 'audio-lab-control-label', text: 'Vista', attrs: { 'aria-hidden': 'true' } }),
       zoomOutButton,
       zoomInButton,
       fitButton,
@@ -383,6 +441,7 @@ export function createAudioLabPlayer(options = {}) {
       zoomOutput,
     ]),
     el('div', { class: 'audio-lab-selection-controls', attrs: { role: 'group', 'aria-label': 'Selección de audio' } }, [
+      el('span', { class: 'audio-lab-control-label', text: 'Región', attrs: { 'aria-hidden': 'true' } }),
       el('label', {}, [el('span', { text: 'Inicio' }), fromField]),
       el('span', { text: '→', attrs: { 'aria-hidden': 'true' } }),
       el('label', {}, [el('span', { text: 'Final' }), toField]),
@@ -435,30 +494,122 @@ export function createAudioLabPlayer(options = {}) {
     return clamp(finiteTime(media.currentTime), 0, duration || Number.MAX_SAFE_INTEGER);
   }
 
+  function selectionLimits(bounds = config.selectionBounds, total = duration) {
+    return normalizeAudioSelectionBounds(bounds, total);
+  }
+
+  function contextView() {
+    const limits = selectionLimits();
+    return limits.to > limits.from ? { start: limits.from, end: limits.to } : fit(0);
+  }
+
+  function viewForRange(range) {
+    const limits = selectionLimits();
+    const contextSpan = Math.max(0, limits.to - limits.from);
+    if (!(contextSpan > 0)) return fit(0);
+    const wanted = Math.min(
+      contextSpan,
+      Math.max(Math.min(MIN_SPAN, contextSpan), finiteTime(range?.to) - finiteTime(range?.from)),
+    );
+    const start = clamp(finiteTime(range?.from, limits.from), limits.from, limits.to - wanted);
+    return { start, end: start + wanted };
+  }
+
+  function revealInContext(currentView, time) {
+    const limits = selectionLimits();
+    const width = Math.min(spanOf(currentView), Math.max(0, limits.to - limits.from));
+    if (!(width > 0)) return contextView();
+    if (time >= currentView.start && time <= currentView.end) return currentView;
+    const start = clamp(time < currentView.start ? time : time - width, limits.from, limits.to - width);
+    return { start, end: start + width };
+  }
+
+  function followInContext(currentView, time) {
+    const limits = selectionLimits();
+    const width = Math.min(spanOf(currentView), Math.max(0, limits.to - limits.from));
+    if (!(width > 0)) return contextView();
+    const start = clamp(time - width / 2, limits.from, limits.to - width);
+    const next = { start, end: start + width };
+    return next.start === currentView.start && next.end === currentView.end ? currentView : next;
+  }
+
+  function selectionCoversLimits() {
+    const limits = selectionLimits();
+    return Math.abs(selection.from - limits.from) <= LOOP_EPSILON
+      && Math.abs(selection.to - limits.to) <= LOOP_EPSILON;
+  }
+
+  function clampMediaClockToContext() {
+    if (!(duration > 0)) return;
+    const limits = selectionLimits();
+    const target = clamp(currentTime(), limits.from, limits.to);
+    if (Math.abs(target - currentTime()) <= 1e-9) return;
+    try { media.currentTime = target; } catch { /* an unloaded media clock is best-effort */ }
+  }
+
+  function intendedPlaybackScope() {
+    return looping || Boolean(config.preferSelectionPlayback) || !selectionCoversLimits()
+      ? 'selection'
+      : 'all';
+  }
+
+  function normalizedFragmentDepth() {
+    const value = Number(config.fragmentDepth);
+    return Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+  }
+
+  function normalizedFragmentAccent() {
+    if (config.fragmentAccent === 'source') return 'source';
+    const value = Number(config.fragmentAccent);
+    return Number.isInteger(value) && value >= 0 && value <= 5 ? String(value) : 'source';
+  }
+
   function renderTransport() {
     const playing = media.paused === false && media.ended !== true;
+    const visibleScope = playing ? playbackScope : intendedPlaybackScope();
+    const limits = selectionLimits();
+    const hasSubselection = !selectionCoversLimits();
     playButton.textContent = playing ? '❚❚' : '▶';
-    playButton.setAttribute('aria-label', playing ? 'Pausar' : 'Reproducir');
+    const playLabel = playing ? 'Pausar' : visibleScope === 'selection' ? 'Reproducir selección' : 'Reproducir';
+    playButton.setAttribute('aria-label', playLabel);
+    playButton.setAttribute('title', playLabel);
     playButton.setAttribute('aria-pressed', String(playing));
     loopButton.setAttribute('aria-pressed', String(looping));
     loopButton.dataset.active = String(looping);
     timeOutput.textContent = clockLabel(currentTime(), duration);
+    node.dataset.playbackScope = visibleScope;
 
     const canUseMedia = !disabled && sourceAvailable();
     const canUseRange = canUseMedia && duration > 0 && selection.to > selection.from;
     playButton.disabled = !canUseMedia;
-    backButton.disabled = !canUseMedia;
-    forwardButton.disabled = !canUseMedia;
-    playSelectionButton.disabled = !canUseRange;
+    backButton.disabled = !canUseMedia || currentTime() <= limits.from + LOOP_EPSILON;
+    forwardButton.disabled = !canUseMedia || currentTime() >= limits.to - LOOP_EPSILON;
     loopButton.disabled = !canUseRange;
-    createFragmentButton.disabled = !canUseRange || typeof config.onCreateFragment !== 'function';
+    const canCreateFragment = canUseRange
+      && hasSubselection
+      && !fragmentCreationPending
+      && typeof config.onCreateFragment === 'function';
+    createFragmentButton.disabled = !canCreateFragment;
+    createFragmentButton.textContent = fragmentCreationPending
+      ? 'Creando fragmento…'
+      : canCreateFragment
+      ? `Crear fragmento · ${formatAudioLabDuration(lengthOf(selection))}`
+      : 'Crear fragmento';
+    createFragmentButton.setAttribute(
+      'aria-label',
+      fragmentCreationPending
+        ? 'Creando fragmento'
+        : canCreateFragment
+        ? `Crear fragmento de ${formatAudioLabDurationAria(lengthOf(selection))}`
+        : 'Seleccioná un rango más pequeño para crear un fragmento',
+    );
     openLabButton.disabled = disabled || typeof config.onOpenLab !== 'function';
     openLabButton.hidden = typeof config.onOpenLab !== 'function';
     createFragmentButton.hidden = typeof config.onCreateFragment !== 'function';
   }
 
   function renderGeometry() {
-    const total = duration || 1;
+    const limits = selectionLimits();
     const visibleSpan = spanOf(view);
     const fraction = (time) => clamp(fractionOf(view, time), 0, 1);
     const from = fraction(selection.from);
@@ -480,14 +631,14 @@ export function createAudioLabPlayer(options = {}) {
     fromHandle.dataset.edge = from <= 1e-6 ? 'start' : 'inside';
     toHandle.dataset.edge = to >= 1 - 1e-6 ? 'end' : 'inside';
 
-    seekControl.setAttribute('aria-valuemin', '0');
-    seekControl.setAttribute('aria-valuemax', String(duration));
+    seekControl.setAttribute('aria-valuemin', String(limits.from));
+    seekControl.setAttribute('aria-valuemax', String(limits.to));
     seekControl.setAttribute('aria-valuenow', String(currentTime()));
     seekControl.setAttribute('aria-valuetext', formatTimestamp(currentTime()));
-    const least = Math.min(AUDIO_LAB_MIN_SELECTION, duration);
+    const least = Math.min(AUDIO_LAB_MIN_SELECTION, Math.max(0, limits.to - limits.from));
     for (const [handle, value, min, max] of [
-      [fromHandle, selection.from, 0, Math.max(0, selection.to - least)],
-      [toHandle, selection.to, Math.min(duration, selection.from + least), duration],
+      [fromHandle, selection.from, limits.from, Math.max(limits.from, selection.to - least)],
+      [toHandle, selection.to, Math.min(limits.to, selection.from + least), limits.to],
     ]) {
       handle.setAttribute('aria-valuemin', String(min));
       handle.setAttribute('aria-valuemax', String(max));
@@ -497,13 +648,29 @@ export function createAudioLabPlayer(options = {}) {
 
     if (globalThis.document?.activeElement !== fromField) fromField.value = formatTimestamp(selection.from);
     if (globalThis.document?.activeElement !== toField) toField.value = formatTimestamp(selection.to);
-    selectionLength.textContent = formatDuration(lengthOf(selection));
-    const zoomTimes = duration > 0 ? duration / visibleSpan : 1;
+    const selectedDuration = lengthOf(selection);
+    selectionLength.textContent = formatAudioLabDuration(selectedDuration);
+    selectionLength.setAttribute(
+      'aria-label',
+      `Duración de la selección: ${formatAudioLabDurationAria(selectedDuration)}`,
+    );
+    selectionBadge.textContent = formatAudioLabDuration(selectedDuration);
+    const contextSpan = Math.max(0, limits.to - limits.from);
+    const zoomTimes = contextSpan > 0 ? contextSpan / visibleSpan : 1;
     zoomOutput.textContent = `${zoomTimes < 1.02 ? 1 : zoomTimes < 10 ? zoomTimes.toFixed(1) : Math.round(zoomTimes)}×`;
-    fitButton.disabled = disabled || !(duration > 0) || visibleSpan >= total - 1e-6;
-    fitSelectionButton.disabled = disabled || !(selection.to > selection.from);
-    zoomInButton.disabled = disabled || !(duration > 0) || visibleSpan <= AUDIO_LAB_MIN_SELECTION + 1e-6;
-    zoomOutButton.disabled = disabled || !(duration > 0) || visibleSpan >= total - 1e-6;
+    const wholeContextView = contextView();
+    const selectionView = viewForRange(selection);
+    const matchesView = (candidate) => (
+      Math.abs(view.start - candidate.start) <= 1e-6
+      && Math.abs(view.end - candidate.end) <= 1e-6
+    );
+    fitButton.disabled = disabled || !(duration > 0) || matchesView(wholeContextView);
+    fitSelectionButton.disabled = disabled || !(selection.to > selection.from) || matchesView(selectionView);
+    zoomInButton.disabled = disabled || !(duration > 0) || visibleSpan <= Math.min(MIN_SPAN, contextSpan) + 1e-6;
+    zoomOutButton.disabled = disabled || !(duration > 0) || visibleSpan >= contextSpan - 1e-6;
+    const fitLabel = config.preferSelectionPlayback ? 'Mostrar todo el fragmento' : 'Mostrar todo el audio';
+    fitButton.setAttribute('aria-label', fitLabel);
+    fitButton.setAttribute('title', fitLabel);
   }
 
   function paintWaveform() {
@@ -521,7 +688,11 @@ export function createAudioLabPlayer(options = {}) {
     if (canvas.height !== height) canvas.height = height;
     context.setTransform?.(ratio, 0, 0, ratio, 0, 0);
     context.clearRect(0, 0, cssWidth, cssHeight);
-    context.strokeStyle = peaks.length ? '#77ded0' : 'rgba(160, 180, 174, 0.45)';
+    let identityColor = '';
+    try {
+      identityColor = globalThis.getComputedStyle?.(node)?.getPropertyValue('--audio-lab-identity')?.trim() || '';
+    } catch { /* computed styles are best-effort in tests and detached DOM */ }
+    context.strokeStyle = peaks.length ? identityColor || '#77ded0' : 'rgba(160, 180, 174, 0.45)';
     context.lineWidth = 1;
     context.beginPath();
     if (!peaks.length) {
@@ -545,6 +716,8 @@ export function createAudioLabPlayer(options = {}) {
     nameNode.textContent = String(config.name || 'Audio');
     node.dataset.disabled = String(disabled);
     node.dataset.loop = String(looping);
+    node.dataset.fragmentDepth = String(normalizedFragmentDepth());
+    node.dataset.accent = normalizedFragmentAccent();
     node.setAttribute('aria-disabled', String(disabled));
     fromField.disabled = disabled || !(duration > 0);
     toField.disabled = disabled || !(duration > 0);
@@ -571,33 +744,35 @@ export function createAudioLabPlayer(options = {}) {
   function applySelection(next, { source = 'api', notify = false, commit = true } = {}) {
     if (destroyed) return;
     pendingSelection = next ? { ...next } : null;
-    selection = normalizeAudioSelection(next, duration);
-    selectionFollowsDuration = false;
+    selection = normalizeBoundedAudioSelection(next, duration, config.selectionBounds);
+    selectionFollowsBounds = next == null;
     render();
     if (notify) emitSelection(source, commit);
   }
 
   function setSelectionEdge(which, value, context) {
     if (!(duration > 0)) return;
-    const least = Math.min(AUDIO_LAB_MIN_SELECTION, duration);
+    const limits = selectionLimits();
+    const least = Math.min(AUDIO_LAB_MIN_SELECTION, Math.max(0, limits.to - limits.from));
     selection = which === 'from'
-      ? setFrom(selection, value, { duration, least })
-      : setTo(selection, value, { duration, least });
+      ? { from: clamp(finiteTime(value), limits.from, Math.max(limits.from, selection.to - least)), to: selection.to }
+      : { from: selection.from, to: clamp(finiteTime(value), Math.min(limits.to, selection.from + least), limits.to) };
     pendingSelection = { ...selection };
-    selectionFollowsDuration = false;
+    selectionFollowsBounds = false;
     render();
     emitSelection(context.source, context.commit);
   }
 
   function seek(seconds, { follow = true } = {}) {
     if (destroyed || !(duration > 0)) return;
-    let target = clamp(finiteTime(seconds), 0, duration);
+    const limits = selectionLimits();
+    let target = clamp(finiteTime(seconds), limits.from, limits.to);
     if (playbackScope === 'selection' && media.paused === false) {
       target = clamp(target, selection.from, selection.to);
     }
     try { media.currentTime = target; } catch { return; }
     const previousView = view;
-    if (follow) view = reveal(view, target, duration);
+    if (follow) view = revealInContext(view, target);
     render();
     if (view !== previousView) paintWaveform();
   }
@@ -627,8 +802,8 @@ export function createAudioLabPlayer(options = {}) {
       && (final || boundaryJump || (media.paused === false && media.seeking !== true));
     if (mayFollow) {
       view = reducedMotionPreferred()
-        ? reveal(view, currentTime(), duration)
-        : followPlayback(view, currentTime(), duration);
+        ? revealInContext(view, currentTime())
+        : followInContext(view, currentTime());
     }
     render();
     if (view !== previousView) paintWaveform();
@@ -684,31 +859,30 @@ export function createAudioLabPlayer(options = {}) {
       media.pause();
       return;
     }
-    playbackScope = looping ? 'selection' : 'all';
+    playbackScope = intendedPlaybackScope();
     if (playbackScope === 'selection' && (currentTime() < selection.from || currentTime() >= selection.to)) {
       seek(selection.from, { follow: true });
-    } else if (duration > 0 && currentTime() >= duration - LOOP_EPSILON) {
-      seek(0, { follow: true });
+    } else {
+      const limits = selectionLimits();
+      if (duration > 0 && currentTime() >= limits.to - LOOP_EPSILON) {
+        seek(limits.from, { follow: true });
+      }
     }
     startMedia();
   }
 
-  function playSelection() {
-    if (disabled || !(selection.to > selection.from) || !sourceAvailable()) return;
-    playbackScope = 'selection';
-    if (currentTime() < selection.from || currentTime() >= selection.to - LOOP_EPSILON) {
+  function synchronizePlaybackScope() {
+    if (media.paused !== false) return;
+    playbackScope = intendedPlaybackScope();
+    if (playbackScope === 'selection' && (currentTime() < selection.from || currentTime() >= selection.to)) {
       seek(selection.from, { follow: true });
     }
-    startMedia();
   }
 
   function toggleLoop(source) {
     if (disabled || !(selection.to > selection.from)) return;
     looping = !looping;
-    if (looping && media.paused === false) {
-      playbackScope = 'selection';
-      if (currentTime() < selection.from || currentTime() >= selection.to) seek(selection.from);
-    }
+    synchronizePlaybackScope();
     render();
     announce(looping ? 'Loop de la selección activado.' : 'Loop desactivado.');
     config.onLoopChange?.(looping, { source });
@@ -716,7 +890,14 @@ export function createAudioLabPlayer(options = {}) {
 
   function changeZoom(factor, at = currentTime()) {
     if (!(duration > 0)) return;
-    view = zoom(view, factor, at, duration);
+    const limits = selectionLimits();
+    const contextSpan = Math.max(0, limits.to - limits.from);
+    if (!(contextSpan > 0)) return;
+    const minimum = Math.min(MIN_SPAN, contextSpan);
+    const width = clamp(spanOf(view) * factor, minimum, contextSpan);
+    const where = clamp(fractionOf(view, at), 0, 1);
+    const start = clamp(at - where * width, limits.from, limits.to - width);
+    view = { start, end: start + width };
     render();
     paintWaveform();
   }
@@ -728,10 +909,135 @@ export function createAudioLabPlayer(options = {}) {
     return timeAt(view, fraction);
   }
 
+  function waveformTime(event) {
+    const limits = selectionLimits();
+    const visibleFrom = clamp(view.start, limits.from, limits.to);
+    const visibleTo = clamp(view.end, visibleFrom, limits.to);
+    return clamp(eventTime(event), visibleFrom, visibleTo);
+  }
+
   function stopDrag({ cancelled = false } = {}) {
     const active = stopPointerDrag;
     stopPointerDrag = null;
     active?.(cancelled);
+  }
+
+  function beginWaveformGesture(event) {
+    if (
+      disabled
+      || !(duration > 0)
+      || event.isPrimary === false
+      || (event.button != null && event.button !== 0)
+      || event.target?.closest?.('.audio-lab-selection-handle')
+    ) return;
+    const target = globalThis.window || globalThis;
+    if (typeof target.addEventListener !== 'function') return;
+
+    stopDrag({ cancelled: true });
+    const pointerId = event.pointerId;
+    const pointerType = String(event.pointerType || 'mouse');
+    const originX = finiteTime(event.clientX);
+    const originY = finiteTime(event.clientY);
+    const anchor = waveformTime(event);
+    const initial = { ...selection };
+    const initialPending = pendingSelection ? { ...pendingSelection } : null;
+    const initialFollowsBounds = selectionFollowsBounds;
+    let selecting = false;
+    let abandoned = false;
+    let changed = false;
+
+    const ownsPointer = (moveEvent) => (
+      pointerId == null || moveEvent.pointerId == null || moveEvent.pointerId === pointerId
+    );
+    const sameSelection = (left, right) => (
+      Math.abs(left.from - right.from) <= 1e-9 && Math.abs(left.to - right.to) <= 1e-9
+    );
+    const rangeAt = (moveEvent) => {
+      const at = waveformTime(moveEvent);
+      const limits = selectionLimits();
+      const visibleFrom = clamp(view.start, limits.from, limits.to);
+      const visibleTo = clamp(view.end, visibleFrom, limits.to);
+      const minimum = Math.min(AUDIO_LAB_MIN_SELECTION, Math.max(0, visibleTo - visibleFrom));
+      let from = Math.min(anchor, at);
+      let to = Math.max(anchor, at);
+      if (to - from < minimum) {
+        if (at >= anchor) to = Math.min(visibleTo, from + minimum);
+        else from = Math.max(visibleFrom, to - minimum);
+      }
+      return normalizeBoundedAudioSelection({ from, to }, duration, {
+        from: visibleFrom,
+        to: visibleTo,
+      });
+    };
+    const updateRegion = (moveEvent) => {
+      const next = rangeAt(moveEvent);
+      if (sameSelection(next, selection)) return;
+      changed = true;
+      applySelection(next, { source: 'waveform', notify: true, commit: false });
+    };
+    const move = (moveEvent) => {
+      if (!ownsPointer(moveEvent) || abandoned) return;
+      const deltaX = Math.abs(finiteTime(moveEvent.clientX) - originX);
+      const deltaY = Math.abs(finiteTime(moveEvent.clientY) - originY);
+      if (!selecting) {
+        if (pointerType === 'touch' && deltaY >= REGION_DRAG_THRESHOLD_PX && deltaY > deltaX) {
+          abandoned = true;
+          return;
+        }
+        if (deltaX < REGION_DRAG_THRESHOLD_PX) return;
+        selecting = true;
+        node.dataset.dragging = 'selection';
+      }
+      moveEvent.preventDefault?.();
+      updateRegion(moveEvent);
+    };
+    const finish = (cancelled = false, upEvent = null) => {
+      target.removeEventListener('pointermove', move);
+      target.removeEventListener('pointerup', up);
+      target.removeEventListener('pointercancel', cancel);
+      target.removeEventListener('keydown', escape);
+      delete node.dataset.dragging;
+      if (cancelled) {
+        if (selecting && changed) {
+          selection = initial;
+          pendingSelection = initialPending;
+          selectionFollowsBounds = initialFollowsBounds;
+          render();
+          if (!destroyed) emitSelection('waveform-cancel', true);
+        }
+      } else if (selecting) {
+        if (upEvent) updateRegion(upEvent);
+        if (!destroyed) {
+          playbackScope = intendedPlaybackScope();
+          seek(selection.from, { follow: false });
+          emitSelection('waveform', true);
+        }
+      } else if (!abandoned && upEvent && !destroyed) {
+        seek(waveformTime(upEvent), { follow: false });
+      }
+      if (!destroyed && !cancelled && !abandoned) seekControl.focus?.({ preventScroll: true });
+    };
+    const up = (upEvent) => {
+      if (!ownsPointer(upEvent)) return;
+      stopPointerDrag = null;
+      finish(false, upEvent);
+    };
+    const cancel = (cancelEvent) => {
+      if (!ownsPointer(cancelEvent)) return;
+      stopPointerDrag = null;
+      finish(true);
+    };
+    const escape = (keyEvent) => {
+      if (keyEvent.key !== 'Escape') return;
+      keyEvent.preventDefault?.();
+      stopPointerDrag = null;
+      finish(true);
+    };
+    stopPointerDrag = (cancelled) => finish(cancelled);
+    target.addEventListener('pointermove', move);
+    target.addEventListener('pointerup', up);
+    target.addEventListener('pointercancel', cancel);
+    target.addEventListener('keydown', escape);
   }
 
   function beginHandleDrag(event, which) {
@@ -742,7 +1048,7 @@ export function createAudioLabPlayer(options = {}) {
     stopDrag({ cancelled: true });
     const initial = { ...selection };
     const initialPending = pendingSelection ? { ...pendingSelection } : null;
-    const initialFollowsDuration = selectionFollowsDuration;
+    const initialFollowsBounds = selectionFollowsBounds;
     let moved = false;
     const move = (moveEvent) => {
       moved = true;
@@ -756,7 +1062,7 @@ export function createAudioLabPlayer(options = {}) {
       if (cancelled) {
         selection = initial;
         pendingSelection = initialPending;
-        selectionFollowsDuration = initialFollowsDuration;
+        selectionFollowsBounds = initialFollowsBounds;
         render();
         if (moved && !destroyed) emitSelection('pointer-cancel', true);
       } else if (moved) emitSelection('pointer', true);
@@ -777,12 +1083,14 @@ export function createAudioLabPlayer(options = {}) {
 
   function handleSelectionKey(event, which) {
     if (disabled || !(duration > 0)) return;
+    const limits = selectionLimits();
+    const least = Math.min(AUDIO_LAB_MIN_SELECTION, Math.max(0, limits.to - limits.from));
     const amount = event.altKey ? step('fine') : event.shiftKey ? step('second') : step('frame', null);
     let next = null;
     if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') next = selection[which] - amount;
     else if (event.key === 'ArrowRight' || event.key === 'ArrowUp') next = selection[which] + amount;
-    else if (event.key === 'Home') next = which === 'from' ? 0 : selection.from + Math.min(AUDIO_LAB_MIN_SELECTION, duration);
-    else if (event.key === 'End') next = which === 'to' ? duration : selection.to - Math.min(AUDIO_LAB_MIN_SELECTION, duration);
+    else if (event.key === 'Home') next = which === 'from' ? limits.from : selection.from + least;
+    else if (event.key === 'End') next = which === 'to' ? limits.to : selection.to - least;
     if (next == null) return;
     event.preventDefault();
     event.stopPropagation();
@@ -791,14 +1099,15 @@ export function createAudioLabPlayer(options = {}) {
 
   function handleSeekKey(event) {
     if (disabled || !(duration > 0)) return;
+    const limits = selectionLimits();
     let next = null;
     const amount = event.altKey ? step('fine') : event.shiftKey ? step('second') : step('frame', null);
     if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') next = currentTime() - amount;
     else if (event.key === 'ArrowRight' || event.key === 'ArrowUp') next = currentTime() + amount;
     else if (event.key === 'PageDown') next = currentTime() - BUTTON_SEEK_SECONDS;
     else if (event.key === 'PageUp') next = currentTime() + BUTTON_SEEK_SECONDS;
-    else if (event.key === 'Home') next = 0;
-    else if (event.key === 'End') next = duration;
+    else if (event.key === 'Home') next = limits.from;
+    else if (event.key === 'End') next = limits.to;
     if (next == null) return;
     event.preventDefault();
     event.stopPropagation();
@@ -824,28 +1133,48 @@ export function createAudioLabPlayer(options = {}) {
     return !['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes(tag) && !event.target?.isContentEditable;
   }
 
-  function applyKnownDuration(nextDuration) {
+  function applyKnownDuration(nextDuration, previousBounds = config.selectionBounds) {
     const next = finiteDuration(nextDuration);
-    if (!next || next === duration) return;
+    if (!next) return;
+    if (next === duration) {
+      clampMediaClockToContext();
+      render();
+      return;
+    }
     const oldDuration = duration;
-    const wasWhole = selectionFollowsDuration
-      || (oldDuration > 0 && Math.abs(selection.from) < 1e-6 && Math.abs(selection.to - oldDuration) < 1e-6);
-    const viewWasWhole = oldDuration <= 0
-      || (Math.abs(view.start) < 1e-6 && Math.abs(view.end - Math.max(oldDuration, spanOf(fit(oldDuration)))) < 1e-6);
+    const oldLimits = normalizeAudioSelectionBounds(previousBounds, oldDuration);
+    const wasWhole = selectionFollowsBounds || (
+      oldDuration > 0
+      && Math.abs(selection.from - oldLimits.from) < 1e-6
+      && Math.abs(selection.to - oldLimits.to) < 1e-6
+    );
+    const oldContextView = { start: oldLimits.from, end: oldLimits.to };
+    const viewWasContext = oldDuration <= 0 || (
+      Math.abs(view.start - oldContextView.start) < 1e-6
+      && Math.abs(view.end - oldContextView.end) < 1e-6
+    );
     duration = next;
     config.duration = duration;
+    const limits = selectionLimits();
     selection = oldDuration <= 0 && pendingSelection
-      ? normalizeAudioSelection(pendingSelection, duration)
-      : wasWhole ? selectAll(duration) : normalizeAudioSelection(selection, duration);
-    selectionFollowsDuration = wasWhole;
-    pendingSelection = selectionFollowsDuration ? null : { ...selection };
-    view = viewWasWhole ? fit(duration) : pan(fit(Math.min(spanOf(view), duration)), view.start, duration);
+      ? normalizeBoundedAudioSelection(pendingSelection, duration, config.selectionBounds)
+      : wasWhole ? { ...limits } : normalizeBoundedAudioSelection(selection, duration, config.selectionBounds);
+    selectionFollowsBounds = wasWhole;
+    pendingSelection = selectionFollowsBounds ? null : { ...selection };
+    if (viewWasContext) view = contextView();
+    else {
+      const contextSpan = Math.max(0, limits.to - limits.from);
+      const width = Math.min(spanOf(view), contextSpan);
+      const start = clamp(view.start, limits.from, limits.to - width);
+      view = { start, end: start + width };
+    }
+    clampMediaClockToContext();
     render();
     paintWaveform();
   }
 
   function clearKnownDuration() {
-    if (!selectionFollowsDuration && duration > 0) pendingSelection = { ...selection };
+    if (!selectionFollowsBounds && duration > 0) pendingSelection = { ...selection };
     duration = 0;
     selection = { from: 0, to: 0 };
     view = fit(0);
@@ -901,24 +1230,58 @@ export function createAudioLabPlayer(options = {}) {
     }
   }
 
+  function createSelectedFragment() {
+    if (
+      disabled
+      || fragmentCreationPending
+      || typeof config.onCreateFragment !== 'function'
+      || selectionCoversLimits()
+      || !(selection.to > selection.from)
+    ) return;
+    const range = { ...selection };
+    const context = { name: String(config.name || 'Audio'), duration: lengthOf(range) };
+    let outcome;
+    try {
+      outcome = config.onCreateFragment(range, context);
+    } catch {
+      announce('No se pudo crear el fragmento.');
+      return;
+    }
+    if (!outcome || typeof outcome.then !== 'function') {
+      announce(outcome === false
+        ? 'No se pudo crear el fragmento.'
+        : `Fragmento de ${formatAudioLabDurationAria(lengthOf(range))} creado.`);
+      return;
+    }
+    fragmentCreationPending = true;
+    render();
+    Promise.resolve(outcome).then((created) => {
+      if (destroyed) return;
+      fragmentCreationPending = false;
+      render();
+      announce(created === true
+        ? `Fragmento de ${formatAudioLabDurationAria(lengthOf(range))} creado.`
+        : 'No se pudo crear el fragmento.');
+    }).catch(() => {
+      if (destroyed) return;
+      fragmentCreationPending = false;
+      render();
+      announce('No se pudo crear el fragmento.');
+    });
+  }
+
   removeListeners.push(
     on(playButton, 'click', togglePlayback),
     on(backButton, 'click', () => seek(currentTime() - BUTTON_SEEK_SECONDS)),
     on(forwardButton, 'click', () => seek(currentTime() + BUTTON_SEEK_SECONDS)),
-    on(playSelectionButton, 'click', playSelection),
     on(loopButton, 'click', () => toggleLoop('button')),
     on(zoomInButton, 'click', () => changeZoom(0.5)),
     on(zoomOutButton, 'click', () => changeZoom(2)),
-    on(fitButton, 'click', () => { view = fit(duration); render(); paintWaveform(); }),
-    on(fitSelectionButton, 'click', () => { view = audioViewForSelection(selection, duration); render(); paintWaveform(); }),
+    on(fitButton, 'click', () => { view = contextView(); render(); paintWaveform(); }),
+    on(fitSelectionButton, 'click', () => { view = viewForRange(selection); render(); paintWaveform(); }),
     on(markFromButton, 'click', () => setSelectionEdge('from', currentTime(), { source: 'mark', commit: true })),
     on(markToButton, 'click', () => setSelectionEdge('to', currentTime(), { source: 'mark', commit: true })),
-    on(createFragmentButton, 'click', () => {
-      if (disabled || typeof config.onCreateFragment !== 'function' || !(selection.to > selection.from)) return;
-      const range = { ...selection };
-      config.onCreateFragment?.(range, { name: String(config.name || 'Audio'), duration: lengthOf(range) });
-      announce(`Fragmento de ${formatDuration(lengthOf(range))} creado.`);
-    }),
+    on(createFragmentButton, 'click', createSelectedFragment),
     on(openLabButton, 'click', () => {
       if (disabled || typeof config.onOpenLab !== 'function') return;
       config.onOpenLab({
@@ -928,10 +1291,7 @@ export function createAudioLabPlayer(options = {}) {
         loop: looping,
       });
     }),
-    on(track, 'pointerdown', (event) => {
-      if (disabled || event.target === fromHandle || event.target === toHandle) return;
-      seek(eventTime(event), { follow: false });
-    }),
+    on(track, 'pointerdown', beginWaveformGesture),
     on(track, 'wheel', (event) => {
       if (disabled || !(duration > 0)) return;
       if (!event.ctrlKey && !event.metaKey && Math.abs(event.deltaX) <= Math.abs(event.deltaY)) return;
@@ -1013,6 +1373,7 @@ export function createAudioLabPlayer(options = {}) {
   }
 
   installSource();
+  clampMediaClockToContext();
   render();
   paintWaveform();
 
@@ -1021,6 +1382,7 @@ export function createAudioLabPlayer(options = {}) {
     media,
     update(next = {}) {
       if (destroyed) return;
+      const previousBounds = config.selectionBounds;
       const sourcePatch = own(next, 'blob') || own(next, 'url');
       const desiredUrl = own(next, 'url') ? next.url : own(next, 'blob') ? null : config.url;
       const desiredBlob = own(next, 'blob') ? next.blob : own(next, 'url') ? null : config.blob;
@@ -1036,21 +1398,43 @@ export function createAudioLabPlayer(options = {}) {
         duration = finiteDuration(config.duration);
         peaks = normalizeAudioPeaks(config.peaks);
         pendingSelection = own(next, 'selection') && next.selection ? { ...next.selection } : null;
-        selection = normalizeAudioSelection(pendingSelection, duration);
-        selectionFollowsDuration = !own(next, 'selection') || next.selection == null;
-        view = fit(duration);
+        selection = normalizeBoundedAudioSelection(pendingSelection, duration, config.selectionBounds);
+        selectionFollowsBounds = !own(next, 'selection') || next.selection == null;
+        view = contextView();
         playbackScope = 'all';
         installSource();
+        clampMediaClockToContext();
       } else {
         if (own(next, 'duration')) {
-          if (finiteDuration(next.duration)) applyKnownDuration(next.duration);
+          if (finiteDuration(next.duration)) applyKnownDuration(next.duration, previousBounds);
           else clearKnownDuration();
         }
         if (own(next, 'peaks')) peaks = normalizeAudioPeaks(next.peaks);
+        const previousLimits = normalizeAudioSelectionBounds(previousBounds, duration);
+        const nextLimits = selectionLimits();
+        const boundsChanged = own(next, 'selectionBounds') && (
+          Math.abs(previousLimits.from - nextLimits.from) > 1e-6
+          || Math.abs(previousLimits.to - nextLimits.to) > 1e-6
+        );
+        if (boundsChanged && !own(next, 'selection')) {
+          const followedPreviousBounds = selectionFollowsBounds || (
+            Math.abs(selection.from - previousLimits.from) <= LOOP_EPSILON
+            && Math.abs(selection.to - previousLimits.to) <= LOOP_EPSILON
+          );
+          selection = followedPreviousBounds
+            ? { ...nextLimits }
+            : normalizeBoundedAudioSelection(selection, duration, config.selectionBounds);
+          selectionFollowsBounds = followedPreviousBounds;
+          pendingSelection = selectionFollowsBounds ? null : { ...selection };
+        }
         if (own(next, 'selection')) {
           pendingSelection = next.selection ? { ...next.selection } : null;
-          selection = normalizeAudioSelection(next.selection, duration);
-          selectionFollowsDuration = next.selection == null;
+          selection = normalizeBoundedAudioSelection(next.selection, duration, config.selectionBounds);
+          selectionFollowsBounds = next.selection == null;
+        }
+        if (boundsChanged) {
+          view = contextView();
+          try { media.currentTime = clamp(currentTime(), nextLimits.from, nextLimits.to); } catch { /* best-effort */ }
         }
       }
       if (own(next, 'loop')) looping = Boolean(next.loop);
@@ -1058,12 +1442,26 @@ export function createAudioLabPlayer(options = {}) {
         disabled = Boolean(next.disabled);
         if (disabled) media.pause();
       }
+      if (
+        own(next, 'selection')
+        || own(next, 'selectionBounds')
+        || own(next, 'preferSelectionPlayback')
+        || own(next, 'loop')
+      ) synchronizePlaybackScope();
       render();
-      if (own(next, 'peaks') || own(next, 'duration') || own(next, 'selection') || sourceWillChange) paintWaveform();
+      if (
+        own(next, 'peaks')
+        || own(next, 'duration')
+        || own(next, 'selection')
+        || own(next, 'selectionBounds')
+        || own(next, 'fragmentAccent')
+        || sourceWillChange
+      ) paintWaveform();
     },
     selection: () => ({ ...selection }),
     view: () => ({ ...view }),
     seek: (seconds) => seek(seconds),
+    togglePlayback,
     setSelection(next, notify = false) {
       applySelection(next, { source: 'api', notify: Boolean(notify), commit: true });
     },

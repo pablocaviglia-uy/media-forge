@@ -565,13 +565,13 @@ test('Audio Lab expands in place, returns to the result and forwards editing cal
     );
     assert.equal(loopChanges[0][2].audioLabState.selectedNodeId, 'fragment-1');
     control.update({
-      audioLabStateByResult: { 'audio-1': { selection: { from: 2, to: 8 }, loop: false } },
+      audioLabStateByResult: { 'audio-1': { selection: { from: 2, to: 7 }, loop: false } },
     });
     assert.equal(loopChanges.length, 1, 'persisted loop updates do not echo through the callback');
 
     control.node.querySelector('[data-audio-lab-action="create-fragment"]').dispatch('click');
     assert.equal(fragments[0][0], result);
-    assert.deepEqual(fragments[0][1], { from: 2, to: 8 });
+    assert.deepEqual(fragments[0][1], { from: 2, to: 7 });
     assert.equal(fragments[0][2].parentNodeId, 'fragment-1');
 
     control.node.querySelector('[data-audio-lab-action="open-lab"]').dispatch('click');
@@ -649,6 +649,113 @@ test('canonical Audio Lab state renders breadcrumbs and selectable fragment node
     assert.equal(control.node.querySelectorAll('.generated-audio-lab-node')[0].className.includes('is-selected'), true);
     assert.equal(control.node.querySelector('.audio-lab-time-field').value, '00:00:00.000');
     assert.equal(globalThis.document.activeElement.dataset.audioNodeId, 'root-1');
+
+    control.destroy();
+  } finally {
+    restoreDocument();
+  }
+});
+
+test('the active fragment owns playback, color identity and keyboard navigation', () => {
+  const restoreDocument = installFakeDocument();
+  const selected = [];
+
+  try {
+    const control = createGeneratedResults({
+      results: [{ id: 'audio-1', name: 'session.mp3', url: 'blob:caller-audio', duration: 12 }],
+      audioLabState: canonicalAudioLabState(),
+      audioLabStateByResult: {
+        'audio-1': { selection: { from: 2, to: 8 }, loop: false },
+      },
+      audioLabExpandedId: 'audio-1',
+      onSelectAudioNode: (...args) => selected.push(args),
+    });
+
+    const nodes = control.node.querySelectorAll('.generated-audio-lab-node');
+    const fragment = nodes[1];
+    const player = control.node.querySelector('.audio-lab-player');
+    const audio = control.node.querySelector('audio');
+    assert.match(fragment.dataset.accent, /^[0-5]$/);
+    assert.equal(player.dataset.accent, fragment.dataset.accent);
+    assert.equal(fragment.querySelector('.generated-audio-lab-node-current').textContent, 'Activo · Espacio');
+
+    let prevented = 0;
+    dispatchFrom(control.node, 'keydown', fragment, {
+      key: ' ',
+      preventDefault: () => { prevented += 1; },
+      stopPropagation() {},
+    });
+    assert.equal(prevented, 1);
+    assert.equal(audio.paused, false);
+    assert.equal(audio.currentTime, 2, 'fragment playback starts at its own beginning');
+
+    dispatchFrom(control.node, 'keydown', fragment, {
+      key: ' ',
+      preventDefault: () => { prevented += 1; },
+      stopPropagation() {},
+    });
+    assert.equal(audio.paused, true);
+
+    dispatchFrom(control.node, 'keydown', fragment, {
+      key: 'ArrowUp',
+      preventDefault: () => { prevented += 1; },
+      stopPropagation() {},
+    });
+    assert.equal(selected.at(-1)[0], 'root-1');
+    assert.equal(selected.at(-1)[1].node.kind, 'root');
+    assert.equal(globalThis.document.activeElement.dataset.audioNodeId, 'root-1');
+
+    control.destroy();
+  } finally {
+    restoreDocument();
+  }
+});
+
+test('fragment navigation renders real tree order with absolute ranges', () => {
+  const restoreDocument = installFakeDocument();
+
+  try {
+    const base = canonicalAudioLabState();
+    const graph = {
+      ...base,
+      selectedNodeId: 'fragment-a1',
+      nodes: [
+        base.nodes[0],
+        { ...base.nodes[1], id: 'fragment-a', label: 'A' },
+        {
+          id: 'fragment-c',
+          kind: 'fragment',
+          parentNodeId: 'root-1',
+          label: 'B',
+          range: { start: 8.125, end: 8.375 },
+        },
+        {
+          id: 'fragment-a1',
+          kind: 'fragment',
+          parentNodeId: 'fragment-a',
+          label: 'A1',
+          range: { start: 1, end: 2 },
+        },
+      ],
+    };
+    const control = createGeneratedResults({
+      results: [{ id: 'audio-1', name: 'session.mp3', url: 'blob:caller-audio', duration: 12 }],
+      audioLabState: graph,
+      audioLabExpandedId: 'audio-1',
+      onSelectAudioNode() {},
+    });
+
+    const nodes = control.node.querySelectorAll('.generated-audio-lab-node');
+    assert.deepEqual(
+      nodes.map((node) => node.dataset.audioNodeId),
+      ['root-1', 'fragment-a', 'fragment-a1', 'fragment-c'],
+    );
+    assert.equal(nodes[2].querySelector('small').textContent, '0:03–0:04 · 0:01');
+    assert.equal(nodes[3].querySelector('small').textContent, '0:08.125–0:08.375 · 0.250 s');
+    assert.match(nodes[3].attributes.get('aria-label'), /00:00:08\.125 a 00:00:08\.375/);
+    assert.notEqual(nodes[1].dataset.accent, nodes[2].dataset.accent);
+    assert.notEqual(nodes[2].dataset.accent, nodes[3].dataset.accent);
+    assert.equal(control.node.querySelector('.audio-lab-name').textContent, 'A1');
 
     control.destroy();
   } finally {

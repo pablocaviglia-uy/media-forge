@@ -8,9 +8,9 @@
  * caller's responsibility.
  */
 
-import { el, formatBitrate, formatBytes, formatDuration, on, truncateName } from './dom.js';
+import { el, formatBitrate, formatBytes, formatDuration, formatTimestamp, on, truncateName } from './dom.js';
 import { createAudioLabPlayer } from './audio-lab-player.js';
-import { audioLabBreadcrumbs, validateAudioLabState } from '../media/audio-lab.js';
+import { audioLabBreadcrumbs, resolveAudioLabRange, validateAudioLabState } from '../media/audio-lab.js';
 
 let nextGeneratedResultsId = 1;
 
@@ -41,6 +41,38 @@ const OPERATION_LABELS = Object.freeze({
   trim: 'Recorte exportado',
   crop: 'Encuadre exportado',
 });
+
+const AUDIO_NODE_ACCENT_COUNT = 6;
+
+function audioNodeAccent(node) {
+  if (!node || node.kind === 'root') return 'source';
+  const value = String(node.id || node.label || 'fragment');
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return String((hash >>> 0) % AUDIO_NODE_ACCENT_COUNT);
+}
+
+function preciseAudioTime(value) {
+  const seconds = Math.max(0, Number(value) || 0);
+  const milliseconds = Math.round(seconds * 1000);
+  const hours = Math.floor(milliseconds / 3_600_000);
+  const minutes = Math.floor((milliseconds % 3_600_000) / 60_000);
+  const wholeSeconds = Math.floor((milliseconds % 60_000) / 1000);
+  const fraction = String(milliseconds % 1000).padStart(3, '0');
+  const clock = `${hours ? `${hours}:` : ''}${hours ? String(minutes).padStart(2, '0') : minutes}:${String(wholeSeconds).padStart(2, '0')}`;
+  return `${clock}.${fraction}`;
+}
+
+function audioNodeRangeCopy(range) {
+  const precise = range.duration < 1;
+  const start = precise ? preciseAudioTime(range.start) : formatDuration(range.start);
+  const end = precise ? preciseAudioTime(range.end) : formatDuration(range.end);
+  const duration = precise ? `${Math.max(0, range.duration).toFixed(3)} s` : formatDuration(range.duration);
+  return `${start}–${end} · ${duration}`;
+}
 
 const finitePositive = (value) => {
   const number = Number(value);
@@ -337,7 +369,7 @@ function sourceNode(source, selectable = false) {
  *   onMediaEvent?: (type: 'play'|'pause'|'ended', result: GeneratedResult, media: HTMLMediaElement) => void,
  *   onAudioSelectionChange?: (result: GeneratedResult, selection: {from: number, to: number}, context: {id: string, index: number, source: string, commit: boolean, audioLabState: object|null}) => void,
  *   onAudioLoopChange?: (result: GeneratedResult, loop: boolean, context: {id: string, index: number, audioLabState: object|null}) => void,
- *   onCreateAudioFragment?: (result: GeneratedResult, selection: {from: number, to: number}, context: {id: string, index: number, name: string, duration: number, parentNodeId: string|null, audioLabState: object|null}) => void,
+ *   onCreateAudioFragment?: (result: GeneratedResult, selection: {from: number, to: number}, context: {id: string, index: number, name: string, duration: number, parentNodeId: string|null, audioLabState: object|null}) => boolean|void|Promise<boolean>,
  *   onOpenAudioLab?: (result: GeneratedResult, playerState: {selection: object, view: object, currentTime: number, loop: boolean}, context: {id: string, index: number, audioLabState: object|null}) => void,
  *   onSelectAudioNode?: (nodeId: string, context: {result: GeneratedResult, id: string, index: number, node: object}) => void,
  *   onAudioLabExpandedChange?: (id: string|null, context: {result: GeneratedResult|null, reason: 'open'|'close'|'api'}) => void,
@@ -529,7 +561,7 @@ export function createGeneratedResults(options = {}) {
       const current = resultById(resultId);
       if (!current) return;
       const graph = canonicalAudioLabState(current);
-      config.onCreateAudioFragment?.(current.original, selection, {
+      return config.onCreateAudioFragment?.(current.original, selection, {
         id: current.id,
         index: resultIndex(current.id),
         ...context,
@@ -552,9 +584,31 @@ export function createGeneratedResults(options = {}) {
   const audioPlayerOptions = (result, { includeState = true } = {}) => {
     const source = audioSourceFor(result);
     const state = audioLabStateFor(result);
+    const graph = canonicalAudioLabState(result);
+    let selectedRange = null;
+    let selectedDepth = 0;
+    let selectedAccent = 'source';
+    let selectedName = result.name;
+    if (graph) {
+      try {
+        selectedRange = resolveAudioLabRange(graph);
+        selectedDepth = audioNodeDepths(graph).get(graph.selectedNodeId) || 0;
+        const selectedNode = graph.nodes.find((node) => node.id === graph.selectedNodeId);
+        selectedAccent = audioNodeAccent(selectedNode);
+        if (selectedNode?.kind === 'fragment') selectedName = selectedNode.label;
+      } catch {
+        selectedRange = null;
+      }
+    }
     const next = {
       ...source,
-      name: result.name,
+      name: selectedName,
+      selectionBounds: selectedRange
+        ? { from: selectedRange.start, to: selectedRange.end }
+        : null,
+      preferSelectionPlayback: Boolean(graph && graph.selectedNodeId !== graph.rootNodeId),
+      fragmentDepth: selectedDepth,
+      fragmentAccent: selectedAccent,
       ...audioPlayerCallbacks(result.id),
     };
     if (result.metadataView.duration) next.duration = result.metadataView.duration;
@@ -607,6 +661,23 @@ export function createGeneratedResults(options = {}) {
     return depths;
   };
 
+  const audioNodesPreorder = (state) => {
+    const children = new Map();
+    for (const node of state.nodes) {
+      const parentId = node.parentNodeId || null;
+      if (!children.has(parentId)) children.set(parentId, []);
+      children.get(parentId).push(node);
+    }
+    const ordered = [];
+    const visit = (node) => {
+      ordered.push(node);
+      for (const child of children.get(node.id) || []) visit(child);
+    };
+    const root = state.nodes.find((node) => node.id === state.rootNodeId);
+    if (root) visit(root);
+    return ordered;
+  };
+
   const audioLabNavigationContent = (result) => {
     const projection = audioLabStateProjection(result);
     const { graph } = projection;
@@ -644,6 +715,7 @@ export function createGeneratedResults(options = {}) {
 
     const breadcrumbs = audioLabBreadcrumbs(graph);
     const depths = audioNodeDepths(graph);
+    const orderedNodes = audioNodesPreorder(graph);
     const crumbList = el('ol', {
       class: 'generated-audio-lab-breadcrumbs',
       attrs: { 'aria-label': 'Ruta del fragmento seleccionado' },
@@ -662,9 +734,9 @@ export function createGeneratedResults(options = {}) {
     const nodes = el('div', {
       class: 'generated-audio-lab-node-list',
       attrs: { role: 'group', 'aria-label': `Nodos de audio de ${result.name}` },
-    }, graph.nodes.map((node) => {
+    }, orderedNodes.map((node) => {
       const selected = node.id === graph.selectedNodeId;
-      const duration = node.kind === 'root' ? node.duration : node.range.end - node.range.start;
+      const range = resolveAudioLabRange(graph, node.id);
       const button = el('button', {
         type: 'button',
         disabled: typeof config.onSelectAudioNode !== 'function',
@@ -673,19 +745,22 @@ export function createGeneratedResults(options = {}) {
           generatedAction: 'select-audio-node',
           audioNodeId: node.id,
           depth: String(depths.get(node.id) || 0),
+          accent: audioNodeAccent(node),
         },
         attrs: {
           'aria-pressed': String(selected),
-          'aria-label': `${selected ? 'Seleccionado' : 'Abrir'}: ${node.kind === 'root' ? node.name : node.label}`,
+          'aria-label': `${selected ? 'Seleccionado' : 'Abrir'}: ${node.kind === 'root' ? node.name : node.label}, de ${formatTimestamp(range.start)} a ${formatTimestamp(range.end)}`,
+          'aria-keyshortcuts': 'Space ArrowUp ArrowDown ArrowLeft ArrowRight Home End',
+          tabindex: selected ? '0' : '-1',
         },
       }, [
         el('span', { class: 'generated-audio-lab-node-icon', text: node.kind === 'root' ? '♫' : '↳', attrs: { 'aria-hidden': 'true' } }),
         el('span', { class: 'generated-audio-lab-node-copy' }, [
           el('span', { text: node.kind === 'root' ? 'Audio raíz' : 'Fragmento' }),
           el('strong', { text: truncateName(node.kind === 'root' ? node.name : node.label, 28), title: node.kind === 'root' ? node.name : node.label }),
-          el('small', { text: `${formatDuration(duration)} · nivel ${depths.get(node.id) || 0}` }),
+          el('small', { text: audioNodeRangeCopy(range) }),
         ]),
-        selected ? el('span', { class: 'generated-audio-lab-node-current', text: 'Activo' }) : null,
+        selected ? el('span', { class: 'generated-audio-lab-node-current', text: 'Activo · Espacio' }) : null,
       ]);
       button.style.setProperty('--audio-node-indent', `${Math.min(4, depths.get(node.id) || 0) * 12}px`);
       return button;
@@ -1088,6 +1163,54 @@ export function createGeneratedResults(options = {}) {
   });
 
   const stopKeydown = on(root, 'keydown', (event) => {
+    const audioNodeButton = event.target.closest('[data-generated-action="select-audio-node"]');
+    if (audioNodeButton && root.contains(audioNodeButton)) {
+      const active = resultById(activeId) || null;
+      const graph = canonicalAudioLabState(active);
+      const currentNodeId = audioNodeButton.dataset.audioNodeId;
+      if (
+        event.key === ' '
+        && activeAudioPlayer
+        && graph?.selectedNodeId === currentNodeId
+      ) {
+        event.preventDefault?.();
+        event.stopPropagation?.();
+        activeAudioPlayer.togglePlayback?.();
+        return;
+      }
+
+      if (graph && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+        const buttons = Array.from(root.querySelectorAll('.generated-audio-lab-node'));
+        const nodesById = new Map(graph.nodes.map((node) => [node.id, node]));
+        const current = nodesById.get(currentNodeId);
+        let nextId = null;
+        const index = buttons.indexOf(audioNodeButton);
+        if (event.key === 'Home') nextId = buttons[0]?.dataset.audioNodeId;
+        else if (event.key === 'End') nextId = buttons.at(-1)?.dataset.audioNodeId;
+        else if (event.key === 'ArrowUp') nextId = buttons[Math.max(0, index - 1)]?.dataset.audioNodeId;
+        else if (event.key === 'ArrowDown') nextId = buttons[Math.min(buttons.length - 1, index + 1)]?.dataset.audioNodeId;
+        else if (event.key === 'ArrowLeft') nextId = current?.parentNodeId || currentNodeId;
+        else if (event.key === 'ArrowRight') {
+          nextId = graph.nodes.find((node) => node.parentNodeId === currentNodeId)?.id || currentNodeId;
+        }
+        if (nextId && nextId !== currentNodeId) {
+          event.preventDefault?.();
+          event.stopPropagation?.();
+          const node = nodesById.get(nextId);
+          // Move focus before notifying the controlled owner. Its synchronous
+          // repaint can then restore the new node instead of the stale one.
+          buttons.find((button) => button.dataset.audioNodeId === nextId)?.focus();
+          config.onSelectAudioNode?.(nextId, {
+            result: active.original,
+            id: active.id,
+            index: resultIndex(active.id),
+            node,
+          });
+        }
+        return;
+      }
+    }
+
     const selectButton = event.target.closest('[data-generated-action="select"]');
     if (!selectButton || !root.contains(selectButton)) return;
     if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;

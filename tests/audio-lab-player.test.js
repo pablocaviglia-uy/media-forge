@@ -207,7 +207,18 @@ function installBrowserFakes() {
       entry[1](16);
     },
     dispatchWindow(type, details = {}) {
-      for (const handler of [...(windowListeners.get(type) || [])]) handler(details);
+      const event = {
+        pointerId: 1,
+        pointerType: 'mouse',
+        clientX: 0,
+        clientY: 0,
+        key: '',
+        prevented: false,
+        preventDefault() { this.prevented = true; },
+        ...details,
+      };
+      for (const handler of [...(windowListeners.get(type) || [])]) handler(event);
+      return event;
     },
     pendingFrames: () => frames.size,
     restore() {
@@ -328,10 +339,15 @@ test('the custom player exposes accessible controls and keyboard-driven fragment
     const track = control.node.querySelector('.audio-lab-waveform-track');
     const seek = control.node.querySelector('.audio-lab-seek-control');
     assert.equal(track.attributes.get('role'), 'group');
+    assert.match(control.node.querySelector('.audio-lab-waveform-hint').textContent, /Arrastrá para seleccionar/);
+    assert.match(control.node.querySelector('.audio-lab-shortcut-hint').textContent, /Espacio/);
+    assert.equal(control.node.querySelectorAll('.audio-lab-control-label').length, 3);
+    assert.equal(action(control, 'play-selection'), null, 'the primary play control owns selection playback');
     assert.equal(seek.attributes.get('role'), 'slider');
     assert.equal(seek.attributes.get('aria-label'), 'Posición de reproducción');
     assert.equal(control.node.querySelector('.audio-lab-waveform-fallback').hidden, false);
     assert.deepEqual(control.selection(), { from: 0, to: 100 });
+    assert.equal(action(control, 'create-fragment').disabled, true, 'the whole parent cannot duplicate itself');
     assert.equal(control.node.querySelector('.audio-lab-selection-from').dataset.edge, 'start');
     assert.equal(control.node.querySelector('.audio-lab-selection-to').dataset.edge, 'end');
 
@@ -346,6 +362,9 @@ test('the custom player exposes accessible controls and keyboard-driven fragment
       [{ from: 20, to: 100 }, 'shortcut', true],
       [{ from: 20, to: 35 }, 'shortcut', true],
     ]);
+    assert.equal(action(control, 'create-fragment').disabled, false);
+    assert.match(action(control, 'create-fragment').textContent, /0:15/);
+    assert.equal(control.node.querySelector('.audio-lab-selection-badge').textContent, '0:15');
 
     action(control, 'loop').dispatch('click');
     assert.equal(action(control, 'loop').attributes.get('aria-pressed'), 'true');
@@ -389,7 +408,7 @@ test('selection playback loops and stops at its boundary through requestAnimatio
       loop: true,
     });
 
-    action(control, 'play-selection').dispatch('click');
+    action(control, 'play').dispatch('click');
     assert.equal(control.media.paused, false);
     assert.equal(control.media.currentTime, 2);
     assert.equal(env.pendingFrames(), 1);
@@ -422,7 +441,7 @@ test('timeupdate enforces selection playback when animation frames are suspended
       selection: { from: 2, to: 4 },
       loop: true,
     });
-    action(control, 'play-selection').dispatch('click');
+    action(control, 'play').dispatch('click');
 
     control.media.currentTime = 4.25;
     control.media.dispatch('timeupdate');
@@ -449,7 +468,7 @@ test('editing a playing selection ahead of the playhead rebases playback to its 
       duration: 100,
       selection: { from: 20, to: 80 },
     });
-    action(control, 'play-selection').dispatch('click');
+    action(control, 'play').dispatch('click');
     control.media.currentTime = 40;
     control.setSelection({ from: 50, to: 80 });
 
@@ -472,7 +491,7 @@ test('loop and rebase jumps follow immediately while the media element reports s
       loop: true,
     });
     action(control, 'zoom-in').dispatch('click');
-    action(control, 'play-selection').dispatch('click');
+    action(control, 'play').dispatch('click');
     control.media.currentTime = 60;
     env.runNextFrame();
     assert.deepEqual(control.view(), { start: 35, end: 85 });
@@ -517,7 +536,7 @@ test('ended selection playback follows its loop or stop boundary before settling
       loop: true,
     });
     action(looped, 'zoom-in').dispatch('click');
-    action(looped, 'play-selection').dispatch('click');
+    action(looped, 'play').dispatch('click');
     looped.media.currentTime = 100;
     looped.media.ended = true;
     looped.media.dispatch('ended');
@@ -533,7 +552,7 @@ test('ended selection playback follows its loop or stop boundary before settling
       loop: false,
     });
     action(stopped, 'zoom-in').dispatch('click');
-    action(stopped, 'play-selection').dispatch('click');
+    action(stopped, 'play').dispatch('click');
     stopped.media.currentTime = 100;
     stopped.media.ended = true;
     stopped.media.dispatch('ended');
@@ -588,7 +607,7 @@ test('selection playback renders its exact stopped position and final followed v
       stroke() { strokes += 1; },
     });
     action(control, 'zoom-in').dispatch('click');
-    action(control, 'play-selection').dispatch('click');
+    action(control, 'play').dispatch('click');
     assert.equal(control.media.currentTime, 30);
     const beforeStop = strokes;
 
@@ -789,6 +808,347 @@ test('reduced-motion playback reveals only at an edge instead of continuously ce
     env.runNextFrame();
     assert.deepEqual(control.view(), { start: 20, end: 70 }, 'off-screen playback uses minimal reveal');
     close(Number.parseFloat(control.node.querySelector('.audio-lab-playhead').style.left), 100);
+    control.destroy();
+  } finally {
+    env.restore();
+  }
+});
+
+test('waveform click seeks, while horizontal drag selects once and focuses contextual transport', () => {
+  const env = installBrowserFakes();
+  try {
+    const changes = [];
+    const control = createAudioLabPlayer({
+      url: 'blob:caller-owned',
+      duration: 100,
+      selectionBounds: { from: 20, to: 80 },
+      selection: { from: 20, to: 80 },
+      preferSelectionPlayback: true,
+      onSelectionChange: (...args) => changes.push(args),
+    });
+    const track = control.node.querySelector('.audio-lab-waveform-track');
+    const seek = control.node.querySelector('.audio-lab-seek-control');
+
+    track.dispatch('pointerdown', { pointerId: 4, clientX: 25, clientY: 5 });
+    const jitter = env.dispatchWindow('pointermove', { pointerId: 4, clientX: 29, clientY: 5 });
+    assert.equal(jitter.prevented, false);
+    env.dispatchWindow('pointerup', { pointerId: 4, clientX: 29, clientY: 5 });
+    close(control.media.currentTime, 37.4);
+    assert.equal(changes.length, 0, 'a click must not rewrite the region');
+    assert.equal(globalThis.document.activeElement, seek);
+
+    track.dispatch('pointerdown', { pointerId: 5, clientX: 10, clientY: 4 });
+    env.dispatchWindow('pointermove', { pointerId: 5, clientX: 14, clientY: 4 });
+    const selecting = env.dispatchWindow('pointermove', { pointerId: 5, clientX: 70, clientY: 4 });
+    assert.equal(selecting.prevented, true);
+    assert.equal(control.node.dataset.dragging, 'selection');
+    env.dispatchWindow('pointerup', { pointerId: 5, clientX: 80, clientY: 4 });
+
+    assert.deepEqual(control.selection(), { from: 26, to: 68 });
+    assert.equal(control.media.currentTime, 26, 'committing a region parks the playhead at its start');
+    assert.equal(control.media.paused, true, 'selecting must not start playback');
+    assert.equal(control.node.dataset.dragging, undefined);
+    assert.equal(globalThis.document.activeElement, seek);
+    assert.equal(changes.filter(([, context]) => context.commit).length, 1, 'one gesture persists exactly once');
+    assert.deepEqual(changes.at(-1), [{ from: 26, to: 68 }, { source: 'waveform', commit: true }]);
+
+    const space = control.node.dispatch('keydown', { target: seek, key: ' ' });
+    assert.equal(space.prevented, true);
+    assert.equal(control.media.paused, false);
+    assert.equal(control.node.dataset.playbackScope, 'selection');
+    control.destroy();
+  } finally {
+    env.restore();
+  }
+});
+
+test('reverse and out-of-view drags clamp to the visible fragment context', () => {
+  const env = installBrowserFakes();
+  try {
+    const control = createAudioLabPlayer({
+      url: 'blob:caller-owned',
+      duration: 100,
+      selectionBounds: { from: 20, to: 40 },
+      selection: { from: 20, to: 40 },
+    });
+    const track = control.node.querySelector('.audio-lab-waveform-track');
+    track.dispatch('pointerdown', { pointerId: 8, clientX: 90 });
+    env.dispatchWindow('pointermove', { pointerId: 8, clientX: -40 });
+    env.dispatchWindow('pointerup', { pointerId: 8, clientX: -80 });
+
+    assert.deepEqual(control.selection(), { from: 20, to: 38 });
+    assert.equal(control.media.currentTime, 20);
+    control.destroy();
+  } finally {
+    env.restore();
+  }
+});
+
+test('touch keeps vertical scrolling native and cancellation restores one durable selection', () => {
+  const env = installBrowserFakes();
+  try {
+    const changes = [];
+    const control = createAudioLabPlayer({
+      url: 'blob:caller-owned',
+      duration: 100,
+      selection: { from: 10, to: 90 },
+      onSelectionChange: (...args) => changes.push(args),
+    });
+    const track = control.node.querySelector('.audio-lab-waveform-track');
+    globalThis.document.activeElement = null;
+
+    track.dispatch('pointerdown', { pointerId: 11, pointerType: 'touch', clientX: 20, clientY: 0 });
+    const vertical = env.dispatchWindow('pointermove', {
+      pointerId: 11,
+      pointerType: 'touch',
+      clientX: 21,
+      clientY: 20,
+    });
+    env.dispatchWindow('pointerup', { pointerId: 11, pointerType: 'touch', clientX: 21, clientY: 20 });
+    assert.equal(vertical.prevented, false);
+    assert.deepEqual(control.selection(), { from: 10, to: 90 });
+    assert.equal(changes.length, 0);
+    assert.equal(globalThis.document.activeElement, null, 'vertical scroll must not steal focus');
+
+    track.dispatch('pointerdown', { pointerId: 12, pointerType: 'touch', clientX: 20, clientY: 2 });
+    const horizontal = env.dispatchWindow('pointermove', {
+      pointerId: 12,
+      pointerType: 'touch',
+      clientX: 70,
+      clientY: 3,
+    });
+    assert.equal(horizontal.prevented, true);
+    env.dispatchWindow('pointercancel', { pointerId: 12, pointerType: 'touch' });
+    assert.deepEqual(control.selection(), { from: 10, to: 90 });
+    assert.equal(changes.filter(([, context]) => context.commit).length, 1);
+    assert.deepEqual(changes.at(-1), [{ from: 10, to: 90 }, { source: 'waveform-cancel', commit: true }]);
+    assert.equal(control.node.dataset.dragging, undefined);
+    control.destroy();
+  } finally {
+    env.restore();
+  }
+});
+
+test('fragment bounds constrain fields, handles, seeking, zoom and transport edges', () => {
+  const env = installBrowserFakes();
+  try {
+    const control = createAudioLabPlayer({
+      url: 'blob:caller-owned',
+      duration: 100,
+      selectionBounds: { from: 20, to: 40 },
+      selection: { from: 25, to: 35 },
+      preferSelectionPlayback: true,
+    });
+    const seek = control.node.querySelector('.audio-lab-seek-control');
+    const [fromField, toField] = control.node.querySelectorAll('.audio-lab-time-field');
+    const fromHandle = control.node.querySelector('.audio-lab-selection-from');
+    const toHandle = control.node.querySelector('.audio-lab-selection-to');
+
+    assert.deepEqual(control.view(), { start: 20, end: 40 });
+    assert.equal(control.media.currentTime, 20);
+    assert.equal(control.node.querySelector('.audio-lab-time').textContent, '0:20 / 1:40');
+    assert.equal(action(control, 'zoom-out').disabled, true);
+    assert.equal(action(control, 'fit').disabled, true);
+    assert.equal(action(control, 'fit').attributes.get('aria-label'), 'Mostrar todo el fragmento');
+
+    fromField.value = '0';
+    fromField.dispatch('change');
+    toField.value = '99';
+    toField.dispatch('change');
+    assert.deepEqual(control.selection(), { from: 20, to: 40 });
+    fromHandle.dispatch('keydown', { key: 'End' });
+    close(control.selection().from, 39.99);
+    toHandle.dispatch('keydown', { key: 'Home' });
+    assert.deepEqual(control.selection(), { from: 39.99, to: 40 });
+
+    control.seek(0);
+    assert.equal(control.media.currentTime, 20);
+    assert.equal(action(control, 'back').disabled, true);
+    seek.dispatch('keydown', { key: 'End' });
+    assert.equal(control.media.currentTime, 40);
+    assert.equal(action(control, 'forward').disabled, true);
+    seek.dispatch('keydown', { key: 'Home' });
+    assert.equal(control.media.currentTime, 20);
+    action(control, 'forward').dispatch('click');
+    assert.equal(control.media.currentTime, 30);
+    action(control, 'forward').dispatch('click');
+    assert.equal(control.media.currentTime, 40);
+
+    action(control, 'zoom-in').dispatch('click');
+    assert.ok(control.view().start >= 20 && control.view().end <= 40);
+    action(control, 'zoom-out').dispatch('click');
+    assert.deepEqual(control.view(), { start: 20, end: 40 });
+    control.destroy();
+  } finally {
+    env.restore();
+  }
+});
+
+test('changing active node fits its bounds once and synchronizes playback scope without pausing', () => {
+  const env = installBrowserFakes();
+  try {
+    const control = createAudioLabPlayer({ url: 'blob:caller-owned', duration: 100 });
+    control.media.currentTime = 50;
+    control.togglePlayback();
+    assert.equal(control.node.dataset.playbackScope, 'all');
+
+    control.update({
+      selectionBounds: { from: 20, to: 40 },
+      selection: { from: 20, to: 40 },
+      preferSelectionPlayback: true,
+      fragmentDepth: 2,
+      fragmentAccent: 3,
+    });
+    assert.deepEqual(control.view(), { start: 20, end: 40 });
+    assert.equal(control.media.currentTime, 20);
+    assert.equal(control.media.paused, false);
+    assert.equal(control.node.dataset.playbackScope, 'selection');
+    assert.equal(control.node.dataset.fragmentDepth, '2');
+    assert.equal(control.node.dataset.accent, '3');
+
+    action(control, 'zoom-in').dispatch('click');
+    const zoomed = control.view();
+    control.update({ selection: { from: 22, to: 28 } });
+    assert.deepEqual(control.view(), zoomed, 'selection edits inside one node must not auto-fit');
+
+    control.update({
+      selectionBounds: null,
+      selection: null,
+      preferSelectionPlayback: false,
+      fragmentDepth: 0,
+      fragmentAccent: 'source',
+    });
+    assert.deepEqual(control.view(), { start: 0, end: 100 });
+    assert.equal(control.media.paused, false);
+    assert.equal(control.node.dataset.playbackScope, 'all');
+    assert.equal(control.node.dataset.fragmentDepth, '0');
+    assert.equal(control.node.dataset.accent, 'source');
+    control.destroy();
+  } finally {
+    env.restore();
+  }
+});
+
+test('Space and the public toggle choose all, a dragged subrange, or the active fragment', () => {
+  const env = installBrowserFakes();
+  try {
+    const control = createAudioLabPlayer({ url: 'blob:caller-owned', duration: 10 });
+    assert.equal(action(control, 'play').attributes.get('aria-label'), 'Reproducir');
+    control.togglePlayback();
+    assert.equal(control.node.dataset.playbackScope, 'all');
+    control.togglePlayback();
+
+    control.setSelection({ from: 2, to: 4 });
+    assert.equal(action(control, 'play').attributes.get('aria-label'), 'Reproducir selección');
+    control.togglePlayback();
+    assert.equal(control.media.currentTime, 2);
+    assert.equal(control.node.dataset.playbackScope, 'selection');
+    control.media.currentTime = 4;
+    env.runNextFrame();
+    assert.equal(control.media.paused, true);
+
+    control.update({
+      duration: 10,
+      selectionBounds: { from: 5, to: 8 },
+      selection: { from: 5, to: 8 },
+      preferSelectionPlayback: true,
+      loop: true,
+    });
+    control.togglePlayback();
+    assert.equal(control.media.currentTime, 5);
+    control.media.currentTime = 8;
+    env.runNextFrame();
+    assert.equal(control.media.currentTime, 5);
+    assert.equal(control.media.paused, false);
+    control.destroy();
+  } finally {
+    env.restore();
+  }
+});
+
+test('fragment creation rejects a whole parent and reports callback failure without false success', async () => {
+  const env = installBrowserFakes();
+  try {
+    let calls = 0;
+    const control = createAudioLabPlayer({
+      url: 'blob:caller-owned',
+      duration: 20,
+      selectionBounds: { from: 5, to: 15 },
+      selection: { from: 5, to: 15 },
+      onCreateFragment: () => { calls += 1; return false; },
+    });
+    const create = action(control, 'create-fragment');
+    const live = control.node.querySelector('.audio-lab-live');
+    assert.equal(create.disabled, true);
+    create.dispatch('click');
+    assert.equal(calls, 0);
+
+    control.setSelection({ from: 7, to: 10 });
+    assert.equal(create.disabled, false);
+    assert.match(create.textContent, /0:03/);
+    create.dispatch('click');
+    await Promise.resolve();
+    assert.equal(calls, 1);
+    assert.match(live.textContent, /No se pudo/);
+    assert.doesNotMatch(live.textContent, /creado/);
+    control.destroy();
+  } finally {
+    env.restore();
+  }
+});
+
+test('async fragment creation disables duplicate submits until a confirmed success', async () => {
+  const env = installBrowserFakes();
+  try {
+    let resolveCreation;
+    const pending = new Promise((resolve) => { resolveCreation = resolve; });
+    const control = createAudioLabPlayer({
+      url: 'blob:caller-owned',
+      duration: 20,
+      selection: { from: 4, to: 9 },
+      onCreateFragment: () => pending,
+    });
+    const create = action(control, 'create-fragment');
+    const live = control.node.querySelector('.audio-lab-live');
+    create.dispatch('click');
+    assert.equal(create.disabled, true);
+    assert.match(create.textContent, /Creando/);
+
+    resolveCreation(true);
+    await pending;
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(create.disabled, false);
+    assert.match(live.textContent, /creado/);
+    control.destroy();
+  } finally {
+    env.restore();
+  }
+});
+
+test('subsecond regions keep millisecond precision in visible and accessible duration copy', async () => {
+  const env = installBrowserFakes();
+  try {
+    const control = createAudioLabPlayer({
+      url: 'blob:caller-owned',
+      duration: 2,
+      selection: { from: 0.25, to: 0.5 },
+      onCreateFragment: () => true,
+    });
+    const length = control.node.querySelector('.audio-lab-selection-length');
+    const badge = control.node.querySelector('.audio-lab-selection-badge');
+    const create = action(control, 'create-fragment');
+    const live = control.node.querySelector('.audio-lab-live');
+
+    assert.equal(length.textContent, '0.250 s');
+    assert.equal(length.attributes.get('aria-label'), 'Duración de la selección: 250 milisegundos');
+    assert.equal(badge.textContent, '0.250 s');
+    assert.match(create.textContent, /0\.250 s/);
+    assert.equal(create.attributes.get('aria-label'), 'Crear fragmento de 250 milisegundos');
+
+    create.dispatch('click');
+    await Promise.resolve();
+    assert.equal(live.textContent, 'Fragmento de 250 milisegundos creado.');
     control.destroy();
   } finally {
     env.restore();

@@ -2726,7 +2726,7 @@ export class App {
         this.setAudioLabSession(job, entry.id, { loop });
       },
       onCreateAudioFragment: (entry, selection) => {
-        this.createAudioLabFragment(job, entry.id, selection);
+        return this.createAudioLabFragment(job, entry.id, selection);
       },
       onOpenAudioLab: (entry, playerState) => {
         this.setAudioLabSession(job, entry.id, {

@@ -16,8 +16,8 @@
  * the single exception called out at IMMUTABLE.
  */
 
-// v16 adds centred playhead follow while preserving timeline edge context.
-const CACHE_VERSION = 'v16';
+// v17 adds direct region editing and contextual fragment controls in Audio Lab.
+const CACHE_VERSION = 'v17';
 const CACHE_NAME = `media-forge-${CACHE_VERSION}`;
 
 /**
