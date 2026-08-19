@@ -72,12 +72,24 @@ class FakeElement {
 
   matches(selector) {
     if (selector.startsWith('.')) return this.className.split(/\s+/).includes(selector.slice(1));
+    const dataPresence = selector.match(/^\[data-([a-z-]+)\]$/);
+    if (dataPresence) {
+      const key = dataPresence[1].replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+      return Object.prototype.hasOwnProperty.call(this.dataset, key);
+    }
     const data = selector.match(/^\[data-([a-z-]+)="([^"]+)"\]$/);
     if (data) {
       const key = data[1].replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
       return this.dataset[key] === data[2];
     }
     return this.tagName === selector.toUpperCase();
+  }
+
+  closest(selector) {
+    for (let current = this; current; current = current.parentElement) {
+      if (current.matches?.(selector)) return current;
+    }
+    return null;
   }
 
   querySelectorAll(selector) {
@@ -98,6 +110,22 @@ class FakeElement {
 }
 
 const textNode = (text) => ({ nodeType: 3, textContent: String(text), parentElement: null });
+
+function installFakeDocument() {
+  const originalDocument = globalThis.document;
+  globalThis.document = {
+    activeElement: null,
+    body: new FakeElement('body'),
+    createElement: (tag) => new FakeElement(tag),
+    createTextNode: textNode,
+  };
+  return () => { globalThis.document = originalDocument; };
+}
+
+function dispatchFrom(root, type, target, details = {}) {
+  const event = { target, ...details };
+  for (const handler of root.listeners.get(type) || []) handler(event);
+}
 
 test('generated media kind recognizes browser media from MIME or filename', () => {
   assert.equal(generatedMediaKind({ name: 'concert.mp3' }), 'audio');
@@ -277,5 +305,68 @@ test('equivalent updates and storage transitions preserve the active audio and o
     globalThis.document = originalDocument;
     globalThis.URL.createObjectURL = originalCreateObjectURL;
     globalThis.URL.revokeObjectURL = originalRevokeObjectURL;
+  }
+});
+
+test('the lineage source is presentational until source navigation is enabled', () => {
+  const restoreDocument = installFakeDocument();
+
+  try {
+    const source = { name: 'camera-original.mp4', size: 28_000, duration: 12 };
+    const control = createGeneratedResults({
+      source,
+      results: [{ id: 'audio-1', name: 'camera-original.mp3' }],
+    });
+
+    const origin = control.node.querySelector('.generated-lineage-origin');
+    assert.equal(origin.tagName, 'DIV');
+    assert.equal(origin.dataset.generatedAction, undefined);
+    assert.equal(origin.querySelector('.generated-lineage-source-action'), null);
+
+    control.destroy();
+  } finally {
+    restoreDocument();
+  }
+});
+
+test('the lineage source becomes an accessible button and releases its delegated listener', () => {
+  const restoreDocument = installFakeDocument();
+
+  try {
+    const source = { name: 'camera-original.mp4', size: 28_000, duration: 12 };
+    const selectedSources = [];
+    const control = createGeneratedResults({
+      source,
+      results: [{ id: 'audio-1', name: 'camera-original.mp3' }],
+      onCreateAnother: () => {},
+    });
+
+    assert.equal(
+      control.node.querySelector('[data-generated-action="create-another"]').textContent,
+      'Trabajar desde el original',
+    );
+
+    control.update({ onSelectSource: (selected) => selectedSources.push(selected) });
+    const origin = control.node.querySelector('.generated-lineage-origin');
+    const hint = origin.querySelector('.generated-lineage-source-action');
+
+    assert.equal(origin.tagName, 'BUTTON');
+    assert.equal(origin.type, 'button');
+    assert.equal(origin.dataset.generatedAction, 'select-source');
+    assert.equal(origin.attributes.get('aria-label'), 'Abrir el archivo original: camera-original.mp4');
+    assert.equal(hint.children[0].textContent, 'Abrir original');
+
+    origin.focus();
+    assert.equal(globalThis.document.activeElement, origin);
+    dispatchFrom(control.node, 'click', hint.children[0]);
+    assert.deepEqual(selectedSources, [source]);
+
+    control.destroy();
+    assert.equal(control.node.listeners.get('click')?.size, 0);
+    assert.equal(control.node.listeners.get('keydown')?.size, 0);
+    dispatchFrom(control.node, 'click', origin);
+    assert.deepEqual(selectedSources, [source]);
+  } finally {
+    restoreDocument();
   }
 });

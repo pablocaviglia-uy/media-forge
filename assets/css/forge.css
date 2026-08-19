@@ -374,6 +374,19 @@ html[data-interface="forge"] .queue-list {
   padding: 0.55rem;
 }
 
+html[data-interface="forge"] .queue-project {
+  overflow: hidden;
+  background: color-mix(in srgb, var(--bg-raised) 66%, transparent);
+  border: 1px solid transparent;
+  border-radius: 12px;
+  transition: border-color 150ms var(--ease), background 150ms var(--ease);
+}
+
+html[data-interface="forge"] .queue-project.is-current {
+  background: color-mix(in srgb, var(--accent-soft) 20%, var(--bg-raised));
+  border-color: color-mix(in srgb, var(--accent) 18%, var(--border));
+}
+
 html[data-interface="forge"] .queue-row {
   min-height: 48px;
   border-radius: 11px;
@@ -382,6 +395,39 @@ html[data-interface="forge"] .queue-row {
 html[data-interface="forge"] .queue-row.is-current {
   background: var(--accent-soft);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 15%, transparent) inset;
+}
+
+html[data-interface="forge"] .queue-node-icon {
+  background: color-mix(in srgb, var(--bg-sunken) 86%, transparent);
+  border-color: color-mix(in srgb, var(--border) 82%, transparent);
+}
+
+html[data-interface="forge"] .queue-child-count {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 72%, var(--bg-sunken));
+  border-color: color-mix(in srgb, var(--accent) 22%, var(--border));
+}
+
+html[data-interface="forge"] .queue-children {
+  margin-top: 0;
+  padding-top: 0.15rem;
+  padding-bottom: 0.2rem;
+}
+
+html[data-interface="forge"] .queue-result-item {
+  margin-right: 0.25rem;
+  border-radius: 9px;
+}
+
+html[data-interface="forge"] .queue-result-item.is-current {
+  background: color-mix(in srgb, var(--accent-soft) 52%, var(--bg-raised));
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--border));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 8%, transparent) inset;
+}
+
+html[data-interface="forge"] .queue-result-item.is-current .queue-result-icon {
+  color: #b8f1e8;
+  background: color-mix(in srgb, var(--accent-soft) 78%, var(--bg-sunken));
 }
 
 html[data-interface="forge"] .inspector {
@@ -5757,6 +5803,29 @@ html[data-interface="forge"] .generated-lineage-origin {
   box-shadow: 0 1px 0 rgb(255 255 255 / 0.15) inset;
 }
 
+html[data-interface="forge"] .generated-lineage-origin.is-actionable {
+  width: 100%;
+  transition:
+    color 150ms var(--ease),
+    background-color 150ms var(--ease),
+    border-color 150ms var(--ease),
+    box-shadow 150ms var(--ease),
+    transform 150ms var(--ease);
+}
+
+html[data-interface="forge"] .generated-lineage-origin.is-actionable:hover {
+  background: color-mix(in srgb, var(--accent-soft) 28%, var(--bg-raised));
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+  box-shadow: var(--shadow-sm);
+  transform: translateY(-1px);
+}
+
+html[data-interface="forge"] .generated-lineage-origin.is-actionable:focus-visible {
+  outline: 0;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
 html[data-interface="forge"] .generated-lineage-icon {
   display: grid;
   place-items: center;
@@ -5794,6 +5863,22 @@ html[data-interface="forge"] .generated-lineage-copy small {
   color: var(--fg-muted);
   font-family: var(--mono-font);
   font-size: 9px;
+}
+
+html[data-interface="forge"] .generated-lineage-source-action {
+  display: flex;
+  gap: 0.3rem;
+  align-items: center;
+  justify-content: flex-end;
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 720;
+  line-height: 1.25;
+  text-align: right;
+}
+
+html[data-interface="forge"] .generated-lineage-origin.is-actionable:hover .generated-lineage-source-action {
+  color: var(--fg);
 }
 
 html[data-interface="forge"] .generated-lineage-connector {

@@ -272,16 +272,28 @@ function metadataGrid(result) {
   ));
 }
 
-function sourceNode(source) {
+function sourceNode(source, selectable = false) {
   const name = String(source?.name || 'Archivo original');
   const kind = generatedMediaKind(source || {});
-  return el('div', { class: 'generated-lineage-origin' }, [
+  return el(selectable ? 'button' : 'div', {
+    class: `generated-lineage-origin${selectable ? ' is-actionable' : ''}`,
+    ...(selectable ? {
+      type: 'button',
+      dataset: { generatedAction: 'select-source' },
+      title: `Abrir el archivo original: ${name}`,
+      attrs: { 'aria-label': `Abrir el archivo original: ${name}` },
+    } : {}),
+  }, [
     el('span', { class: 'generated-lineage-icon', text: MEDIA_KIND_ICONS[kind], attrs: { 'aria-hidden': 'true' } }),
     el('div', { class: 'generated-lineage-copy' }, [
       el('span', { text: 'Fuente' }),
       el('strong', { text: truncateName(name, 42), title: name }),
       el('small', { text: originFacts(source) }),
     ]),
+    selectable ? el('span', { class: 'generated-lineage-source-action' }, [
+      el('span', { text: 'Abrir original' }),
+      el('span', { text: '←', attrs: { 'aria-hidden': 'true' } }),
+    ]) : null,
   ]);
 }
 
@@ -310,6 +322,7 @@ function sourceNode(source) {
  *   followLatest?: boolean,
  *   allowRemove?: boolean,
  *   storageStatus?: 'saving'|'saved'|'error'|'off'|'persisted'|'session',
+ *   onSelectSource?: (source: object|null) => void,
  *   onSelect?: (result: GeneratedResult, context: {id: string, index: number}) => void,
  *   onDownload?: (result: GeneratedResult, context: {id: string, url: string|null, downloadName: string}) => void,
  *   onRemove?: (result: GeneratedResult, context: {id: string, index: number}) => void,
@@ -377,6 +390,7 @@ export function createGeneratedResults(options = {}) {
       activeId: active?.id || null,
       title: config.title,
       createAnother: Boolean(config.onCreateAnother),
+      sourceSelectable: Boolean(config.onSelectSource),
       removable: Boolean(config.allowRemove && config.onRemove),
       results: results.map((result) => ({
         id: result.id,
@@ -589,7 +603,7 @@ export function createGeneratedResults(options = {}) {
       headerActions.unshift(el('button', {
         type: 'button',
         class: 'text-button',
-        text: 'Crear otro',
+        text: 'Trabajar desde el original',
         dataset: { generatedAction: 'create-another' },
       }));
     }
@@ -649,7 +663,7 @@ export function createGeneratedResults(options = {}) {
         el('span', { class: 'generated-lineage-count', text: String(results.length), attrs: { 'aria-label': derivedLabel } }),
       ]),
       el('div', { class: 'generated-lineage-flow' }, [
-        sourceNode(config.source),
+        sourceNode(config.source, Boolean(config.onSelectSource)),
         el('span', { class: 'generated-lineage-connector', text: '↓', attrs: { 'aria-hidden': 'true' } }),
         el('div', { class: 'generated-lineage-list', attrs: { role: 'list' } }, results.map(historyRow)),
       ]),
@@ -709,6 +723,7 @@ export function createGeneratedResults(options = {}) {
     if (!action || !root.contains(action)) return;
     const result = resultById(action.dataset.resultId);
     if (action.dataset.generatedAction === 'select') select(action.dataset.resultId);
+    else if (action.dataset.generatedAction === 'select-source') config.onSelectSource?.(config.source);
     else if (action.dataset.generatedAction === 'download') download(result);
     else if (action.dataset.generatedAction === 'remove' && result) {
       config.onRemove?.(result.original, { id: result.id, index: resultIndex(result.id) });

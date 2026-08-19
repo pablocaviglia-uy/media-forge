@@ -323,8 +323,9 @@ function duplicateIssues(records, kind) {
 
 /**
  * Convert the mutable App jobs to the explicit, persistence-only record graph.
- * No progress, logs, object URLs, running handles, snapshots, focus hints or
- * preview state are copied.
+ * No progress, logs, object URLs, running handles, snapshots or focus hints
+ * are copied. The source/result view is durable because it is a project-level
+ * navigation choice rather than media playback state.
  */
 export function serializeWorkspace(
   jobs,
@@ -435,6 +436,9 @@ export function serializeWorkspace(
           ? job.exportedRevision
           : null,
         quickExportSignature: job.quickExportSignature ? String(job.quickExportSignature) : null,
+        previewMode: job.previewMode === 'source' || job.previewMode === 'result'
+          ? job.previewMode
+          : null,
         addAudioTouchedOptions: copyData(job.addAudioTouchedOptions || {}, `project(${id}).addAudioTouchedOptions`),
         selectedClipId: job.selectedClipId ? String(job.selectedClipId) : null,
         downloadName: job.downloadName ? String(job.downloadName) : null,
@@ -639,6 +643,9 @@ function commonJob(project, projectAssets, resultState, issues) {
     dirtySinceOutput: Number.isInteger(project.exportedRevision)
       && project.exportedRevision !== finiteInteger(project.revision, 0),
     quickExportSignature: project.quickExportSignature || null,
+    previewMode: project.previewMode === 'source' || project.previewMode === 'result'
+      ? project.previewMode
+      : (hydratedOutputs.length ? 'result' : 'source'),
     addAudioTouchedOptions: safeCopyData(
       project.addAudioTouchedOptions || {},
       `project(${project.id}).addAudioTouchedOptions`,

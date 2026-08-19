@@ -114,6 +114,7 @@ import {
   selectResult,
   selectedResult,
 } from './media/results.js';
+import { buildProjectTree } from './media/project-tree.js';
 
 /**
  * Where the app refuses rather than letting FFmpeg run out of heap.
@@ -145,6 +146,15 @@ const STATUS_LABELS = {
   failed: 'Failed',
   cancelled: 'Cancelled',
 };
+
+const QUEUE_MEDIA_ICONS = Object.freeze({
+  audio: '♫',
+  video: '▶',
+  image: '▧',
+  archive: '▤',
+  mixed: '◆',
+  unknown: '◇',
+});
 
 export class App {
   constructor() {
@@ -628,7 +638,8 @@ export class App {
 
   resumeRestoredProject(job) {
     if (!job || job.needsRelink) return;
-    if (job.outputs?.length) job.previewMode = 'result';
+    if (!job.outputs?.length) job.previewMode = 'source';
+    else if (job.previewMode !== 'source') job.previewMode = 'result';
     if (this.isMergeJob(job)) {
       this.syncMergeProject(job);
       const pending = job.clips.filter((clip) => clip.file && !clip.info);
@@ -1596,20 +1607,132 @@ export class App {
     this.paintDetail();
   }
 
+  selectProjectSource(id) {
+    const job = this.jobs.find((candidate) => candidate.id === id);
+    if (!job) return false;
+    const changed = this.selectedId !== job.id || job.previewMode !== 'source';
+    this.selectedId = job.id;
+    job.previewMode = 'source';
+    if (!changed) return true;
+    this.releaseGeneratedResults();
+    this.paintQueue();
+    this.paintDetail();
+    this.restoreProjectNodeFocus(job.id);
+    return true;
+  }
+
+  selectProjectResult(id, resultId) {
+    const job = this.jobs.find((candidate) => candidate.id === id);
+    if (!job) return false;
+    const current = this.resultHistoryFor(job);
+    const requestedId = String(resultId);
+    if (!current.resultHistory.some((result) => result.id === requestedId)) return false;
+    if (
+      this.selectedId === job.id
+      && job.previewMode === 'result'
+      && current.selectedResultId === requestedId
+    ) return true;
+    const next = selectResult(current, resultId, { projectId: job.id });
+    Object.assign(job, resultCompatibilityPatch(next));
+    this.selectedId = job.id;
+    job.previewMode = 'result';
+    this.paintQueue();
+    this.paintDetail();
+    this.restoreProjectNodeFocus(job.id, requestedId);
+    this.scheduleProjectSave();
+    return true;
+  }
+
+  restoreProjectNodeFocus(jobId, resultId = null) {
+    if (typeof requestAnimationFrame !== 'function' || !this.dom?.queueList) return;
+    requestAnimationFrame(() => {
+      const selector = resultId ? '.queue-result-item' : '.queue-source-item';
+      const target = Array.from(this.dom.queueList.querySelectorAll(selector)).find((node) => (
+        node.dataset.job === String(jobId)
+        && (!resultId || node.dataset.result === String(resultId))
+      ));
+      target?.focus({ preventScroll: true });
+    });
+  }
+
+  projectTreeFor(job) {
+    const history = this.resultHistoryFor(job);
+    return buildProjectTree({
+      projectId: job.id,
+      source: this.resultSource(job),
+      results: history.resultHistory,
+      selectedResultId: history.selectedResultId,
+      previewMode: job.previewMode,
+    });
+  }
+
+  describeProjectTreeNode(node) {
+    const bits = [node.type === 'source' ? 'Fuente' : 'Resultado'];
+    const rawFormat = String(node.metadata?.format || '').split(',')[0];
+    const format = rawFormat.includes('/') ? rawFormat.split('/').at(-1) : rawFormat;
+    if (format) bits.push(format.toUpperCase());
+    if (node.size) bits.push(formatBytes(node.size));
+    if (node.metadata?.duration) bits.push(formatDuration(node.metadata.duration));
+    if (node.type === 'source' && node.metadata?.width && node.metadata?.height) {
+      bits.push(`${node.metadata.width}×${node.metadata.height}`);
+    }
+    return bits.join(' · ');
+  }
+
+  describeProjectQueueStatus(job) {
+    if (job?.needsRelink || this.missingProjectAssets(job).length) return this.describeJob(job);
+    if (job.status === 'probing') return this.describeJob(job);
+    if (job.status === 'running') return `Procesando · ${this.describeJob(job)}`;
+    if (job.status === 'queued') return 'En cola';
+    if (job.status === 'failed') return `Error · ${this.describeJob(job)}`;
+    if (job.status === 'cancelled') return 'Cancelado';
+    if (job.validationError || job.dirtySinceOutput) return this.describeJob(job);
+    if (job.status === 'done') return 'Resultado listo';
+    return 'Listo para procesar';
+  }
+
   renderQueue() {
     const list = this.dom.queueList;
     list.textContent = '';
 
+    let resultCount = 0;
+
     for (const job of this.jobs) {
+      const tree = this.projectTreeFor(job);
+      const projectSelected = job.id === this.selectedId;
+      resultCount += tree.resultCount;
+      const project = el('div', {
+        class: `queue-project${projectSelected ? ' is-current' : ''}`,
+        dataset: { job: job.id, status: job.status },
+        attrs: { role: 'group', 'aria-label': `Proyecto ${job.name}` },
+      });
       const row = el('div', {
-        class: `queue-row${job.id === this.selectedId ? ' is-current' : ''}`,
+        class: `queue-row${tree.source.current && projectSelected ? ' is-current' : ''}`,
         dataset: { job: job.id, status: job.status },
       });
 
       row.append(
-        el('button', { type: 'button', class: 'queue-item', dataset: { job: job.id } }, [
-          el('span', { class: 'queue-item-name', text: truncateName(job.name, 34), title: job.name }),
-          el('span', { class: 'queue-item-meta', text: this.describeJob(job) }),
+        el('button', {
+          type: 'button',
+          class: 'queue-item queue-source-item',
+          dataset: { job: job.id, projectNode: 'source' },
+          attrs: {
+            ...(tree.source.current && projectSelected ? { 'aria-current': 'true' } : {}),
+            ...(tree.resultCount ? { 'aria-expanded': String(projectSelected) } : {}),
+          },
+        }, [
+          el('span', { class: 'queue-node-icon', text: QUEUE_MEDIA_ICONS[tree.source.mediaKind] || '◇', attrs: { 'aria-hidden': 'true' } }),
+          el('span', { class: 'queue-item-copy' }, [
+            el('span', { class: 'queue-item-name', text: truncateName(tree.source.name, 34), title: tree.source.name }),
+            el('span', { class: 'queue-item-meta', text: this.describeProjectTreeNode(tree.source) }),
+            el('span', { class: 'queue-project-status', text: this.describeProjectQueueStatus(job) }),
+          ]),
+          tree.resultCount ? el('span', {
+            class: 'queue-child-count',
+            text: String(tree.resultCount),
+            title: `${tree.resultCount} ${tree.resultCount === 1 ? 'resultado' : 'resultados'}`,
+            attrs: { 'aria-label': `${tree.resultCount} ${tree.resultCount === 1 ? 'resultado' : 'resultados'}` },
+          }) : null,
         ]),
         el('span', { class: 'queue-dot', attrs: { 'aria-hidden': 'true' } }),
         el('button', {
@@ -1622,18 +1745,51 @@ export class App {
       );
 
       if (job.status === 'running') {
-        row.append(el('div', { class: 'queue-progress' }, [
-          el('div', { class: 'queue-progress-bar', style: `width:${Math.round(job.progress * 100)}%` }),
+        const progress = Math.round(job.progress * 100);
+        row.append(el('div', {
+          class: 'queue-progress',
+          attrs: {
+            role: 'progressbar',
+            'aria-label': `Progreso de ${job.name}`,
+            'aria-valuemin': '0',
+            'aria-valuemax': '100',
+            'aria-valuenow': String(progress),
+          },
+        }, [
+          el('div', { class: 'queue-progress-bar', style: `width:${progress}%` }),
         ]));
       }
 
-      list.append(row);
+      project.append(row);
+      if (projectSelected && tree.children.length) {
+        project.append(el('div', {
+          class: 'queue-children',
+          attrs: { role: 'group', 'aria-label': `Resultados de ${tree.source.name}` },
+        }, tree.children.map((child, index) => el('button', {
+          type: 'button',
+          class: `queue-result-item${child.current ? ' is-current' : ''}`,
+          dataset: { job: job.id, result: child.resultId, projectNode: 'result' },
+          attrs: {
+            ...(child.current ? { 'aria-current': 'true' } : {}),
+            'aria-label': `${index === 0 ? 'Último resultado' : `Resultado ${tree.children.length - index}`}: ${child.name}`,
+          },
+        }, [
+          el('span', { class: 'queue-tree-connector', text: '└', attrs: { 'aria-hidden': 'true' } }),
+          el('span', { class: 'queue-node-icon queue-result-icon', text: QUEUE_MEDIA_ICONS[child.mediaKind] || '◇', attrs: { 'aria-hidden': 'true' } }),
+          el('span', { class: 'queue-item-copy' }, [
+            el('span', { class: 'queue-item-name', text: truncateName(child.name, 31), title: child.name }),
+            el('span', { class: 'queue-item-meta', text: this.describeProjectTreeNode(child) }),
+          ]),
+          child.current ? el('span', { class: 'queue-viewing', text: 'Viendo' }) : null,
+        ]))));
+      }
+      list.append(project);
     }
 
     const done = this.jobs.filter((job) => this.jobIsSettledDone(job));
     this.dom.queueCount.textContent = this.jobs.length
-      ? `${this.jobs.length} file${this.jobs.length === 1 ? '' : 's'}`
-      : 'Nothing queued';
+      ? `${this.jobs.length} ${this.jobs.length === 1 ? 'proyecto' : 'proyectos'}${resultCount ? ` · ${resultCount} ${resultCount === 1 ? 'resultado' : 'resultados'}` : ''}`
+      : 'Sin proyectos';
     this.dom.app.dataset.empty = String(this.jobs.length === 0);
     this.dom.startAll.disabled = !this.jobs.some((job) => this.jobPendingForRun(job));
     this.dom.downloadAll.disabled = done.length === 0;
@@ -2242,6 +2398,24 @@ export class App {
     });
   }
 
+  showProjectSource(job, { scrollToControls = false, focusDetail = false } = {}) {
+    if (!job || !this.jobs.includes(job)) return;
+    this.selectedId = job.id;
+    job.previewMode = 'source';
+    this.releaseGeneratedResults();
+    this.paintQueue();
+    this.paintDetail();
+    if (focusDetail && typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => {
+        this.dom.detailName.tabIndex = -1;
+        this.dom.detailName.focus({ preventScroll: true });
+      });
+    }
+    if (scrollToControls) {
+      requestAnimationFrame(() => this.dom.controls.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+    }
+  }
+
   generatedResultsFor(job) {
     const history = this.resultHistoryFor(job);
     const config = {
@@ -2255,16 +2429,13 @@ export class App {
         const current = this.resultHistoryFor(job);
         const next = selectResult(current, entry.id, { projectId: job.id });
         Object.assign(job, resultCompatibilityPatch(next));
+        this.paintQueue();
         this.scheduleProjectSave();
       },
       onDownload: (entry) => this.downloadResult(job, entry.id),
       onRemove: (entry) => this.removeGeneratedResult(job, entry.id),
-      onCreateAnother: () => {
-        job.previewMode = 'source';
-        this.releaseGeneratedResults();
-        this.paintDetail();
-        requestAnimationFrame(() => this.dom.controls.scrollIntoView({ behavior: 'smooth', block: 'start' }));
-      },
+      onSelectSource: () => this.showProjectSource(job, { focusDetail: true }),
+      onCreateAnother: () => this.showProjectSource(job, { scrollToControls: true }),
     };
 
     if (this.generatedResults?.jobId === job.id) {
@@ -2347,7 +2518,13 @@ export class App {
   }
 
   releaseGeneratedResults() {
+    const node = this.generatedResults?.control.node;
     this.generatedResults?.control.destroy();
+    // `destroy()` releases media URLs and listeners, but intentionally keeps
+    // the reusable root node. Remove it when leaving the Results workspace so
+    // the source preview cannot mistake that empty shell for an existing
+    // `<video>`/`<audio>` belonging to the same job.
+    node?.remove();
     this.generatedResults = null;
   }
 
@@ -5839,9 +6016,15 @@ export class App {
   }
 
   onClick(event) {
+    const resultButton = event.target.closest('.queue-result-item');
+    if (resultButton) {
+      this.selectProjectResult(resultButton.dataset.job, resultButton.dataset.result);
+      return;
+    }
+
     const jobButton = event.target.closest('.queue-item');
     if (jobButton) {
-      this.select(jobButton.dataset.job);
+      this.selectProjectSource(jobButton.dataset.job);
       return;
     }
 

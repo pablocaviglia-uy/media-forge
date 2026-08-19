@@ -190,6 +190,7 @@ test('simple project serialization is explicit and keeps bytes out of metadata r
   const job = simpleJob({
     file: source,
     status: 'done',
+    previewMode: 'source',
     outputs: [{ name: 'clip.webm', blob: result }],
     outputSize: result.size,
     downloadName: 'clip.webm',
@@ -208,6 +209,7 @@ test('simple project serialization is explicit and keeps bytes out of metadata r
   assert.equal(graph.meta.selectedId, job.id);
   assert.equal(graph.projects[0].kind, 'simple');
   assert.equal(graph.projects[0].status, 'done');
+  assert.equal(graph.projects[0].previewMode, 'source');
   assert.equal(graph.assets[0].role, 'source');
   assert.equal(graph.assets[0].name, 'clip.mp4');
   assert.equal(graph.outputs[0].name, 'clip.webm');
@@ -216,12 +218,29 @@ test('simple project serialization is explicit and keeps bytes out of metadata r
 
   for (const key of [
     'file', 'outputs', 'progress', 'speed', 'remaining', 'log', 'error', 'previewUrl',
-    'pendingMergeSnapshot', 'pendingAddAudioSnapshot', 'pendingQuickFocus', 'previewMode',
+    'pendingMergeSnapshot', 'pendingAddAudioSnapshot', 'pendingQuickFocus',
   ]) {
     assert.equal(key in graph.projects[0], false, `${key} leaked into project metadata`);
   }
   assert.equal('data' in graph.assets[0], false);
   assert.equal('data' in graph.outputs[0], false);
+});
+
+test('the chosen source or result view survives restore with a legacy result fallback', () => {
+  const output = new Blob(['audio'], { type: 'audio/mpeg' });
+  const job = simpleJob({
+    status: 'done',
+    previewMode: 'source',
+    outputs: [{ name: 'holiday.mp3', blob: output }],
+    downloadName: 'holiday.mp3',
+    outputSize: output.size,
+  });
+  const graph = serializeWorkspace([job], { registry: createBlobIdentityRegistry(ids()) });
+
+  assert.equal(hydrateWorkspace(graph).jobs[0].previewMode, 'source');
+
+  delete graph.projects[0].previewMode;
+  assert.equal(hydrateWorkspace(graph).jobs[0].previewMode, 'result');
 });
 
 test('one Blob reused by different projects receives owner-specific record ids', () => {
