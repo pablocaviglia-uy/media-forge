@@ -16,8 +16,8 @@
  * the single exception called out at IMMUTABLE.
  */
 
-// v13 adds the navigable source-to-results project tree.
-const CACHE_VERSION = 'v13';
+// v14 adds the byte-free Audio Lab graph and custom player foundation.
+const CACHE_VERSION = 'v14';
 const CACHE_NAME = `media-forge-${CACHE_VERSION}`;
 
 /**
@@ -57,6 +57,7 @@ const PRECACHE = [
   './src/media/quick-tools.js',
   './src/media/merge.js',
   './src/media/add-audio.js',
+  './src/media/audio-lab.js',
   './src/media/project-tree.js',
   './src/media/results.js',
   './src/media/timeline.js',
@@ -70,6 +71,7 @@ const PRECACHE = [
   './src/ui/cropper.js',
   './src/ui/merge-sequence.js',
   './src/ui/audio-mix-timeline.js',
+  './src/ui/audio-lab-player.js',
   './src/ui/generated-results.js',
 
   /*
