@@ -159,3 +159,20 @@ export function reveal(view, time, duration) {
   const edge = time < view.start ? time : time - span;
   return place(edge, span, 0, Math.max(MIN_SPAN, duration || 0));
 }
+
+/**
+ * Keep a playing instant in the middle of a zoomed window when there is room.
+ *
+ * Playback follow is intentionally different from `reveal`: an explicit seek
+ * should preserve as much of the user's chosen context as possible, while a
+ * moving playhead is easier to read when the waveform travels beneath a fixed
+ * centre marker. At the media boundaries the window is clamped, so the marker
+ * naturally travels from the left edge to the centre at the beginning and
+ * from the centre to the right edge at the end without exposing empty space.
+ */
+export function followPlayback(view, time, duration) {
+  const total = Math.max(MIN_SPAN, duration || 0);
+  const width = spanOf(view);
+  const next = place(time - width / 2, width, 0, total);
+  return next.start === view.start && next.end === view.end ? view : next;
+}

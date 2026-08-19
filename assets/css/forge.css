@@ -5625,6 +5625,20 @@ html[data-interface="forge"] .audio-lab-playhead::before {
   transform: translateX(-50%);
 }
 
+html[data-interface="forge"] .audio-lab-playhead[data-edge="start"]::before {
+  left: 0;
+  transform: none;
+}
+
+html[data-interface="forge"] .audio-lab-playhead[data-edge="end"] {
+  transform: translateX(-100%);
+}
+
+html[data-interface="forge"] .audio-lab-playhead[data-edge="end"]::before {
+  left: 100%;
+  transform: translateX(-100%);
+}
+
 html[data-interface="forge"] .audio-lab-selection-handle {
   position: absolute;
   top: 0;

@@ -162,6 +162,7 @@ function installBrowserFakes() {
     createObjectURL: globalThis.URL.createObjectURL,
     revokeObjectURL: globalThis.URL.revokeObjectURL,
     ResizeObserver: globalThis.ResizeObserver,
+    matchMedia: globalThis.matchMedia,
   };
   const created = [];
   const revoked = [];
@@ -205,6 +206,9 @@ function installBrowserFakes() {
       frames.delete(entry[0]);
       entry[1](16);
     },
+    dispatchWindow(type, details = {}) {
+      for (const handler of [...(windowListeners.get(type) || [])]) handler(details);
+    },
     pendingFrames: () => frames.size,
     restore() {
       globalThis.document = originals.document;
@@ -214,6 +218,7 @@ function installBrowserFakes() {
       globalThis.URL.createObjectURL = originals.createObjectURL;
       globalThis.URL.revokeObjectURL = originals.revokeObjectURL;
       globalThis.ResizeObserver = originals.ResizeObserver;
+      globalThis.matchMedia = originals.matchMedia;
     },
   };
 }
@@ -281,6 +286,24 @@ test('selection, fit and playback-boundary helpers remain deterministic at bad e
     playingSelection: true,
     loop: false,
   }), { action: 'stop', time: 4 });
+  assert.deepEqual(audioSelectionBoundary({
+    currentTime: 1,
+    selection: { from: 2, to: 4 },
+    playingSelection: true,
+    loop: false,
+  }), { action: 'rebase', time: 2 });
+  assert.deepEqual(audioSelectionBoundary({
+    currentTime: 1.98,
+    selection: { from: 2, to: 4 },
+    playingSelection: true,
+    loop: false,
+  }), { action: 'rebase', time: 2 });
+  assert.deepEqual(audioSelectionBoundary({
+    currentTime: 1.999,
+    selection: { from: 2, to: 4 },
+    playingSelection: true,
+    loop: false,
+  }), { action: 'continue', time: 1.999 });
 });
 
 test('the custom player exposes accessible controls and keyboard-driven fragment callbacks', () => {
@@ -418,6 +441,171 @@ test('timeupdate enforces selection playback when animation frames are suspended
   }
 });
 
+test('editing a playing selection ahead of the playhead rebases playback to its new start', () => {
+  const env = installBrowserFakes();
+  try {
+    const control = createAudioLabPlayer({
+      url: 'blob:caller-owned',
+      duration: 100,
+      selection: { from: 20, to: 80 },
+    });
+    action(control, 'play-selection').dispatch('click');
+    control.media.currentTime = 40;
+    control.setSelection({ from: 50, to: 80 });
+
+    env.runNextFrame();
+    assert.equal(control.media.currentTime, 50);
+    assert.equal(control.media.paused, false);
+    control.destroy();
+  } finally {
+    env.restore();
+  }
+});
+
+test('loop and rebase jumps follow immediately while the media element reports seeking', () => {
+  const env = installBrowserFakes();
+  try {
+    const control = createAudioLabPlayer({
+      url: 'blob:caller-owned',
+      duration: 100,
+      selection: { from: 30, to: 80 },
+      loop: true,
+    });
+    action(control, 'zoom-in').dispatch('click');
+    action(control, 'play-selection').dispatch('click');
+    control.media.currentTime = 60;
+    env.runNextFrame();
+    assert.deepEqual(control.view(), { start: 35, end: 85 });
+
+    let clock = 80;
+    Object.defineProperty(control.media, 'currentTime', {
+      configurable: true,
+      get: () => clock,
+      set(value) {
+        clock = value;
+        control.media.seeking = true;
+      },
+    });
+    control.media.seeking = false;
+    env.runNextFrame();
+    assert.equal(clock, 30);
+    assert.equal(control.media.seeking, true);
+    assert.deepEqual(control.view(), { start: 5, end: 55 }, 'rAF must show the wrapped clock immediately');
+
+    control.media.seeking = false;
+    clock = 60;
+    env.runNextFrame();
+    assert.deepEqual(control.view(), { start: 35, end: 85 });
+    clock = 80;
+    control.media.dispatch('timeupdate');
+    assert.equal(clock, 30);
+    assert.equal(control.media.seeking, true);
+    assert.deepEqual(control.view(), { start: 5, end: 55 }, 'timeupdate must show the wrapped clock immediately');
+    control.destroy();
+  } finally {
+    env.restore();
+  }
+});
+
+test('ended selection playback follows its loop or stop boundary before settling transport', () => {
+  const env = installBrowserFakes();
+  try {
+    const looped = createAudioLabPlayer({
+      url: 'blob:looped',
+      duration: 100,
+      selection: { from: 30, to: 100 },
+      loop: true,
+    });
+    action(looped, 'zoom-in').dispatch('click');
+    action(looped, 'play-selection').dispatch('click');
+    looped.media.currentTime = 100;
+    looped.media.ended = true;
+    looped.media.dispatch('ended');
+    assert.equal(looped.media.currentTime, 30);
+    assert.equal(looped.media.paused, false);
+    assert.deepEqual(looped.view(), { start: 5, end: 55 });
+    looped.destroy();
+
+    const stopped = createAudioLabPlayer({
+      url: 'blob:stopped',
+      duration: 100,
+      selection: { from: 30, to: 100 },
+      loop: false,
+    });
+    action(stopped, 'zoom-in').dispatch('click');
+    action(stopped, 'play-selection').dispatch('click');
+    stopped.media.currentTime = 100;
+    stopped.media.ended = true;
+    stopped.media.dispatch('ended');
+    assert.equal(stopped.media.currentTime, 100);
+    assert.equal(stopped.media.paused, true);
+    assert.deepEqual(stopped.view(), { start: 50, end: 100 });
+    assert.equal(stopped.node.querySelector('.audio-lab-playhead').dataset.edge, 'end');
+    stopped.destroy();
+  } finally {
+    env.restore();
+  }
+});
+
+test('ended full-file playback follows the final clock to the media edge', () => {
+  const env = installBrowserFakes();
+  try {
+    const control = createAudioLabPlayer({
+      url: 'blob:caller-owned',
+      duration: 100,
+    });
+    action(control, 'zoom-in').dispatch('click');
+    action(control, 'play').dispatch('click');
+    control.media.currentTime = 100;
+    control.media.ended = true;
+    control.media.dispatch('ended');
+
+    assert.deepEqual(control.view(), { start: 50, end: 100 });
+    assert.equal(control.node.querySelector('.audio-lab-playhead').dataset.edge, 'end');
+    assert.equal(env.pendingFrames(), 0);
+    control.destroy();
+  } finally {
+    env.restore();
+  }
+});
+
+test('selection playback renders its exact stopped position and final followed viewport', () => {
+  const env = installBrowserFakes();
+  try {
+    const control = createAudioLabPlayer({
+      url: 'blob:caller-owned',
+      duration: 100,
+      selection: { from: 30, to: 80 },
+      peaks: Array.from({ length: 100 }, () => 0.5),
+    });
+    let strokes = 0;
+    control.node.querySelector('canvas').getContext = () => ({
+      setTransform() {},
+      clearRect() {},
+      beginPath() {},
+      moveTo() {},
+      lineTo() {},
+      stroke() { strokes += 1; },
+    });
+    action(control, 'zoom-in').dispatch('click');
+    action(control, 'play-selection').dispatch('click');
+    assert.equal(control.media.currentTime, 30);
+    const beforeStop = strokes;
+
+    control.media.currentTime = 80;
+    env.runNextFrame();
+
+    assert.equal(control.media.paused, true);
+    assert.equal(control.media.currentTime, 80);
+    assert.deepEqual(control.view(), { start: 50, end: 100 });
+    close(Number.parseFloat(control.node.querySelector('.audio-lab-playhead').style.left), 60);
+    assert.ok(strokes > beforeStop, 'the waveform must repaint for the final viewport');
+    control.destroy();
+  } finally {
+    env.restore();
+  }
+});
+
 test('a media error stops the playback monitor and leaves transport paused', () => {
   const env = installBrowserFakes();
   try {
@@ -520,6 +708,87 @@ test('following a seek across a zoom boundary redraws peaks for the new viewport
     assert.ok(afterZoom > 0);
     control.seek(7);
     assert.ok(strokes > afterZoom, 'the revealed viewport must repaint the canvas');
+    control.destroy();
+  } finally {
+    env.restore();
+  }
+});
+
+test('zoomed playback centres the playhead, clamps at the edges, and leaves a paused view alone', () => {
+  const env = installBrowserFakes();
+  try {
+    const control = createAudioLabPlayer({
+      url: 'blob:caller-owned',
+      duration: 100,
+      peaks: Array.from({ length: 100 }, (_, index) => (index + 1) / 100),
+    });
+
+    action(control, 'zoom-in').dispatch('click');
+    assert.deepEqual(control.view(), { start: 0, end: 50 });
+    action(control, 'play').dispatch('click');
+
+    control.media.currentTime = 10;
+    env.runNextFrame();
+    assert.deepEqual(control.view(), { start: 0, end: 50 }, 'the beginning must not expose negative time');
+
+    control.media.currentTime = 30;
+    env.runNextFrame();
+    assert.deepEqual(control.view(), { start: 5, end: 55 });
+    close(Number.parseFloat(control.node.querySelector('.audio-lab-playhead').style.left), 50);
+
+    const fromHandle = control.node.querySelector('.audio-lab-selection-from');
+    fromHandle.dispatch('pointerdown');
+    control.media.currentTime = 40;
+    env.runNextFrame();
+    assert.deepEqual(control.view(), { start: 5, end: 55 }, 'following pauses while a handle is dragged');
+    env.dispatchWindow('pointerup');
+
+    fromHandle.focus();
+    control.media.currentTime = 45;
+    env.runNextFrame();
+    assert.deepEqual(control.view(), { start: 5, end: 55 }, 'following pauses while a handle has focus');
+    control.focus();
+
+    control.media.currentTime = 90;
+    env.runNextFrame();
+    assert.deepEqual(control.view(), { start: 50, end: 100 }, 'the end must not expose time after the file');
+
+    action(control, 'play').dispatch('click');
+    const pausedView = control.view();
+    control.media.currentTime = 25;
+    control.media.dispatch('timeupdate');
+    assert.deepEqual(control.view(), pausedView, 'a passive paused update must not recenter the viewport');
+
+    control.seek(25);
+    assert.deepEqual(control.view(), { start: 25, end: 75 }, 'an explicit seek may reveal its target');
+    control.destroy();
+  } finally {
+    env.restore();
+  }
+});
+
+test('reduced-motion playback reveals only at an edge instead of continuously centring', () => {
+  const env = installBrowserFakes();
+  try {
+    globalThis.matchMedia = (query) => ({
+      matches: query === '(prefers-reduced-motion: reduce)',
+    });
+    const control = createAudioLabPlayer({
+      url: 'blob:caller-owned',
+      duration: 100,
+      peaks: [0.2, 0.4, 0.6, 0.8],
+    });
+    action(control, 'zoom-in').dispatch('click');
+    action(control, 'play').dispatch('click');
+
+    control.media.currentTime = 30;
+    env.runNextFrame();
+    assert.deepEqual(control.view(), { start: 0, end: 50 }, 'visible playback must not pan');
+
+    control.media.currentTime = 70;
+    env.runNextFrame();
+    assert.deepEqual(control.view(), { start: 20, end: 70 }, 'off-screen playback uses minimal reveal');
+    close(Number.parseFloat(control.node.querySelector('.audio-lab-playhead').style.left), 100);
     control.destroy();
   } finally {
     env.restore();

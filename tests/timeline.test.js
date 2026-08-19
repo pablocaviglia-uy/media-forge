@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 
 import {
   MIN_SPAN, fit, spanOf, fractionOf, timeAt, zoom, pan,
-  step, nudge, setFrom, setTo, selectAll, lengthOf, reveal,
+  step, nudge, setFrom, setTo, selectAll, lengthOf, reveal, followPlayback,
 } from '../src/media/timeline.js';
 
 /** An hour, which is where the arithmetic gets uncomfortable. */
@@ -217,4 +217,23 @@ test('a time off the edge brings the window to it, and no further', () => {
   const left = reveal(view, 60, HOUR);
   close(left.start, 60, 1e-9, 'should have followed backwards to the edge');
   close(spanOf(left), 100, 1e-9, 'and not resized');
+});
+
+test('playback follow keeps the playhead centred while preserving the zoom', () => {
+  const view = { start: 100, end: 200 };
+  const followed = followPlayback(view, 500, 1000);
+
+  assert.deepEqual(followed, { start: 450, end: 550 });
+  close(fractionOf(followed, 500), 0.5, 1e-9, 'the playhead should sit in the centre');
+  close(spanOf(followed), spanOf(view), 1e-9, 'following must not change the zoom');
+});
+
+test('playback follow clamps at both media edges without exposing empty space', () => {
+  const view = { start: 400, end: 500 };
+
+  assert.deepEqual(followPlayback(view, 20, 1000), { start: 0, end: 100 });
+  assert.deepEqual(followPlayback(view, 980, 1000), { start: 900, end: 1000 });
+
+  const whole = fit(1000);
+  assert.equal(followPlayback(whole, 500, 1000), whole, 'a fitted view should not churn identity');
 });

@@ -10,6 +10,7 @@
 import { el, formatDuration, formatTimestamp, on, parseTimestamp } from './dom.js';
 import {
   fit,
+  followPlayback,
   fractionOf,
   lengthOf,
   nudge,
@@ -148,6 +149,14 @@ export function audioSelectionBoundary({ currentTime, selection, playingSelectio
     return { action: 'continue', time: finiteTime(currentTime) };
   }
   const time = finiteTime(currentTime);
+  // A selection can be edited while it is playing. If its new beginning moves
+  // ahead of the playhead, continuing outside the active range would make the
+  // transport lie about what it is playing; rebase immediately in both looped
+  // and one-shot selection playback.
+  // Compressed formats can report a decoded timestamp a few milliseconds
+  // before the requested seek. Treat that as having arrived, or every frame
+  // would issue the same seek again and some browsers would never settle it.
+  if (time < selection.from - LOOP_EPSILON) return { action: 'rebase', time: selection.from };
   // Never cut a selection early. requestAnimationFrame may observe a small
   // overshoot, but treating an epsilon before the edge as the edge is audible.
   if (time < selection.to) return { action: 'continue', time };
@@ -465,6 +474,7 @@ export function createAudioLabPlayer(options = {}) {
     fromHandle.style.left = `${from * 100}%`;
     toHandle.style.left = `${to * 100}%`;
     playhead.style.left = `${needle * 100}%`;
+    playhead.dataset.edge = needle <= 1e-6 ? 'start' : needle >= 1 - 1e-6 ? 'end' : 'inside';
     fromHandle.dataset.outside = selection.from < view.start ? 'before' : selection.from > view.end ? 'after' : 'false';
     toHandle.dataset.outside = selection.to < view.start ? 'before' : selection.to > view.end ? 'after' : 'false';
     fromHandle.dataset.edge = from <= 1e-6 ? 'start' : 'inside';
@@ -592,15 +602,49 @@ export function createAudioLabPlayer(options = {}) {
     if (view !== previousView) paintWaveform();
   }
 
+  function manualTimelineInteractionActive() {
+    const focused = globalThis.document?.activeElement;
+    return Boolean(stopPointerDrag || focused === fromHandle || focused === toHandle);
+  }
+
+  function reducedMotionPreferred() {
+    const matchMedia = globalThis.matchMedia || globalThis.window?.matchMedia;
+    if (typeof matchMedia !== 'function') return false;
+    try {
+      return matchMedia.call(globalThis.window || globalThis, '(prefers-reduced-motion: reduce)').matches === true;
+    } catch {
+      return false;
+    }
+  }
+
+  function updatePlaybackView({ boundaryJump = false, final = false } = {}) {
+    const previousView = view;
+    const mayFollow = duration > 0
+      && !manualTimelineInteractionActive()
+      // A loop/rebase writes currentTime itself and browsers immediately expose
+      // `seeking=true`. That boundary jump is already authoritative, so show it
+      // now instead of leaving one stale frame on screen.
+      && (final || boundaryJump || (media.paused === false && media.seeking !== true));
+    if (mayFollow) {
+      view = reducedMotionPreferred()
+        ? reveal(view, currentTime(), duration)
+        : followPlayback(view, currentTime(), duration);
+    }
+    render();
+    if (view !== previousView) paintWaveform();
+  }
+
   function monitorPlayback() {
     frameId = null;
     if (destroyed || media.paused !== false) return;
     const boundary = enforceSelectionBoundary();
-    if (boundary === 'stop') return;
-    const previousView = view;
-    if (duration > 0) view = reveal(view, currentTime(), duration);
-    render();
-    if (view !== previousView) paintWaveform();
+    if (boundary === 'stop') {
+      // `enforceSelectionBoundary` has already fixed the media clock. Render
+      // that final position even though pausing made ordinary follow inactive.
+      updatePlaybackView({ final: true });
+      return;
+    }
+    updatePlaybackView({ boundaryJump: boundary === 'loop' || boundary === 'rebase' });
     frameId = requestFrame(monitorPlayback);
   }
 
@@ -611,7 +655,7 @@ export function createAudioLabPlayer(options = {}) {
       playingSelection: playbackScope === 'selection',
       loop: looping,
     });
-    if (boundary.action === 'loop') {
+    if (boundary.action === 'loop' || boundary.action === 'rebase') {
       try { media.currentTime = boundary.time; } catch { /* media may have become unavailable */ }
     } else if (boundary.action === 'stop') {
       playbackScope = 'all';
@@ -929,19 +973,29 @@ export function createAudioLabPlayer(options = {}) {
     on(media, 'durationchange', () => applyKnownDuration(media.duration)),
     on(media, 'timeupdate', () => {
       const boundary = enforceSelectionBoundary();
-      if (boundary === 'stop') return;
-      const previousView = view;
-      if (duration > 0) view = reveal(view, currentTime(), duration);
-      render();
-      if (view !== previousView) paintWaveform();
+      if (boundary === 'stop') {
+        updatePlaybackView({ final: true });
+        return;
+      }
+      // `timeupdate` is the background-tab fallback for the animation monitor.
+      // A paused update must not unexpectedly recenter the user's viewport.
+      updatePlaybackView({ boundaryJump: boundary === 'loop' || boundary === 'rebase' });
     }),
     on(media, 'seeking', render),
     on(media, 'play', () => { render(); startPlaybackMonitor(); }),
     on(media, 'pause', () => { stopPlaybackMonitor(); render(); }),
     on(media, 'ended', () => {
       const boundary = enforceSelectionBoundary();
-      if (boundary === 'loop') startMedia();
-      else { stopPlaybackMonitor(); render(); }
+      if (boundary === 'loop' || boundary === 'rebase') {
+        updatePlaybackView({ boundaryJump: true });
+        startMedia();
+      } else {
+        // Native full-file playback reports `continue` here because there is
+        // no selection boundary to enforce. It still needs the same final
+        // viewport update as a one-shot selection before the monitor stops.
+        updatePlaybackView({ final: true });
+        stopPlaybackMonitor();
+      }
     }),
     on(media, 'error', () => {
       stopPlaybackMonitor();

@@ -16,8 +16,8 @@
  * the single exception called out at IMMUTABLE.
  */
 
-// v15 connects the safe, local waveform analyser to Audio Lab.
-const CACHE_VERSION = 'v15';
+// v16 adds centred playhead follow while preserving timeline edge context.
+const CACHE_VERSION = 'v16';
 const CACHE_NAME = `media-forge-${CACHE_VERSION}`;
 
 /**
