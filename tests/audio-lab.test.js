@@ -8,6 +8,7 @@ import {
   validateAudioLabState,
   createAudioLabState,
   createAudioLabFragment,
+  createAudioLabFragmentFromRootRange,
   selectAudioLabNode,
   audioLabLineage,
   audioLabBreadcrumbs,
@@ -155,6 +156,68 @@ test('fragment creation defaults to the selected node and supports a fragment in
     end: 35,
     duration: 10,
   });
+});
+
+test('a root-relative fragment on the root keeps the same stored range', () => {
+  const makeId = idFactory();
+  const root = createAudioLabState(source({ duration: 60 }), { makeId });
+  const fragment = createAudioLabFragmentFromRootRange(root, {
+    start: 12.5,
+    end: 31.75,
+    label: 'Estribillo',
+  }, { makeId });
+
+  assert.deepEqual(fragment.nodes[1].range, { start: 12.5, end: 31.75 });
+  assert.deepEqual(resolveAudioLabRange(fragment), {
+    start: 12.5,
+    end: 31.75,
+    duration: 19.25,
+  });
+});
+
+test('a root-relative fragment inside a nested selection is converted to its parent clock', () => {
+  const makeId = idFactory();
+  let state = createAudioLabState(source({ duration: 120 }), { makeId });
+  state = createAudioLabFragment(state, {
+    start: 20,
+    end: 80,
+    label: 'Solo',
+  }, { makeId });
+  state = createAudioLabFragmentFromRootRange(state, {
+    start: 25,
+    end: 35,
+    label: 'Compás favorito',
+  }, { makeId });
+
+  assert.deepEqual(state.nodes[2].range, { start: 5, end: 15 });
+  assert.deepEqual(resolveAudioLabRange(state), { start: 25, end: 35, duration: 10 });
+
+  state = createAudioLabFragmentFromRootRange(state, {
+    start: 27,
+    end: 29,
+    label: 'Golpe',
+  }, { makeId });
+  assert.deepEqual(state.nodes[3].range, { start: 2, end: 4 });
+  assert.deepEqual(resolveAudioLabRange(state), { start: 27, end: 29, duration: 2 });
+});
+
+test('a root-relative fragment cannot escape the selected parent range', () => {
+  const makeId = idFactory();
+  let state = createAudioLabState(source({ duration: 120 }), { makeId });
+  state = createAudioLabFragment(state, { start: 20, end: 80 }, { makeId });
+
+  assert.throws(
+    () => createAudioLabFragmentFromRootRange(state, { start: 10, end: 30 }, { makeId }),
+    errorCode('range-out-of-bounds'),
+  );
+  assert.throws(
+    () => createAudioLabFragmentFromRootRange(state, { start: 70, end: 90 }, { makeId }),
+    errorCode('range-out-of-bounds'),
+  );
+  assert.throws(
+    () => createAudioLabFragmentFromRootRange(state, { start: Number.NaN, end: 30 }, { makeId }),
+    errorCode('range-out-of-bounds'),
+  );
 });
 
 test('lineage and breadcrumbs describe nested navigation from root to selection', () => {

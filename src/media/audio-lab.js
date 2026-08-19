@@ -353,6 +353,45 @@ export function createAudioLabFragment(
   });
 }
 
+/**
+ * Add a child to the selected node from an absolute range on the root output.
+ * UI timelines can therefore keep one root-relative clock while the persisted
+ * graph continues storing every fragment relative to its immediate parent.
+ */
+export function createAudioLabFragmentFromRootRange(
+  state,
+  {
+    start,
+    end,
+    label = null,
+  } = {},
+  options = {},
+) {
+  const current = validateAudioLabState(state);
+  const parent = requireNode(current, current.selectedNodeId);
+  const parentRange = resolveAudioLabRange(current, parent.id);
+  if (
+    typeof start !== 'number'
+    || typeof end !== 'number'
+    || !Number.isFinite(start)
+    || !Number.isFinite(end)
+    || start < parentRange.start - RANGE_EPSILON
+    || end > parentRange.end + RANGE_EPSILON
+  ) {
+    throw new AudioLabModelError(
+      'range-out-of-bounds',
+      `The absolute Audio Lab range must stay inside selected node ${parent.id}.`,
+    );
+  }
+
+  return createAudioLabFragment(current, {
+    parentNodeId: parent.id,
+    start: Math.max(0, start - parentRange.start),
+    end: Math.min(parentRange.duration, end - parentRange.start),
+    label,
+  }, options);
+}
+
 /** Select any existing root or fragment without mutating the graph. */
 export function selectAudioLabNode(state, nodeId) {
   const current = validateAudioLabState(state);

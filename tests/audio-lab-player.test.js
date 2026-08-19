@@ -287,6 +287,7 @@ test('the custom player exposes accessible controls and keyboard-driven fragment
   const env = installBrowserFakes();
   try {
     const selectionChanges = [];
+    const loopChanges = [];
     const fragments = [];
     const opens = [];
     const control = createAudioLabPlayer({
@@ -294,6 +295,7 @@ test('the custom player exposes accessible controls and keyboard-driven fragment
       name: 'Interview.mp3',
       duration: 100,
       onSelectionChange: (...args) => selectionChanges.push(args),
+      onLoopChange: (...args) => loopChanges.push(args),
       onCreateFragment: (...args) => fragments.push(args),
       onOpenLab: (state) => opens.push(state),
     });
@@ -307,12 +309,16 @@ test('the custom player exposes accessible controls and keyboard-driven fragment
     assert.equal(seek.attributes.get('aria-label'), 'Posición de reproducción');
     assert.equal(control.node.querySelector('.audio-lab-waveform-fallback').hidden, false);
     assert.deepEqual(control.selection(), { from: 0, to: 100 });
+    assert.equal(control.node.querySelector('.audio-lab-selection-from').dataset.edge, 'start');
+    assert.equal(control.node.querySelector('.audio-lab-selection-to').dataset.edge, 'end');
 
     control.media.currentTime = 20;
     control.node.dispatch('keydown', { target: control.node, key: 'i' });
     control.media.currentTime = 35;
     control.node.dispatch('keydown', { target: control.node, key: 'o' });
     assert.deepEqual(control.selection(), { from: 20, to: 35 });
+    assert.equal(control.node.querySelector('.audio-lab-selection-from').dataset.edge, 'inside');
+    assert.equal(control.node.querySelector('.audio-lab-selection-to').dataset.edge, 'inside');
     assert.deepEqual(selectionChanges.map(([range, context]) => [range, context.source, context.commit]), [
       [{ from: 20, to: 100 }, 'shortcut', true],
       [{ from: 20, to: 35 }, 'shortcut', true],
@@ -320,6 +326,14 @@ test('the custom player exposes accessible controls and keyboard-driven fragment
 
     action(control, 'loop').dispatch('click');
     assert.equal(action(control, 'loop').attributes.get('aria-pressed'), 'true');
+    assert.deepEqual(loopChanges, [[true, { source: 'button' }]]);
+    control.update({ loop: false });
+    assert.equal(loopChanges.length, 1, 'controlled updates are silent');
+    control.node.dispatch('keydown', { target: control.node, key: 'L' });
+    assert.deepEqual(loopChanges, [
+      [true, { source: 'button' }],
+      [true, { source: 'shortcut' }],
+    ]);
     action(control, 'create-fragment').dispatch('click');
     assert.deepEqual(fragments, [[
       { from: 20, to: 35 },

@@ -9,6 +9,8 @@
  */
 
 import { el, formatBitrate, formatBytes, formatDuration, on, truncateName } from './dom.js';
+import { createAudioLabPlayer } from './audio-lab-player.js';
+import { audioLabBreadcrumbs, validateAudioLabState } from '../media/audio-lab.js';
 
 let nextGeneratedResultsId = 1;
 
@@ -300,6 +302,7 @@ function sourceNode(source, selectable = false) {
 /**
  * @typedef {object} GeneratedResult
  * @property {string|number} [id] Stable id, strongly recommended.
+ * @property {string|number} [outputId] Exact output id, for Audio Lab persistence lookup.
  * @property {string} name Display and default download name.
  * @property {Blob} [blob] Local bytes. The component owns any URL it creates.
  * @property {Array<{name: string, blob: Blob, type?: string}>} [outputs] Optional generation shape; its first output is previewed.
@@ -322,6 +325,9 @@ function sourceNode(source, selectable = false) {
  *   followLatest?: boolean,
  *   allowRemove?: boolean,
  *   storageStatus?: 'saving'|'saved'|'error'|'off'|'persisted'|'session',
+ *   audioLabStateByResult?: Record<string, {selection?: {from: number, to: number}|null, peaks?: Iterable<number|[number, number]|{min: number, max: number}>|null, loop?: boolean, disabled?: boolean}>,
+ *   audioLabState?: object|null,
+ *   audioLabExpandedId?: string|number|null,
  *   onSelectSource?: (source: object|null) => void,
  *   onSelect?: (result: GeneratedResult, context: {id: string, index: number}) => void,
  *   onDownload?: (result: GeneratedResult, context: {id: string, url: string|null, downloadName: string}) => void,
@@ -329,12 +335,20 @@ function sourceNode(source, selectable = false) {
  *   onCreateAnother?: (source: object|null) => void,
  *   onMediaError?: (result: GeneratedResult) => void,
  *   onMediaEvent?: (type: 'play'|'pause'|'ended', result: GeneratedResult, media: HTMLMediaElement) => void,
+ *   onAudioSelectionChange?: (result: GeneratedResult, selection: {from: number, to: number}, context: {id: string, index: number, source: string, commit: boolean, audioLabState: object|null}) => void,
+ *   onAudioLoopChange?: (result: GeneratedResult, loop: boolean, context: {id: string, index: number, audioLabState: object|null}) => void,
+ *   onCreateAudioFragment?: (result: GeneratedResult, selection: {from: number, to: number}, context: {id: string, index: number, name: string, duration: number, parentNodeId: string|null, audioLabState: object|null}) => void,
+ *   onOpenAudioLab?: (result: GeneratedResult, playerState: {selection: object, view: object, currentTime: number, loop: boolean}, context: {id: string, index: number, audioLabState: object|null}) => void,
+ *   onSelectAudioNode?: (nodeId: string, context: {result: GeneratedResult, id: string, index: number, node: object}) => void,
+ *   onAudioLabExpandedChange?: (id: string|null, context: {result: GeneratedResult|null, reason: 'open'|'close'|'api'}) => void,
  * }} options
  * @returns {{
  *   node: HTMLElement,
  *   update: (next: object) => void,
  *   select: (id: string|number, notify?: boolean) => void,
  *   getActiveId: () => string|null,
+ *   setAudioLabExpanded: (id: string|number|null, notify?: boolean) => void,
+ *   getAudioLabExpandedId: () => string|null,
  *   focus: () => void,
  *   destroy: () => void,
  * }}
@@ -342,6 +356,8 @@ function sourceNode(source, selectable = false) {
 export function createGeneratedResults(options = {}) {
   const instanceId = `generated-results-${nextGeneratedResultsId++}`;
   const titleId = `${instanceId}-title`;
+  const audioLabTitleId = `${instanceId}-audio-lab-title`;
+  const audioLabWorkspaceId = `${instanceId}-audio-lab-workspace`;
   const liveId = `${instanceId}-live`;
   const root = el('section', {
     class: 'generated-results',
@@ -363,22 +379,86 @@ export function createGeneratedResults(options = {}) {
     followLatest: true,
     allowRemove: true,
     storageStatus: 'session',
+    audioLabStateByResult: null,
+    audioLabState: null,
+    audioLabExpandedId: null,
     ...options,
   };
   let results = normalizeGeneratedResults(config.results);
   let activeId = pickGeneratedResultId(results, config.activeId);
   let ownedUrls = new Set();
   let activeMedia = null;
+  let activeMediaStops = [];
+  let activeAudioPlayer = null;
+  let audioLabExpandedId = config.audioLabExpandedId == null ? null : String(config.audioLabExpandedId);
   let destroyed = false;
   let lastVisualSignature = null;
   let lastActiveAsset = null;
+  let lastActiveAudioBindingKey = null;
   let lastStorageState = null;
 
   const resultById = (id) => results.find((result) => result.id === String(id));
   const resultIndex = (id) => results.findIndex((result) => result.id === String(id));
+  if (audioLabExpandedId !== activeId || resultById(audioLabExpandedId)?.metadataView.kind !== 'audio') {
+    audioLabExpandedId = null;
+  }
   const activeAsset = (result) => {
     const output = primaryOutputOf(result);
     return result?.url || output?.url || blobOf(result) || null;
+  };
+  const audioBindingKey = (result) => {
+    const output = primaryOutputOf(result);
+    const key = result?.outputId
+      ?? result?.original?.outputId
+      ?? (output !== result ? output?.id : null);
+    return key == null ? null : String(key);
+  };
+  const audioLabStateFor = (result) => {
+    const states = config.audioLabStateByResult;
+    if (!states || typeof states !== 'object' || !result) return {};
+    const output = primaryOutputOf(result);
+    for (const key of [result.outputId, output?.id, result.id]) {
+      if (key == null) continue;
+      const state = states[String(key)];
+      if (state && typeof state === 'object') return state;
+    }
+    return {};
+  };
+  const audioLabStateProjection = (result = resultById(activeId) || results[0] || null) => {
+    if (!config.audioLabState) return { graph: null, status: 'empty' };
+    try {
+      const graph = validateAudioLabState(config.audioLabState);
+      const rootNode = graph.nodes.find((node) => node.id === graph.rootNodeId);
+      const output = primaryOutputOf(result);
+      const resultIds = new Set([
+        result?.id,
+        result?.original?.id,
+      ].filter((value) => value != null).map(String));
+      const outputIds = new Set([
+        result?.outputId,
+        result?.original?.outputId,
+        output !== result ? output?.id : null,
+      ].filter((value) => value != null).map(String));
+      if (!outputIds.size && !rootNode?.resultId) {
+        for (const id of resultIds) outputIds.add(id);
+      }
+      const matchesResult = rootNode?.resultId && resultIds.has(String(rootNode.resultId));
+      const matchesOutput = rootNode?.outputId && outputIds.has(String(rootNode.outputId));
+      const matches = outputIds.size
+        ? matchesOutput && (!rootNode?.resultId || matchesResult)
+        : matchesResult;
+      if (!matches) return { graph: null, status: 'unbound' };
+      return { graph, status: 'ready' };
+    } catch {
+      return { graph: null, status: 'invalid' };
+    }
+  };
+  const canonicalAudioLabState = (result) => audioLabStateProjection(result).graph;
+  const audioSourceFor = (result) => {
+    const output = primaryOutputOf(result);
+    const url = result?.url || output?.url;
+    if (url) return { url: String(url), blob: null };
+    return { url: null, blob: blobOf(result) };
   };
   const visualSignature = () => {
     const active = resultById(activeId) || results[0] || null;
@@ -395,6 +475,7 @@ export function createGeneratedResults(options = {}) {
       results: results.map((result) => ({
         id: result.id,
         name: result.name,
+        kind: result.metadataView.kind,
         operation: result.operation,
         status: result.status,
         stale: Boolean(result.stale),
@@ -406,7 +487,13 @@ export function createGeneratedResults(options = {}) {
   };
 
   const releaseMedia = () => {
-    if (activeMedia && ['AUDIO', 'VIDEO'].includes(activeMedia.tagName)) {
+    for (const stop of activeMediaStops) stop();
+    activeMediaStops = [];
+    if (activeAudioPlayer) {
+      activeAudioPlayer.destroy();
+      activeAudioPlayer = null;
+      activeMedia = null;
+    } else if (activeMedia && ['AUDIO', 'VIDEO'].includes(activeMedia.tagName)) {
       activeMedia.pause();
       activeMedia.removeAttribute('src');
       activeMedia.load();
@@ -416,6 +503,68 @@ export function createGeneratedResults(options = {}) {
     activeMedia = null;
     for (const url of ownedUrls) URL.revokeObjectURL(url);
     ownedUrls = new Set();
+  };
+
+  const audioPlayerCallbacks = (resultId) => ({
+    onSelectionChange(selection, context) {
+      const current = resultById(resultId);
+      if (!current) return;
+      config.onAudioSelectionChange?.(current.original, selection, {
+        id: current.id,
+        index: resultIndex(current.id),
+        ...context,
+        audioLabState: canonicalAudioLabState(current),
+      });
+    },
+    onLoopChange(loop) {
+      const current = resultById(resultId);
+      if (!current) return;
+      config.onAudioLoopChange?.(current.original, loop, {
+        id: current.id,
+        index: resultIndex(current.id),
+        audioLabState: canonicalAudioLabState(current),
+      });
+    },
+    onCreateFragment: typeof config.onCreateAudioFragment === 'function' ? (selection, context) => {
+      const current = resultById(resultId);
+      if (!current) return;
+      const graph = canonicalAudioLabState(current);
+      config.onCreateAudioFragment?.(current.original, selection, {
+        id: current.id,
+        index: resultIndex(current.id),
+        ...context,
+        parentNodeId: graph?.selectedNodeId || null,
+        audioLabState: graph,
+      });
+    } : null,
+    onOpenLab(playerState) {
+      const current = resultById(resultId);
+      if (!current) return;
+      setAudioLabExpanded(current.id, true, 'open');
+      config.onOpenAudioLab?.(current.original, playerState, {
+        id: current.id,
+        index: resultIndex(current.id),
+        audioLabState: canonicalAudioLabState(current),
+      });
+    },
+  });
+
+  const audioPlayerOptions = (result, { includeState = true } = {}) => {
+    const source = audioSourceFor(result);
+    const state = audioLabStateFor(result);
+    const next = {
+      ...source,
+      name: result.name,
+      ...audioPlayerCallbacks(result.id),
+    };
+    if (result.metadataView.duration) next.duration = result.metadataView.duration;
+    if (includeState) {
+      next.selection = Object.prototype.hasOwnProperty.call(state, 'selection') ? state.selection : null;
+      next.peaks = Object.prototype.hasOwnProperty.call(state, 'peaks') ? state.peaks : null;
+      next.loop = Boolean(state.loop);
+      next.disabled = Boolean(state.disabled);
+    }
+    return next;
   };
 
   const paintStorageStatus = (storage) => {
@@ -443,9 +592,176 @@ export function createGeneratedResults(options = {}) {
     return url;
   };
 
+  const audioNodeDepths = (state) => {
+    const byId = new Map(state.nodes.map((node) => [node.id, node]));
+    const depths = new Map();
+    for (const node of state.nodes) {
+      let depth = 0;
+      let cursor = node;
+      while (cursor.kind !== 'root') {
+        depth += 1;
+        cursor = byId.get(cursor.parentNodeId);
+      }
+      depths.set(node.id, depth);
+    }
+    return depths;
+  };
+
+  const audioLabNavigationContent = (result) => {
+    const projection = audioLabStateProjection(result);
+    const { graph } = projection;
+    const heading = el('header', { class: 'generated-audio-lab-map-head' }, [
+      el('div', {}, [
+        el('span', { text: 'Mapa de trabajo' }),
+        el('h3', { text: 'Fuente y fragmentos' }),
+      ]),
+      graph ? el('span', {
+        class: 'generated-audio-lab-node-count',
+        text: String(graph.nodes.length),
+        attrs: { 'aria-label': `${graph.nodes.length} ${graph.nodes.length === 1 ? 'nodo de audio' : 'nodos de audio'}` },
+      }) : null,
+    ]);
+
+    if (!graph) {
+      return [heading, el('div', { class: 'generated-audio-lab-map-empty' }, [
+        el('span', { text: '◇', attrs: { 'aria-hidden': 'true' } }),
+        el('strong', {
+          text: projection.status === 'invalid'
+            ? 'El mapa de audio no es válido'
+            : projection.status === 'unbound'
+              ? 'Este resultado todavía no tiene un mapa'
+              : 'Todavía no hay fragmentos',
+        }),
+        el('p', {
+          text: projection.status === 'invalid'
+            ? 'Volvé a abrir este resultado o recuperá el proyecto para reconstruirlo.'
+            : projection.status === 'unbound'
+              ? 'Volvé al resultado correcto o empezá un nuevo mapa desde esta salida.'
+              : 'Elegí un rango en la forma de onda y usá “Crear fragmento” para empezar.',
+        }),
+      ])];
+    }
+
+    const breadcrumbs = audioLabBreadcrumbs(graph);
+    const depths = audioNodeDepths(graph);
+    const crumbList = el('ol', {
+      class: 'generated-audio-lab-breadcrumbs',
+      attrs: { 'aria-label': 'Ruta del fragmento seleccionado' },
+    }, breadcrumbs.map((crumb, index) => el('li', {}, [
+      index ? el('span', { text: '›', attrs: { 'aria-hidden': 'true' } }) : null,
+      el('button', {
+        type: 'button',
+        disabled: typeof config.onSelectAudioNode !== 'function',
+        text: truncateName(crumb.label, 24),
+        title: crumb.label,
+        dataset: { generatedAction: 'select-audio-node', audioNodeId: crumb.id },
+        attrs: crumb.id === graph.selectedNodeId ? { 'aria-current': 'page' } : {},
+      }),
+    ])));
+
+    const nodes = el('div', {
+      class: 'generated-audio-lab-node-list',
+      attrs: { role: 'group', 'aria-label': `Nodos de audio de ${result.name}` },
+    }, graph.nodes.map((node) => {
+      const selected = node.id === graph.selectedNodeId;
+      const duration = node.kind === 'root' ? node.duration : node.range.end - node.range.start;
+      const button = el('button', {
+        type: 'button',
+        disabled: typeof config.onSelectAudioNode !== 'function',
+        class: `generated-audio-lab-node${selected ? ' is-selected' : ''}`,
+        dataset: {
+          generatedAction: 'select-audio-node',
+          audioNodeId: node.id,
+          depth: String(depths.get(node.id) || 0),
+        },
+        attrs: {
+          'aria-pressed': String(selected),
+          'aria-label': `${selected ? 'Seleccionado' : 'Abrir'}: ${node.kind === 'root' ? node.name : node.label}`,
+        },
+      }, [
+        el('span', { class: 'generated-audio-lab-node-icon', text: node.kind === 'root' ? '♫' : '↳', attrs: { 'aria-hidden': 'true' } }),
+        el('span', { class: 'generated-audio-lab-node-copy' }, [
+          el('span', { text: node.kind === 'root' ? 'Audio raíz' : 'Fragmento' }),
+          el('strong', { text: truncateName(node.kind === 'root' ? node.name : node.label, 28), title: node.kind === 'root' ? node.name : node.label }),
+          el('small', { text: `${formatDuration(duration)} · nivel ${depths.get(node.id) || 0}` }),
+        ]),
+        selected ? el('span', { class: 'generated-audio-lab-node-current', text: 'Activo' }) : null,
+      ]);
+      button.style.setProperty('--audio-node-indent', `${Math.min(4, depths.get(node.id) || 0) * 12}px`);
+      return button;
+    }));
+
+    return [heading, crumbList, nodes];
+  };
+
+  const paintActiveAudioLabNavigation = () => {
+    const active = resultById(activeId) || results[0] || null;
+    const navigation = root.querySelector('.generated-audio-lab-navigation');
+    if (!navigation || !active || active.metadataView.kind !== 'audio') return;
+    const focused = globalThis.document?.activeElement;
+    const restoreNodeId = navigation.contains(focused) ? focused?.dataset?.audioNodeId : null;
+    const restoreInNodeList = Boolean(focused?.closest?.('.generated-audio-lab-node'));
+    navigation.replaceChildren(...audioLabNavigationContent(active));
+    if (restoreNodeId) {
+      const candidates = restoreInNodeList
+        ? Array.from(navigation.querySelectorAll('.generated-audio-lab-node'))
+        : Array.from(navigation.querySelectorAll('[data-generated-action="select-audio-node"]'));
+      candidates.find((candidate) => candidate.dataset.audioNodeId === restoreNodeId)?.focus();
+    }
+  };
+
+  const paintAudioLabExpansion = ({ focus = false } = {}) => {
+    const active = resultById(activeId) || results[0] || null;
+    const expanded = Boolean(
+      active
+      && active.metadataView.kind === 'audio'
+      && audioLabExpandedId === active.id
+    );
+    root.dataset.audioLabExpanded = String(expanded);
+    root.setAttribute('aria-labelledby', expanded ? audioLabTitleId : titleId);
+    const workspaceHead = root.querySelector('.generated-audio-lab-workspace-head');
+    const navigation = root.querySelector('.generated-audio-lab-navigation');
+    const openButton = root.querySelector('[data-audio-lab-action="open-lab"]');
+    if (workspaceHead) workspaceHead.hidden = !expanded;
+    if (navigation) navigation.hidden = !expanded;
+    if (openButton) {
+      openButton.setAttribute('aria-expanded', String(expanded));
+      openButton.setAttribute('aria-controls', audioLabWorkspaceId);
+    }
+    if (!focus) return;
+    const target = expanded
+      ? root.querySelector('[data-generated-action="close-audio-lab"]')
+      : openButton;
+    target?.focus();
+  };
+
+  const setAudioLabExpanded = (id, notify = true, reason = 'api') => {
+    if (destroyed) return;
+    const requested = id == null ? null : resultById(id);
+    const nextId = requested?.id === activeId && requested.metadataView.kind === 'audio' ? requested.id : null;
+    if (nextId === audioLabExpandedId) return;
+    audioLabExpandedId = nextId;
+    paintAudioLabExpansion({ focus: reason === 'open' || reason === 'close' });
+    const current = resultById(nextId || activeId) || null;
+    live.textContent = nextId ? `Audio Lab abierto para ${current?.name || 'el resultado'}.` : 'Volviste al resultado.';
+    if (notify) {
+      config.onAudioLabExpandedChange?.(nextId, {
+        result: current?.original || null,
+        reason,
+      });
+    }
+  };
+
   const renderMedia = (result) => {
     const kind = result.metadataView.kind;
-    const url = mediaUrlFor(result);
+    const audioSource = kind === 'audio' ? audioSourceFor(result) : null;
+    const url = kind === 'audio'
+      ? (audioSource.url || (
+        audioSource.blob && typeof globalThis.URL?.createObjectURL === 'function'
+          ? 'blob:managed-by-audio-lab'
+          : null
+      ))
+      : mediaUrlFor(result);
     const fallback = el('div', {
       class: 'generated-result-unavailable',
       hidden: Boolean(url),
@@ -465,7 +781,47 @@ export function createGeneratedResults(options = {}) {
     }
 
     let media;
-    if (kind === 'image') {
+    let shell;
+    if (kind === 'audio') {
+      const player = createAudioLabPlayer(audioPlayerOptions(result));
+      activeAudioPlayer = player;
+      media = player.media;
+      const workspaceHead = el('header', { class: 'generated-audio-lab-workspace-head', hidden: true }, [
+        el('button', {
+          type: 'button',
+          class: 'generated-audio-lab-back',
+          text: '← Volver al resultado',
+          dataset: { generatedAction: 'close-audio-lab' },
+        }),
+        el('div', {}, [
+          el('span', { text: 'Audio Lab' }),
+          el('strong', { id: audioLabTitleId, text: truncateName(result.name, 58), title: result.name }),
+        ]),
+      ]);
+      const navigation = el('aside', {
+        class: 'generated-audio-lab-navigation',
+        hidden: true,
+        attrs: { 'aria-label': 'Fragmentos y ruta del Audio Lab' },
+      }, audioLabNavigationContent(result));
+      shell = el('div', { id: audioLabWorkspaceId, class: 'generated-result-media-shell generated-audio-lab-shell', dataset: { kind } }, [
+        workspaceHead,
+        player.node,
+        navigation,
+        fallback,
+      ]);
+      const sourceInstalled = typeof media.hasAttribute === 'function'
+        ? media.hasAttribute('src')
+        : Boolean(media.src);
+      if (!sourceInstalled) {
+        player.destroy();
+        activeAudioPlayer = null;
+        player.node.hidden = true;
+        fallback.hidden = false;
+        shell.dataset.error = 'true';
+        audioLabExpandedId = null;
+        return shell;
+      }
+    } else if (kind === 'image') {
       media = el('img', {
         class: 'generated-result-image',
         src: url,
@@ -481,43 +837,25 @@ export function createGeneratedResults(options = {}) {
         ...(kind === 'video' ? { playsInline: true, poster: result.poster || '' } : {}),
         attrs: { 'aria-label': `Reproducir ${result.name}` },
       });
-      for (const type of ['play', 'pause', 'ended']) {
-        media.addEventListener(type, () => config.onMediaEvent?.(type, result.original, media));
-      }
     }
-    let shell;
     if (kind !== 'audio') {
       shell = el('div', { class: 'generated-result-media-shell', dataset: { kind } }, [media, fallback]);
-    } else {
-      const waveform = el('div', { class: 'generated-audio-waveform', attrs: { 'aria-hidden': 'true' } },
-        [32, 48, 68, 42, 78, 56, 88, 46, 64, 92, 58, 72, 38, 82, 52, 96, 62, 44, 76, 54, 86, 48, 70, 90]
-          .map((height) => el('i', { style: `--wave:${height}%` }))
-      );
-      const artwork = el('div', { class: 'generated-audio-artwork', attrs: { 'aria-hidden': 'true' } }, [
-        el('span', { class: 'generated-audio-note', text: '♫' }),
-        waveform,
-      ]);
-      shell = el('div', { class: 'generated-result-media-shell generated-audio-player', dataset: { kind } }, [
-        artwork,
-        el('div', { class: 'generated-audio-controls' }, [
-          el('div', { class: 'generated-audio-copy' }, [
-            el('span', { text: 'Reproducción local' }),
-            el('strong', { text: truncateName(result.name, 54), title: result.name }),
-          ]),
-          media,
-          el('small', { text: 'Este audio se reproduce desde tu navegador y no se sube a ningún servidor.' }),
-        ]),
-        fallback,
-      ]);
     }
     activeMedia = media;
-    media.addEventListener('error', () => {
-      media.hidden = true;
+    if (['audio', 'video'].includes(kind)) for (const type of ['play', 'pause', 'ended']) {
+      activeMediaStops.push(on(media, type, () => {
+        const current = resultById(result.id);
+        if (current) config.onMediaEvent?.(type, current.original, media);
+      }));
+    }
+    activeMediaStops.push(on(media, 'error', () => {
+      if (activeAudioPlayer) activeAudioPlayer.node.hidden = true;
+      else media.hidden = true;
       shell.dataset.error = 'true';
       fallback.hidden = false;
       live.textContent = `${result.name} está listo, pero este navegador no puede reproducirlo.`;
-      config.onMediaError?.(result.original);
-    });
+      config.onMediaError?.(resultById(result.id)?.original || result.original);
+    }));
     return shell;
   };
 
@@ -575,6 +913,8 @@ export function createGeneratedResults(options = {}) {
     root.replaceChildren(live);
 
     if (!active) {
+      root.dataset.audioLabExpanded = 'false';
+      root.setAttribute('aria-labelledby', titleId);
       root.append(el('div', { class: 'generated-results-empty' }, [
         el('span', { class: 'generated-result-file-icon', text: '◇', attrs: { 'aria-hidden': 'true' } }),
         el('h2', { id: titleId, text: 'Tus resultados aparecerán acá' }),
@@ -582,6 +922,7 @@ export function createGeneratedResults(options = {}) {
       ]));
       lastVisualSignature = visualSignature();
       lastActiveAsset = null;
+      lastActiveAudioBindingKey = null;
       lastStorageState = null;
       return;
     }
@@ -670,9 +1011,11 @@ export function createGeneratedResults(options = {}) {
     ]);
 
     root.append(header, el('div', { class: 'generated-results-body' }, [viewer, lineage]));
+    paintAudioLabExpansion();
     if (announce) live.textContent = `${status}: ${active.name}. ${derivedLabel}.`;
     lastVisualSignature = visualSignature();
     lastActiveAsset = activeAsset(active);
+    lastActiveAudioBindingKey = active.metadataView.kind === 'audio' ? audioBindingKey(active) : null;
     lastStorageState = storage.state;
   };
 
@@ -689,6 +1032,7 @@ export function createGeneratedResults(options = {}) {
   const select = (id, notify = true) => {
     const result = resultById(id);
     if (!result || result.id === activeId) return;
+    if (audioLabExpandedId) setAudioLabExpanded(null, true, 'close');
     activeId = result.id;
     render({ announce: true });
     focusHistoryResult(result.id);
@@ -725,7 +1069,20 @@ export function createGeneratedResults(options = {}) {
     if (action.dataset.generatedAction === 'select') select(action.dataset.resultId);
     else if (action.dataset.generatedAction === 'select-source') config.onSelectSource?.(config.source);
     else if (action.dataset.generatedAction === 'download') download(result);
-    else if (action.dataset.generatedAction === 'remove' && result) {
+    else if (action.dataset.generatedAction === 'close-audio-lab') setAudioLabExpanded(null, true, 'close');
+    else if (action.dataset.generatedAction === 'select-audio-node') {
+      const active = resultById(activeId) || null;
+      const graph = canonicalAudioLabState(active);
+      const node = graph?.nodes.find((candidate) => candidate.id === action.dataset.audioNodeId);
+      if (active && node) {
+        config.onSelectAudioNode?.(node.id, {
+          result: active.original,
+          id: active.id,
+          index: resultIndex(active.id),
+          node,
+        });
+      }
+    } else if (action.dataset.generatedAction === 'remove' && result) {
       config.onRemove?.(result.original, { id: result.id, index: resultIndex(result.id) });
     } else if (action.dataset.generatedAction === 'create-another') config.onCreateAnother?.(config.source);
   });
@@ -760,12 +1117,36 @@ export function createGeneratedResults(options = {}) {
     else if (newResult && config.followLatest !== false) activeId = newResult.id;
     else if (activeWas && resultById(activeWas)) activeId = activeWas;
     else activeId = pickGeneratedResultId(results, explicit);
+    if (Object.prototype.hasOwnProperty.call(next, 'audioLabExpandedId')) {
+      const requested = next.audioLabExpandedId == null ? null : resultById(next.audioLabExpandedId);
+      audioLabExpandedId = requested?.id === activeId && requested.metadataView.kind === 'audio' ? requested.id : null;
+    } else if (activeId !== activeWas) {
+      audioLabExpandedId = null;
+    }
+    if (
+      audioLabExpandedId !== activeId
+      || resultById(audioLabExpandedId)?.metadataView.kind !== 'audio'
+    ) audioLabExpandedId = null;
     const nextSignature = visualSignature();
     const nextActive = resultById(activeId) || results[0] || null;
     const nextActiveAsset = activeAsset(nextActive);
+    const nextAudioBindingKey = nextActive?.metadataView.kind === 'audio' ? audioBindingKey(nextActive) : null;
+    const audioBindingChanged = nextAudioBindingKey !== lastActiveAudioBindingKey;
     if (nextSignature === lastVisualSignature && nextActiveAsset === lastActiveAsset) {
+      const audioStateChanged = Object.prototype.hasOwnProperty.call(next, 'audioLabStateByResult') || audioBindingChanged;
+      const audioCallbackChanged = Object.prototype.hasOwnProperty.call(next, 'onCreateAudioFragment');
+      if (activeAudioPlayer && (audioStateChanged || audioCallbackChanged)) {
+        activeAudioPlayer.update(audioPlayerOptions(nextActive, { includeState: audioStateChanged }));
+      }
+      if (
+        Object.prototype.hasOwnProperty.call(next, 'audioLabState')
+        || Object.prototype.hasOwnProperty.call(next, 'onSelectAudioNode')
+        || audioBindingChanged
+      ) paintActiveAudioLabNavigation();
+      paintAudioLabExpansion();
       const storage = generatedStorageStatus(nextActive?.storageStatus || config.storageStatus);
       if (storage.state !== lastStorageState) paintStorageStatus(storage);
+      lastActiveAudioBindingKey = nextAudioBindingKey;
       return;
     }
     render({ announce: Boolean(newResult) });
@@ -778,6 +1159,8 @@ export function createGeneratedResults(options = {}) {
     update,
     select,
     getActiveId: () => activeId,
+    setAudioLabExpanded: (id, notify = false) => setAudioLabExpanded(id, notify, 'api'),
+    getAudioLabExpandedId: () => audioLabExpandedId,
     focus: () => root.querySelector('.generated-result-download, [data-generated-action="select"]')?.focus(),
     destroy() {
       if (destroyed) return;

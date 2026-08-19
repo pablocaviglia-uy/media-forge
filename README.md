@@ -30,10 +30,15 @@ storage; that can be disabled or cleared at any time in **Configuración**.
 - Drag and drop files, or a whole folder
 - A queue that converts one file after another, with progress and an estimate
 - Cancel a conversion that is taking longer than it is worth
-- A result-first workspace with local audio/video playback and image previews
+- A result-first workspace with local video playback and image previews
+- An Audio Lab for generated audio, with a real locally decoded waveform,
+  precise selection, zoom, looped playback and keyboard-friendly controls
+- Turn a selection into a virtual fragment, select it as a new working range,
+  and repeat inside that fragment without copying the source audio bytes
 - Keep generated versions in each project; select, download or remove any one;
   multi-file generations are bundled when needed
-- Recover projects, source files, options and completed results after a reload
+- Recover projects, source files, options, completed results, Audio Lab fragment
+  trees and the current selection/loop state after a reload
 - Turn local project saving off, reconnect a missing source, or clear every
   saved copy from **Configuración**
 
@@ -155,6 +160,8 @@ src/
   media/
     formats.js        The output formats, and what each needs from the core
     commands.js       {source, operation, options} -> exact ffmpeg arguments
+    audio-lab.js      Byte-free nested audio fragments and range resolution
+    audio-peaks.js    Bounded Web Audio decode and transient waveform peaks
     merge.js          Ordered multi-file project state and immutable snapshots
     probe.js          ffprobe JSON, the log as a fallback, and progress
     quick-tools.js    Focused-tool contracts, safe limits and UI summaries
@@ -171,6 +178,7 @@ src/
 
   ui/
     generated-results.js  Local player, active result and generation history
+    audio-lab-player.js   Waveform, selection, zoom, loop and fragment controls
     ...                   DOM helpers, focused editors, formatting, downloads
 ```
 
@@ -225,6 +233,13 @@ Worth knowing before you file an issue:
   the output and the codec's working memory are all in it at once. The app
   refuses anything over 500 MB and warns above 150 MB, and even that is
   optimistic on a phone.
+- **A playable audio result does not guarantee a waveform.** The Audio Lab
+  asks the browser's Web Audio decoder to expand the local result to PCM, and
+  that decoder may reject an unusual codec/container or a demanding file. To
+  avoid a second large-memory failure path, waveform analysis is skipped above
+  64 MB of compressed audio, 15 minutes, or an estimated/decoded 256 MB of PCM.
+  Playback and the rest of the result remain available when analysis is skipped
+  or decoding fails.
 - **Joining has a lower aggregate limit.** Every source and the completed output
   coexist in FFmpeg's in-memory filesystem, so one merge project is capped at
   350 MB across all of its clips and at 24 clips.

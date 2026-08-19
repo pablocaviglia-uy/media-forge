@@ -16,8 +16,8 @@
  * the single exception called out at IMMUTABLE.
  */
 
-// v14 adds the byte-free Audio Lab graph and custom player foundation.
-const CACHE_VERSION = 'v14';
+// v15 connects the safe, local waveform analyser to Audio Lab.
+const CACHE_VERSION = 'v15';
 const CACHE_NAME = `media-forge-${CACHE_VERSION}`;
 
 /**
@@ -58,6 +58,7 @@ const PRECACHE = [
   './src/media/merge.js',
   './src/media/add-audio.js',
   './src/media/audio-lab.js',
+  './src/media/audio-peaks.js',
   './src/media/project-tree.js',
   './src/media/results.js',
   './src/media/timeline.js',

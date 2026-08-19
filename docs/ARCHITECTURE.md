@@ -60,11 +60,65 @@ newest generation is also projected onto the legacy single-result fields used
 by the queue and download paths.
 
 `ui/generated-results.js` makes the selected generation the main result and
-keeps the rest as a compact history. It uses native audio/video players and an
-image preview when possible, with a file presentation for other output kinds.
+keeps the rest as a compact history. Video uses the native player, images get a
+local preview, and generated audio is handed to `ui/audio-lab-player.js`.
 Selection, download and confirmed removal work per retained generation. All
 previews use local object URLs created from Blobs and revoke them when the view
 changes or is destroyed.
+
+## Audio Lab: one Blob, many working ranges
+
+Audio Lab is a non-destructive view over one exact generated audio output. Its
+player renders min/max waveform peaks, supports seek, zoom, a precise time
+selection and optional looping, and can promote that selection to a working
+fragment. Selecting a fragment constrains the editable range to it; creating
+another selection there produces a child, so the same flow can be repeated at
+any depth.
+
+`media/audio-lab.js` is the byte-free model behind that interaction. One root
+node records the generated `outputId` and its duration. Every fragment stores
+only a parent id and a range relative to that parent. Resolving a node walks its
+lineage and returns one absolute range on the root clock. Nested fragments
+therefore do not create a new Blob, copy bytes, or consume media quota; a later
+playback or FFmpeg handoff resolves the original output once and applies the
+resolved range.
+
+Two small maps travel with the project manifest in IndexedDB:
+
+- `audioLabStates`, keyed by the exact output id, contains the validated graph
+  and selected node.
+- `audioLabSessions`, under the same key, contains the current absolute
+  selection plus the loop and expanded-workspace flags.
+
+Both are JSON metadata. `storage/projects.js` verifies that roots still point
+to retained project/result outputs, clamps restored selections to the root
+duration, isolates malformed entries, and retains valid Audio Lab metadata in
+the quota-fallback path. Removing the owning result removes its associated Lab
+state and session. Older project manifests simply restore with empty maps.
+
+The waveform is intentionally outside that durable model. `media/audio-peaks.js`
+uses `AudioContext.decodeAudioData()` on the local Blob, downsamples all decoded
+channels to immutable min/max buckets, closes the context, and caches only that
+small summary in a `WeakMap` for the current page session. Concurrent requests
+for the same Blob and bucket count share one decode, while navigation can stop
+waiting through an `AbortSignal`. PCM, `AudioBuffer`s, peaks and object URLs are
+never written to IndexedDB; after a reload, peaks are generated again when the
+audio result becomes active.
+
+Compressed size is not a safe proxy for decoded PCM, so duration metadata is a
+required trust boundary. The default analyzer rejects a source above 64 MiB or
+15 minutes, or one whose estimated or actual Float32 PCM exceeds 256 MiB; it
+also caps the waveform at 8,192 buckets and rejects a decoded duration that is
+materially longer than the probed hint. Runtime overrides may tighten those
+limits but cannot weaken them. The compatibility wrapper accepts both the
+callback and Promise forms of `decodeAudioData()` for Safari.
+
+Waveform analysis is progressive enhancement, not a prerequisite for access to
+the result. A browser may not expose Web Audio, and its decoder may reject a
+large or unusual codec/container even when the native media element can play
+it. In those cases the custom player and result workflow remain available
+without waveform peaks; the application records an in-memory unavailable state
+instead of repeatedly decoding the same Blob during that page session.
 
 ## Local projects
 
@@ -101,11 +155,11 @@ after flushing preferences, but correctness never depends on an asynchronous
 unload write that the browser is free to cut short.
 
 Startup hydrates manifests before the engine is needed. Runtime-only state —
-object URLs, DOM references, worker handles and progress clocks — is rebuilt,
-not serialized. A project that was `queued` or `running` when the page vanished
-returns as interrupted work that can be started again; FFmpeg cannot resume an
-encode in the middle. Object URLs are always revoked on the same lifecycle as
-in-memory previews.
+object URLs, DOM references, worker handles, progress clocks and Audio Lab
+waveform peaks — is rebuilt, not serialized. A project that was `queued` or
+`running` when the page vanished returns as interrupted work that can be
+started again; FFmpeg cannot resume an encode in the middle. Object URLs are
+always revoked on the same lifecycle as in-memory previews.
 
 The browser owns the quota. `navigator.storage.estimate()` gives the Settings
 sheet a useful, approximate usage report, and `navigator.storage.persist()` can

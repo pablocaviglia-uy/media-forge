@@ -14,6 +14,17 @@ import {
   isQuotaExceededError,
   serializeWorkspace,
 } from '../src/storage/projects.js';
+import {
+  audioLabManifest,
+  createAudioLabFragment,
+  createAudioLabState,
+  selectAudioLabNode,
+} from '../src/media/audio-lab.js';
+import {
+  appendResult,
+  normalizeResultHistory,
+  resultCompatibilityPatch,
+} from '../src/media/results.js';
 
 const mediaInfo = ({ duration = 3, audio = true } = {}) => ({
   format: 'mov,mp4,m4a,3gp,3g2,mj2',
@@ -69,6 +80,45 @@ function simpleJob(overrides = {}) {
     pendingMergeSnapshot: { should: 'never persist' },
     ...overrides,
   };
+}
+
+function nestedAudioLabState({
+  outputId = 'output-audio',
+  projectId = 'project-simple',
+  resultId = 'result:project-simple:legacy',
+} = {}) {
+  const makeId = ids();
+  let state = createAudioLabState({
+    outputId,
+    projectId,
+    resultId,
+    name: 'holiday.mp3',
+    type: 'audio/mpeg',
+    size: 12,
+    duration: 120,
+  }, { makeId });
+  state = createAudioLabFragment(state, {
+    start: 20,
+    end: 80,
+    label: 'Solo',
+  }, { makeId });
+  const selectedNodeId = state.selectedNodeId;
+  state = createAudioLabFragment(state, {
+    start: 5,
+    end: 15,
+    label: 'Compás favorito',
+  }, { makeId });
+  return selectAudioLabNode(state, selectedNodeId);
+}
+
+function audioResultJob(audioLabStates, overrides = {}) {
+  return simpleJob({
+    status: 'done',
+    outputs: [{ id: 'output-audio', name: 'holiday.mp3', blob: new Blob(['audio'], { type: 'audio/mpeg' }) }],
+    downloadName: 'holiday.mp3',
+    audioLabStates,
+    ...overrides,
+  });
 }
 
 function mergeJob(overrides = {}) {
@@ -241,6 +291,227 @@ test('the chosen source or result view survives restore with a legacy result fal
 
   delete graph.projects[0].previewMode;
   assert.equal(hydrateWorkspace(graph).jobs[0].previewMode, 'result');
+});
+
+test('Audio Lab state round-trips nested fragments and selection without duplicating media bytes', () => {
+  const output = new Blob(['audio result'], { type: 'audio/mpeg' });
+  const state = nestedAudioLabState();
+  const job = simpleJob({
+    status: 'done',
+    outputs: [{ id: 'output-audio', name: 'holiday.mp3', blob: output }],
+    downloadName: 'holiday.mp3',
+    audioLabStates: {
+      'output-audio': { ...state, transientBlob: output },
+    },
+    audioLabSessions: {
+      'output-audio': {
+        selection: { from: 25, to: 35 },
+        loop: true,
+        expanded: true,
+        transientBlob: output,
+      },
+    },
+  });
+  const graph = serializeWorkspace([job], { registry: createBlobIdentityRegistry(ids()) });
+  const stored = graph.projects[0].audioLabStates['output-audio'];
+  const storedSession = graph.projects[0].audioLabSessions['output-audio'];
+
+  assert.equal(graph.blobs.length, 2, 'Audio Lab must reuse the canonical source/output blobs');
+  assert.equal(Object.hasOwn(stored, 'transientBlob'), false);
+  assert.equal(JSON.stringify(stored).includes('audio result'), false);
+  assert.equal(stored.selectedNodeId, 'audio-fragment-2');
+  assert.deepEqual(stored.nodes[2].range, { start: 5, end: 15 });
+  assert.deepEqual(storedSession, {
+    selection: { from: 25, to: 35 },
+    loop: true,
+    expanded: true,
+  });
+
+  const restored = hydrateWorkspace(graph);
+  const restoredState = restored.jobs[0].audioLabStates['output-audio'];
+  assert.deepEqual(audioLabManifest(restoredState), audioLabManifest(state));
+  assert.equal(restoredState.selectedNodeId, 'audio-fragment-2');
+  assert.ok(Object.isFrozen(restoredState));
+  assert.ok(Object.isFrozen(restoredState.nodes));
+  assert.deepEqual(restored.jobs[0].audioLabSessions['output-audio'], storedSession);
+  assert.deepEqual(restored.issues, []);
+});
+
+test('Audio Lab states may be keyed by the owning result id', () => {
+  const resultId = 'result:project-simple:legacy';
+  const state = nestedAudioLabState({ resultId });
+  const graph = serializeWorkspace([
+    audioResultJob(
+      { [resultId]: state },
+      {
+        audioLabSessions: {
+          [resultId]: { selection: { from: 20, to: 30 }, loop: false },
+        },
+      },
+    ),
+  ], { registry: createBlobIdentityRegistry(ids()) });
+
+  assert.deepEqual(Object.keys(graph.projects[0].audioLabStates), [resultId]);
+  const restored = hydrateWorkspace(graph).jobs[0];
+  assert.deepEqual(audioLabManifest(restored.audioLabStates[resultId]), audioLabManifest(state));
+  assert.deepEqual(restored.audioLabSessions[resultId], {
+    selection: { from: 20, to: 30 },
+    loop: false,
+  });
+});
+
+test('legacy project records without Audio Lab state restore an empty mutable map', () => {
+  const graph = serializeWorkspace([simpleJob()], { registry: createBlobIdentityRegistry(ids()) });
+  delete graph.projects[0].audioLabStates;
+  delete graph.projects[0].audioLabSessions;
+
+  const restored = hydrateWorkspace(graph);
+  assert.deepEqual(restored.jobs[0].audioLabStates, {});
+  assert.deepEqual(restored.jobs[0].audioLabSessions, {});
+  assert.equal(Object.isFrozen(restored.jobs[0].audioLabStates), false);
+  assert.equal(restored.issues.some((issue) => issue.store === 'audioLabStates'), false);
+  assert.equal(restored.issues.some((issue) => issue.store === 'audioLabSessions'), false);
+});
+
+test('Audio Lab sessions clamp finite selections to their associated root duration on restore', () => {
+  const state = nestedAudioLabState();
+  const graph = serializeWorkspace([
+    audioResultJob(
+      { 'output-audio': state },
+      {
+        audioLabSessions: {
+          'output-audio': { selection: { from: 110, to: 120 }, loop: false },
+        },
+      },
+    ),
+  ], { registry: createBlobIdentityRegistry(ids()) });
+  graph.projects[0].audioLabSessions['output-audio'].selection = { from: 110, to: 999 };
+
+  const restored = hydrateWorkspace(graph);
+  assert.deepEqual(restored.jobs[0].audioLabSessions['output-audio'], {
+    selection: { from: 110, to: 120 },
+    loop: false,
+  });
+  assert.deepEqual(restored.issues, []);
+});
+
+test('invalid Audio Lab session selections are rejected on save and isolated on restore', () => {
+  const state = nestedAudioLabState();
+  assert.throws(
+    () => serializeWorkspace([
+      audioResultJob(
+        { 'output-audio': state },
+        {
+          audioLabSessions: {
+            'output-audio': { selection: { from: Number.NaN, to: 30 }, loop: false },
+          },
+        },
+      ),
+    ], { registry: createBlobIdentityRegistry(ids()) }),
+    (error) => error instanceof ProjectStoreError
+      && error.code === 'validation-failed'
+      && error.details?.causeCode === 'invalid-audio-lab-session-selection',
+  );
+
+  const graph = serializeWorkspace([
+    audioResultJob(
+      { 'output-audio': state },
+      {
+        audioLabSessions: {
+          'output-audio': { selection: { from: 10, to: 30 }, loop: true },
+        },
+      },
+    ),
+  ], { registry: createBlobIdentityRegistry(ids()) });
+  graph.projects[0].audioLabSessions['output-audio'].selection = { from: 40, to: 20 };
+
+  const restored = hydrateWorkspace(graph);
+  const issue = restored.issues.find((entry) => entry.store === 'audioLabSessions');
+  assert.deepEqual(restored.jobs[0].audioLabSessions, {});
+  assert.equal(issue.code, 'invalid-record');
+  assert.equal(issue.causeCode, 'invalid-audio-lab-session-selection');
+});
+
+test('one corrupt Audio Lab entry is isolated while its valid sibling protects the workspace', () => {
+  const state = nestedAudioLabState();
+  const graph = serializeWorkspace([
+    audioResultJob({ 'output-audio': state }),
+  ], { registry: createBlobIdentityRegistry(ids()) });
+  graph.projects[0].audioLabStates['result:project-simple:legacy'] = {
+    ...audioLabManifest(state),
+    selectedNodeId: 'missing-node',
+  };
+
+  const restored = hydrateWorkspace(graph);
+  const job = restored.jobs[0];
+  const issue = restored.issues.find((entry) => (
+    entry.code === 'invalid-record' && entry.store === 'audioLabStates'
+  ));
+
+  assert.deepEqual(Object.keys(job.audioLabStates), ['output-audio']);
+  assert.deepEqual(audioLabManifest(job.audioLabStates['output-audio']), audioLabManifest(state));
+  assert.equal(issue.projectId, 'project-simple');
+  assert.equal(issue.stateKey, 'result:project-simple:legacy');
+  assert.equal(issue.causeCode, 'selection-not-found');
+});
+
+test('a future Audio Lab schema is isolated behind the protected-workspace issue code', () => {
+  const state = nestedAudioLabState();
+  const graph = serializeWorkspace([
+    audioResultJob({ 'output-audio': state }),
+  ], { registry: createBlobIdentityRegistry(ids()) });
+  graph.projects[0].audioLabStates['output-audio'].schemaVersion = 2;
+
+  const restored = hydrateWorkspace(graph);
+  const issue = restored.issues.find((entry) => (
+    entry.code === 'unsupported-schema' && entry.store === 'audioLabStates'
+  ));
+
+  assert.deepEqual(restored.jobs[0].audioLabStates, {});
+  assert.equal(issue.projectId, 'project-simple');
+  assert.equal(issue.schemaVersion, 2);
+  assert.equal(issue.supportedSchemaVersion, 1);
+});
+
+test('Audio Lab state with a dangling output is rejected and protects the workspace', () => {
+  const state = nestedAudioLabState();
+  const graph = serializeWorkspace([
+    audioResultJob({ 'output-audio': state }),
+  ], { registry: createBlobIdentityRegistry(ids()) });
+  const manifest = graph.projects[0].audioLabStates['output-audio'];
+  manifest.nodes = manifest.nodes.map((node) => (
+    node.kind === 'root' ? { ...node, outputId: 'missing-output' } : node
+  ));
+  graph.projects[0].audioLabStates = { 'missing-output': manifest };
+
+  const restored = hydrateWorkspace(graph);
+  const issue = restored.issues.find((entry) => (
+    entry.code === 'invalid-record' && entry.store === 'audioLabStates'
+  ));
+
+  assert.deepEqual(restored.jobs[0].audioLabStates, {});
+  assert.equal(issue.causeCode, 'audio-lab-output-missing');
+  assert.equal(issue.outputId, 'missing-output');
+});
+
+test('Audio Lab state with a dangling result cannot attach to an unrelated generation', () => {
+  const state = nestedAudioLabState();
+  const graph = serializeWorkspace([
+    audioResultJob({ 'output-audio': state }),
+  ], { registry: createBlobIdentityRegistry(ids()) });
+  const manifest = graph.projects[0].audioLabStates['output-audio'];
+  manifest.nodes = manifest.nodes.map((node) => (
+    node.kind === 'root' ? { ...node, resultId: 'missing-result' } : node
+  ));
+
+  const restored = hydrateWorkspace(graph);
+  const issue = restored.issues.find((entry) => (
+    entry.code === 'invalid-record' && entry.store === 'audioLabStates'
+  ));
+
+  assert.deepEqual(restored.jobs[0].audioLabStates, {});
+  assert.equal(issue.causeCode, 'audio-lab-result-missing');
+  assert.equal(issue.resultId, 'missing-result');
 });
 
 test('one Blob reused by different projects receives owner-specific record ids', () => {
@@ -634,6 +905,69 @@ test('quota fallback preserves the previous durable output when a replacement do
   assert.equal(restored.jobs[0].outputs[0].name, 'old.mp4');
   assert.equal(await restored.jobs[0].outputs[0].blob.text(), '12345');
   assert.equal(restored.jobs[0].status, 'ready');
+  store.close();
+});
+
+test('quota fallback keeps current Audio Lab edits for retained outputs and drops rejected exports', async () => {
+  const backend = createMemoryProjectBackend({ quotaBytes: 25 });
+  const store = storeWith(backend);
+  const source = file('1234567890', 'ten.mp4');
+  const job = simpleJob({
+    file: source,
+    name: source.name,
+    size: source.size,
+    status: 'done',
+    outputs: [{ id: 'output-old', name: 'old.mp3', blob: new Blob(['12345'], { type: 'audio/mpeg' }) }],
+    downloadName: 'old.mp3',
+  });
+  let history = normalizeResultHistory(job, { projectId: job.id });
+  Object.assign(job, resultCompatibilityPatch(history));
+  const oldResultId = history.resultHistory[0].id;
+  let oldState = nestedAudioLabState({ outputId: 'output-old', resultId: oldResultId });
+  job.audioLabStates = { 'output-old': oldState };
+  job.audioLabSessions = {
+    'output-old': { selection: { from: 25, to: 35 }, loop: true, expanded: true },
+  };
+  await store.saveWorkspace([job]);
+
+  oldState = createAudioLabFragment(oldState, {
+    start: 1,
+    end: 2,
+    label: 'Edición todavía no exportada',
+  }, { makeId: (prefix) => `${prefix}-quota-edit` });
+  history = appendResult(history, {
+    id: 'result-new',
+    projectId: job.id,
+    operation: 'extract-audio',
+    downloadName: 'new.mp3',
+    outputs: [{
+      id: 'output-new',
+      name: 'new.mp3',
+      blob: new Blob(['abcdefghijklmnop'], { type: 'audio/mpeg' }),
+    }],
+  }, { projectId: job.id });
+  Object.assign(job, resultCompatibilityPatch(history));
+  job.audioLabStates = {
+    'output-old': oldState,
+    'output-new': nestedAudioLabState({ outputId: 'output-new', resultId: 'result-new' }),
+  };
+  job.audioLabSessions = {
+    'output-old': { selection: { from: 26, to: 28 }, loop: false, expanded: true },
+    'output-new': { selection: { from: 1, to: 2 }, loop: true },
+  };
+
+  const saved = await store.saveWorkspace([job]);
+  assert.equal(saved.metadataOnly, true);
+  assert.ok(saved.issues.some((issue) => issue.code === 'quota-last-output-preserved'));
+
+  const restored = await store.loadWorkspace();
+  const restoredJob = restored.jobs[0];
+  assert.deepEqual(restoredJob.outputs.map((output) => output.id), ['output-old']);
+  assert.deepEqual(Object.keys(restoredJob.audioLabStates), ['output-old']);
+  assert.deepEqual(audioLabManifest(restoredJob.audioLabStates['output-old']), audioLabManifest(oldState));
+  assert.deepEqual(restoredJob.audioLabSessions, {
+    'output-old': { selection: { from: 26, to: 28 }, loop: false, expanded: true },
+  });
   store.close();
 });
 

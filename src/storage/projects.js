@@ -10,6 +10,11 @@
 
 import { mergeProjectInfo } from '../media/merge.js';
 import {
+  AUDIO_LAB_SCHEMA_VERSION,
+  audioLabManifest,
+  restoreAudioLabState,
+} from '../media/audio-lab.js';
+import {
   flattenResultOutputs,
   hydrateResultHistory,
   normalizeResultHistory,
@@ -56,6 +61,12 @@ const blobLike = (value) => Boolean(
   && Number.isFinite(Number(value.size))
   && typeof value.arrayBuffer === 'function'
 );
+
+const plainObject = (value) => {
+  if (!value || typeof value !== 'object') return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+};
 
 const persistenceRef = (value) => value?.[PERSISTENCE_REF] || null;
 
@@ -125,6 +136,305 @@ function safeCopyData(value, path, issues, details, fallback) {
     ));
     return fallback;
   }
+}
+
+function audioLabReferences(resultState) {
+  const resultIds = new Set();
+  const outputOwners = new Map();
+  for (const result of resultState?.resultHistory || []) {
+    resultIds.add(result.id);
+    for (const output of result.outputs || []) outputOwners.set(output.id, result.id);
+  }
+  return { resultIds, outputOwners };
+}
+
+function validAudioLabKey(stateKey) {
+  return typeof stateKey === 'string' && Boolean(stateKey) && stateKey.trim() === stateKey;
+}
+
+function audioLabStateBinding(state, stateKey, projectId, references = null) {
+  const root = state.nodes.find((node) => node.id === state.rootNodeId);
+  if (stateKey !== root.outputId && stateKey !== root.resultId) {
+    throw new ProjectStoreError(
+      'validation-failed',
+      `Audio Lab state ${stateKey} is not keyed by its output or result id.`,
+      { details: { causeCode: 'audio-lab-key-mismatch', projectId, stateKey } },
+    );
+  }
+  if (root.projectId && root.projectId !== projectId) {
+    throw new ProjectStoreError(
+      'validation-failed',
+      `Audio Lab state ${stateKey} belongs to another project.`,
+      { details: { causeCode: 'audio-lab-project-mismatch', projectId, stateKey } },
+    );
+  }
+  if (references) {
+    const outputResultId = references.outputOwners.get(root.outputId);
+    if (!outputResultId) {
+      throw new ProjectStoreError(
+        'validation-failed',
+        `Audio Lab state ${stateKey} points to a missing output.`,
+        { details: { causeCode: 'audio-lab-output-missing', projectId, stateKey, outputId: root.outputId } },
+      );
+    }
+    if (root.resultId && !references.resultIds.has(root.resultId)) {
+      throw new ProjectStoreError(
+        'validation-failed',
+        `Audio Lab state ${stateKey} points to a missing result.`,
+        { details: { causeCode: 'audio-lab-result-missing', projectId, stateKey, resultId: root.resultId } },
+      );
+    }
+    if (root.resultId && outputResultId !== root.resultId) {
+      throw new ProjectStoreError(
+        'validation-failed',
+        `Audio Lab state ${stateKey} does not match the result that owns its output.`,
+        {
+          details: {
+            causeCode: 'audio-lab-result-output-mismatch',
+            projectId,
+            stateKey,
+            outputId: root.outputId,
+            resultId: root.resultId,
+          },
+        },
+      );
+    }
+  }
+  return state;
+}
+
+/** Canonical JSON manifests keyed by an exact output id or result id. */
+function serializeAudioLabStates(value, projectId, resultState) {
+  if (value === null || value === undefined) return {};
+  if (!plainObject(value)) {
+    throw new ProjectStoreError(
+      'validation-failed',
+      `project(${projectId}).audioLabStates must be a plain object.`,
+      { details: { causeCode: 'invalid-audio-lab-map', projectId } },
+    );
+  }
+
+  const manifests = [];
+  const references = audioLabReferences(resultState);
+  for (const [stateKey, candidate] of Object.entries(value)) {
+    if (!validAudioLabKey(stateKey)) {
+      throw new ProjectStoreError(
+        'validation-failed',
+        `project(${projectId}).audioLabStates has an invalid key.`,
+        { details: { causeCode: 'invalid-audio-lab-key', projectId, stateKey } },
+      );
+    }
+    try {
+      const state = audioLabStateBinding(
+        restoreAudioLabState(candidate),
+        stateKey,
+        projectId,
+        references,
+      );
+      manifests.push([stateKey, audioLabManifest(state)]);
+    } catch (error) {
+      if (error instanceof ProjectStoreError) throw error;
+      throw new ProjectStoreError(
+        'validation-failed',
+        `Audio Lab state ${stateKey} is invalid.`,
+        {
+          cause: error,
+          details: { causeCode: error?.code || null, projectId, stateKey },
+        },
+      );
+    }
+  }
+  return Object.fromEntries(manifests);
+}
+
+function restoreAudioLabStates(project, resultState, issues) {
+  const candidates = project.audioLabStates;
+  // V1 projects written before Audio Lab are valid and start with no lab tabs.
+  if (candidates === null || candidates === undefined) return {};
+  if (!plainObject(candidates)) {
+    issues.push(makeIssue(
+      'invalid-record',
+      `Se ignoró el estado de Audio Lab dañado del proyecto ${project.id}.`,
+      {
+        store: 'audioLabStates',
+        projectId: project.id,
+        causeCode: 'invalid-audio-lab-map',
+      },
+    ));
+    return {};
+  }
+
+  const restored = [];
+  const references = audioLabReferences(resultState);
+  for (const [stateKey, candidate] of Object.entries(candidates)) {
+    try {
+      if (!validAudioLabKey(stateKey)) {
+        throw new ProjectStoreError('validation-failed', 'Audio Lab state key is invalid.', {
+          details: { causeCode: 'invalid-audio-lab-key' },
+        });
+      }
+      const state = audioLabStateBinding(
+        restoreAudioLabState(candidate),
+        stateKey,
+        project.id,
+        references,
+      );
+      restored.push([stateKey, state]);
+    } catch (error) {
+      const unsupported = error?.code === 'unsupported-schema';
+      issues.push(makeIssue(
+        unsupported ? 'unsupported-schema' : 'invalid-record',
+        unsupported
+          ? `El estado de Audio Lab ${stateKey || '(sin identificador)'} fue creado por una versión más nueva.`
+          : `Se ignoró el estado de Audio Lab dañado ${stateKey || '(sin identificador)'}.`,
+        {
+          store: 'audioLabStates',
+          projectId: project.id,
+          stateKey: stateKey || null,
+          causeCode: error?.details?.causeCode || error?.code || null,
+          outputId: error?.details?.outputId || null,
+          resultId: error?.details?.resultId || null,
+          ...(unsupported ? {
+            schemaVersion: candidate?.schemaVersion ?? null,
+            supportedSchemaVersion: AUDIO_LAB_SCHEMA_VERSION,
+          } : {}),
+        },
+      ));
+    }
+  }
+  return Object.fromEntries(restored);
+}
+
+function audioLabRoot(state) {
+  return state?.nodes?.find((node) => node.id === state.rootNodeId && node.kind === 'root') || null;
+}
+
+function audioLabDurationForKey(states, stateKey) {
+  const exactRoot = audioLabRoot(states?.[stateKey]);
+  if (exactRoot) return exactRoot.duration;
+
+  let duration = null;
+  for (const state of Object.values(states || {})) {
+    const root = audioLabRoot(state);
+    if (!root || (root.outputId !== stateKey && root.resultId !== stateKey)) continue;
+    // A result may own more than one audio output. In that ambiguous legacy
+    // shape there is no safe duration for a result-keyed session, so leave the
+    // finite selection untouched and let App bind it to an exact output.
+    if (duration !== null) return null;
+    duration = root.duration;
+  }
+  return duration;
+}
+
+function canonicalAudioLabSession(candidate, stateKey, projectId, references, states) {
+  if (!validAudioLabKey(stateKey)) {
+    throw new ProjectStoreError('validation-failed', 'Audio Lab session key is invalid.', {
+      details: { causeCode: 'invalid-audio-lab-session-key', projectId, stateKey },
+    });
+  }
+  if (!references.outputOwners.has(stateKey) && !references.resultIds.has(stateKey)) {
+    throw new ProjectStoreError('validation-failed', `Audio Lab session ${stateKey} has no result output.`, {
+      details: { causeCode: 'audio-lab-session-target-missing', projectId, stateKey },
+    });
+  }
+  if (!plainObject(candidate) || !plainObject(candidate.selection)) {
+    throw new ProjectStoreError('validation-failed', `Audio Lab session ${stateKey} is invalid.`, {
+      details: { causeCode: 'invalid-audio-lab-session', projectId, stateKey },
+    });
+  }
+
+  const { from, to } = candidate.selection;
+  if (
+    typeof from !== 'number'
+    || typeof to !== 'number'
+    || !Number.isFinite(from)
+    || !Number.isFinite(to)
+    || from > to
+  ) {
+    throw new ProjectStoreError('validation-failed', `Audio Lab session ${stateKey} has an invalid selection.`, {
+      details: { causeCode: 'invalid-audio-lab-session-selection', projectId, stateKey },
+    });
+  }
+  if (typeof candidate.loop !== 'boolean') {
+    throw new ProjectStoreError('validation-failed', `Audio Lab session ${stateKey} needs a loop flag.`, {
+      details: { causeCode: 'invalid-audio-lab-session-loop', projectId, stateKey },
+    });
+  }
+  if (candidate.expanded !== undefined && typeof candidate.expanded !== 'boolean') {
+    throw new ProjectStoreError('validation-failed', `Audio Lab session ${stateKey} has an invalid expanded flag.`, {
+      details: { causeCode: 'invalid-audio-lab-session-expanded', projectId, stateKey },
+    });
+  }
+
+  const duration = audioLabDurationForKey(states, stateKey);
+  const selection = Number.isFinite(duration) && duration > 0
+    ? {
+      from: Math.min(duration, Math.max(0, from)),
+      to: Math.min(duration, Math.max(0, to)),
+    }
+    : { from, to };
+  return {
+    selection,
+    loop: candidate.loop,
+    ...(candidate.expanded === undefined ? {} : { expanded: candidate.expanded }),
+  };
+}
+
+/** Small JSON-only playback/editor sessions, normally keyed by output id. */
+function serializeAudioLabSessions(value, projectId, resultState, states) {
+  if (value === null || value === undefined) return {};
+  if (!plainObject(value)) {
+    throw new ProjectStoreError(
+      'validation-failed',
+      `project(${projectId}).audioLabSessions must be a plain object.`,
+      { details: { causeCode: 'invalid-audio-lab-session-map', projectId } },
+    );
+  }
+  const references = audioLabReferences(resultState);
+  return Object.fromEntries(Object.entries(value).map(([stateKey, candidate]) => [
+    stateKey,
+    canonicalAudioLabSession(candidate, stateKey, projectId, references, states),
+  ]));
+}
+
+function restoreAudioLabSessions(project, resultState, states, issues) {
+  const candidates = project.audioLabSessions;
+  if (candidates === null || candidates === undefined) return {};
+  if (!plainObject(candidates)) {
+    issues.push(makeIssue(
+      'invalid-record',
+      `Se ignoraron las sesiones de Audio Lab dañadas del proyecto ${project.id}.`,
+      {
+        store: 'audioLabSessions',
+        projectId: project.id,
+        causeCode: 'invalid-audio-lab-session-map',
+      },
+    ));
+    return {};
+  }
+
+  const references = audioLabReferences(resultState);
+  const restored = [];
+  for (const [stateKey, candidate] of Object.entries(candidates)) {
+    try {
+      restored.push([
+        stateKey,
+        canonicalAudioLabSession(candidate, stateKey, project.id, references, states),
+      ]);
+    } catch (error) {
+      issues.push(makeIssue(
+        'invalid-record',
+        `Se ignoró la sesión de Audio Lab dañada ${stateKey || '(sin identificador)'}.`,
+        {
+          store: 'audioLabSessions',
+          projectId: project.id,
+          stateKey: stateKey || null,
+          causeCode: error?.details?.causeCode || error?.code || null,
+        },
+      ));
+    }
+  }
+  return Object.fromEntries(restored);
 }
 
 export class ProjectStoreError extends Error {
@@ -411,6 +721,7 @@ export function serializeWorkspace(
       const projectOutputs = flattenResultOutputs(resultState).map((output, index) => outputDescriptor({
         output, index, projectId: id, registry, blobs,
       }));
+      const audioLabStates = serializeAudioLabStates(job.audioLabStates, id, resultState);
       assets.push(...projectAssets);
       outputs.push(...projectOutputs);
 
@@ -439,6 +750,13 @@ export function serializeWorkspace(
         previewMode: job.previewMode === 'source' || job.previewMode === 'result'
           ? job.previewMode
           : null,
+        audioLabStates,
+        audioLabSessions: serializeAudioLabSessions(
+          job.audioLabSessions,
+          id,
+          resultState,
+          audioLabStates,
+        ),
         addAudioTouchedOptions: copyData(job.addAudioTouchedOptions || {}, `project(${id}).addAudioTouchedOptions`),
         selectedClipId: job.selectedClipId ? String(job.selectedClipId) : null,
         downloadName: job.downloadName ? String(job.downloadName) : null,
@@ -612,6 +930,7 @@ function commonJob(project, projectAssets, resultState, issues) {
   const outputSize = compatibility.outputSize;
   const missing = projectAssets.some((asset) => asset.needsRelink);
   const status = restoredStatus(project, projectAssets, hydratedOutputs, issues);
+  const audioLabStates = restoreAudioLabStates(project, resultState, issues);
   return {
     id: project.id,
     kind: project.kind === 'simple' ? undefined : (project.kind === 'merge' ? 'video-merge' : 'video-add-audio'),
@@ -646,6 +965,8 @@ function commonJob(project, projectAssets, resultState, issues) {
     previewMode: project.previewMode === 'source' || project.previewMode === 'result'
       ? project.previewMode
       : (hydratedOutputs.length ? 'result' : 'source'),
+    audioLabStates,
+    audioLabSessions: restoreAudioLabSessions(project, resultState, audioLabStates, issues),
     addAudioTouchedOptions: safeCopyData(
       project.addAudioTouchedOptions || {},
       `project(${project.id}).addAudioTouchedOptions`,
@@ -1366,6 +1687,29 @@ function normalizeSaveArguments(jobsOrWorkspace, options) {
   throw new ProjectStoreError('validation-failed', 'saveWorkspace expects jobs or { jobs, selectedId }.');
 }
 
+function audioLabStatesForRetainedOutputs(states, retainedOutputs) {
+  if (!plainObject(states)) return {};
+  const outputOwners = new Map(retainedOutputs.map((output) => [output.id, output.resultId || null]));
+  return Object.fromEntries(Object.entries(states).filter(([, manifest]) => {
+    const root = Array.isArray(manifest?.nodes)
+      ? manifest.nodes.find((node) => node?.id === manifest.rootNodeId && node.kind === 'root')
+      : null;
+    if (!root || !outputOwners.has(root.outputId)) return false;
+    const ownerResultId = outputOwners.get(root.outputId);
+    return !root.resultId || !ownerResultId || root.resultId === ownerResultId;
+  }));
+}
+
+function audioLabSessionsForRetainedOutputs(sessions, retainedOutputs) {
+  if (!plainObject(sessions)) return {};
+  const retainedIds = new Set();
+  for (const output of retainedOutputs) {
+    retainedIds.add(output.id);
+    if (output.resultId) retainedIds.add(output.resultId);
+  }
+  return Object.fromEntries(Object.entries(sessions).filter(([stateKey]) => retainedIds.has(stateKey)));
+}
+
 /**
  * Keep a previously durable result when a newly produced result does not fit.
  * Source descriptors still follow the new project state: restoring an older
@@ -1402,12 +1746,24 @@ function metadataOnlyGraph(nextGraph, previousGraph) {
     ));
     outputs.push(...retained);
     const previous = previousProjects.get(project.id);
+    const audioLabStates = {
+      ...audioLabStatesForRetainedOutputs(previous?.audioLabStates, retained),
+      ...audioLabStatesForRetainedOutputs(project.audioLabStates, retained),
+    };
+    const audioLabSessions = {
+      ...audioLabSessionsForRetainedOutputs(previous?.audioLabSessions, retained),
+      ...audioLabSessionsForRetainedOutputs(project.audioLabSessions, retained),
+    };
     return {
       ...project,
       status: 'ready',
       outputIds: retained.map((output) => output.id),
       resultHistory: Array.isArray(previous?.resultHistory) ? previous.resultHistory : null,
       selectedResultId: previous?.selectedResultId || null,
+      // New in-memory entries win per retained output; durable entries fill
+      // untouched retained labs. Both maps discard the rejected re-export.
+      audioLabStates,
+      audioLabSessions,
       exportedRevision: previous?.exportedRevision ?? null,
       quickExportSignature: previous?.quickExportSignature ?? null,
       downloadName: previous?.downloadName ?? project.downloadName,

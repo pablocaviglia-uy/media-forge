@@ -115,6 +115,15 @@ import {
   selectedResult,
 } from './media/results.js';
 import { buildProjectTree } from './media/project-tree.js';
+import { extractAudioPeaks } from './media/audio-peaks.js';
+import {
+  AUDIO_LAB_MIN_FRAGMENT_SECONDS,
+  createAudioLabFragmentFromRootRange,
+  createAudioLabState,
+  resolveAudioLabRange,
+  selectAudioLabNode,
+  validateAudioLabState,
+} from './media/audio-lab.js';
 
 /**
  * Where the app refuses rather than letting FFmpeg run out of heap.
@@ -184,6 +193,8 @@ export class App {
     this.audioMixPreview = null;
     this.audioMixTimeline = null;
     this.generatedResults = null;
+    this.audioPeakCache = new WeakMap();
+    this.audioPeakTask = null;
     this.pickerIntent = null;
     this.nextPickerToken = 1;
 
@@ -2379,6 +2390,7 @@ export class App {
         : 'file';
       return {
         id: result.id,
+        outputId: onlyOutput?.id || null,
         name: result.downloadName,
         downloadName: result.downloadName,
         blob: onlyOutput?.blob || null,
@@ -2396,6 +2408,267 @@ export class App {
         stale: result.id !== newest?.id,
       };
     });
+  }
+
+  audioLabBinding(job, resultId) {
+    if (!job) return null;
+    const history = this.resultHistoryFor(job);
+    const result = history.resultHistory.find((entry) => entry.id === String(resultId));
+    if (!result || result.mediaKind !== 'audio' || result.outputs.length !== 1) return null;
+    const output = result.outputs[0];
+    const duration = Number(result.metadata?.duration);
+    if (!output?.id || !output.blob || !Number.isFinite(duration) || duration <= 0) return null;
+    const sampleRateValue = Number(result.metadata?.sampleRate ?? job.info?.audio?.sampleRate);
+    const channelsValue = Number(result.metadata?.channels ?? job.info?.audio?.channels);
+    const sampleRate = Number.isFinite(sampleRateValue) && sampleRateValue > 0
+      ? sampleRateValue
+      : null;
+    const channels = Number.isInteger(channelsValue) && channelsValue > 0
+      ? channelsValue
+      : null;
+    return {
+      history,
+      result,
+      output,
+      duration,
+      sampleRate,
+      channels,
+      key: output.id,
+    };
+  }
+
+  audioLabStateFor(job, resultId, { create = true } = {}) {
+    const binding = this.audioLabBinding(job, resultId);
+    if (!binding) return null;
+    const states = job.audioLabStates && typeof job.audioLabStates === 'object'
+      ? job.audioLabStates
+      : {};
+    let state = null;
+    try {
+      const candidate = states[binding.key];
+      if (candidate) {
+        const validated = validateAudioLabState(candidate);
+        const root = validated.nodes.find((node) => node.id === validated.rootNodeId);
+        if (
+          root?.outputId === binding.output.id
+          && (!root.projectId || root.projectId === job.id)
+          && (!root.resultId || root.resultId === binding.result.id)
+        ) state = validated;
+      }
+    } catch {
+      // Persisted corruption is handled by the repository's protected mode.
+      // A malformed in-memory edit is replaced only when this result is opened.
+    }
+    if (!state && create) {
+      state = createAudioLabState({
+        outputId: binding.output.id,
+        projectId: job.id,
+        resultId: binding.result.id,
+        name: binding.output.name || binding.result.downloadName,
+        type: binding.output.type || binding.output.blob.type || 'audio/*',
+        size: binding.output.size || binding.output.blob.size,
+        duration: binding.duration,
+      });
+      job.audioLabStates = { ...states, [binding.key]: state };
+    }
+    return state ? { ...binding, state } : null;
+  }
+
+  audioLabSessionFor(job, resultId, { create = true } = {}) {
+    const context = this.audioLabStateFor(job, resultId, { create });
+    if (!context) return null;
+    const sessions = job.audioLabSessions && typeof job.audioLabSessions === 'object'
+      ? job.audioLabSessions
+      : {};
+    const candidate = sessions[context.key];
+    const nodeRange = resolveAudioLabRange(context.state);
+    const minimum = Math.min(AUDIO_LAB_MIN_FRAGMENT_SECONDS, nodeRange.duration);
+    let from = Number(candidate?.selection?.from);
+    let to = Number(candidate?.selection?.to);
+    from = Number.isFinite(from) ? Math.max(nodeRange.start, Math.min(nodeRange.end, from)) : nodeRange.start;
+    to = Number.isFinite(to) ? Math.max(nodeRange.start, Math.min(nodeRange.end, to)) : nodeRange.end;
+    if (to - from < minimum) {
+      from = nodeRange.start;
+      to = nodeRange.end;
+    }
+    const session = {
+      selection: { from, to },
+      loop: Boolean(candidate?.loop),
+      expanded: Boolean(candidate?.expanded),
+    };
+    if (create) job.audioLabSessions = { ...sessions, [context.key]: session };
+    return { ...context, session };
+  }
+
+  audioLabPresentationFor(job, resultId) {
+    const context = this.audioLabSessionFor(job, resultId);
+    if (!context) return {
+      state: null,
+      expandedId: null,
+      playerStateByResult: {},
+    };
+    const peakRecord = this.audioPeakCache?.get(context.output.blob);
+    return {
+      ...context,
+      expandedId: context.session.expanded ? context.result.id : null,
+      playerStateByResult: {
+        [context.key]: {
+          selection: context.session.selection,
+          loop: context.session.loop,
+          peaks: peakRecord?.status === 'ready' ? peakRecord.result.peaks : null,
+        },
+      },
+    };
+  }
+
+  refreshGeneratedAudioLab(job) {
+    if (!job || this.generatedResults?.jobId !== job.id) return;
+    const history = this.resultHistoryFor(job);
+    const presentation = this.audioLabPresentationFor(job, history.selectedResultId);
+    this.generatedResults.control.update({
+      audioLabStateByResult: presentation.playerStateByResult,
+      audioLabState: presentation.state,
+      audioLabExpandedId: presentation.expandedId,
+    });
+  }
+
+  prepareAudioPeaks(job, resultId) {
+    const context = this.audioLabSessionFor(job, resultId);
+    if (!context) return Promise.resolve(null);
+    if (!this.audioPeakCache) this.audioPeakCache = new WeakMap();
+    const blob = context.output.blob;
+    const cached = this.audioPeakCache.get(blob);
+    if (cached?.status === 'ready' || cached?.status === 'unavailable') {
+      return Promise.resolve(cached.result || null);
+    }
+    if (
+      this.audioPeakTask?.jobId === job.id
+      && this.audioPeakTask?.resultId === context.result.id
+      && this.audioPeakTask?.blob === blob
+    ) return this.audioPeakTask.promise;
+
+    this.audioPeakTask?.controller.abort();
+    const controller = new AbortController();
+    const extractor = this.audioPeaksExtractor || extractAudioPeaks;
+    const task = {
+      jobId: job.id,
+      resultId: context.result.id,
+      blob,
+      controller,
+      promise: null,
+    };
+    this.audioPeakCache.set(blob, { status: 'loading', result: null });
+    task.promise = Promise.resolve().then(() => extractor(blob, {
+      duration: context.duration,
+      signal: controller.signal,
+      ...(context.sampleRate ? { sampleRate: context.sampleRate } : {}),
+      ...(context.channels ? { channels: context.channels } : {}),
+    })).then((result) => {
+      if (controller.signal.aborted) return null;
+      this.audioPeakCache.set(blob, { status: 'ready', result });
+      this.refreshGeneratedAudioLab(job);
+      return result;
+    }).catch((error) => {
+      if (controller.signal.aborted || error?.code === 'aborted' || error?.name === 'AbortError') {
+        this.audioPeakCache.delete(blob);
+        return null;
+      }
+      this.audioPeakCache.set(blob, { status: 'unavailable', result: null, code: error?.code || 'failed' });
+      this.refreshGeneratedAudioLab(job);
+      return null;
+    }).finally(() => {
+      if (this.audioPeakTask === task) this.audioPeakTask = null;
+    });
+    this.audioPeakTask = task;
+    return task.promise;
+  }
+
+  setAudioLabSession(job, resultId, patch, { commit = true } = {}) {
+    const context = this.audioLabSessionFor(job, resultId);
+    if (!context) return null;
+    const next = {
+      ...context.session,
+      ...patch,
+      selection: patch.selection ? { ...patch.selection } : context.session.selection,
+    };
+    const nodeRange = resolveAudioLabRange(context.state);
+    const minimum = Math.min(AUDIO_LAB_MIN_FRAGMENT_SECONDS, nodeRange.duration);
+    next.selection.from = Math.max(nodeRange.start, Math.min(nodeRange.end, Number(next.selection.from)));
+    next.selection.to = Math.max(nodeRange.start, Math.min(nodeRange.end, Number(next.selection.to)));
+    if (
+      !Number.isFinite(next.selection.from)
+      || !Number.isFinite(next.selection.to)
+      || next.selection.to - next.selection.from < minimum
+    ) next.selection = { from: nodeRange.start, to: nodeRange.end };
+    next.loop = Boolean(next.loop);
+    next.expanded = Boolean(next.expanded);
+    job.audioLabSessions = {
+      ...(job.audioLabSessions || {}),
+      [context.key]: next,
+    };
+    if (commit) this.scheduleProjectSave();
+    return { ...context, session: next };
+  }
+
+  createAudioLabFragment(job, resultId, selection) {
+    const context = this.audioLabSessionFor(job, resultId);
+    if (!context) return false;
+    try {
+      const state = createAudioLabFragmentFromRootRange(context.state, {
+        start: Number(selection?.from),
+        end: Number(selection?.to),
+      });
+      const selectedRange = resolveAudioLabRange(state);
+      job.audioLabStates = { ...(job.audioLabStates || {}), [context.key]: state };
+      job.audioLabSessions = {
+        ...(job.audioLabSessions || {}),
+        [context.key]: {
+          ...context.session,
+          selection: { from: selectedRange.start, to: selectedRange.end },
+          expanded: true,
+        },
+      };
+      this.refreshGeneratedAudioLab(job);
+      this.scheduleProjectSave({ immediate: true, force: true });
+      this.toast(`Fragmento creado · ${formatDuration(selectedRange.duration)}`);
+      return true;
+    } catch (error) {
+      this.toast(error?.message || 'No se pudo crear el fragmento.');
+      return false;
+    }
+  }
+
+  selectAudioLabNode(job, resultId, nodeId) {
+    const context = this.audioLabSessionFor(job, resultId);
+    if (!context) return false;
+    try {
+      const state = selectAudioLabNode(context.state, nodeId);
+      const selectedRange = resolveAudioLabRange(state);
+      job.audioLabStates = { ...(job.audioLabStates || {}), [context.key]: state };
+      job.audioLabSessions = {
+        ...(job.audioLabSessions || {}),
+        [context.key]: {
+          ...context.session,
+          selection: { from: selectedRange.start, to: selectedRange.end },
+        },
+      };
+      this.refreshGeneratedAudioLab(job);
+      this.scheduleProjectSave();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  clearAudioLabForResult(job, result) {
+    const outputIds = new Set((result?.outputs || []).map((output) => output.id));
+    outputIds.add(result?.id);
+    job.audioLabStates = Object.fromEntries(
+      Object.entries(job.audioLabStates || {}).filter(([key]) => !outputIds.has(key)),
+    );
+    job.audioLabSessions = Object.fromEntries(
+      Object.entries(job.audioLabSessions || {}).filter(([key]) => !outputIds.has(key)),
+    );
   }
 
   showProjectSource(job, { scrollToControls = false, focusDetail = false } = {}) {
@@ -2418,6 +2691,7 @@ export class App {
 
   generatedResultsFor(job) {
     const history = this.resultHistoryFor(job);
+    const audioLab = this.audioLabPresentationFor(job, history.selectedResultId);
     const config = {
       source: this.resultSource(job),
       results: this.generatedResultEntries(job, history),
@@ -2425,26 +2699,60 @@ export class App {
       title: history.resultHistory.length === 1 ? 'Tu resultado está listo' : 'Tus resultados están listos',
       storageStatus: this.projectStorageState || (this.projectPersistenceEnabled() ? 'saving' : 'off'),
       allowRemove: !['queued', 'running'].includes(job.status),
+      audioLabStateByResult: audioLab.playerStateByResult,
+      audioLabState: audioLab.state,
+      audioLabExpandedId: audioLab.expandedId,
       onSelect: (entry) => {
         const current = this.resultHistoryFor(job);
         const next = selectResult(current, entry.id, { projectId: job.id });
         Object.assign(job, resultCompatibilityPatch(next));
         this.paintQueue();
+        this.paintDetail();
+        this.prepareAudioPeaks(job, entry.id);
         this.scheduleProjectSave();
       },
       onDownload: (entry) => this.downloadResult(job, entry.id),
       onRemove: (entry) => this.removeGeneratedResult(job, entry.id),
       onSelectSource: () => this.showProjectSource(job, { focusDetail: true }),
       onCreateAnother: () => this.showProjectSource(job, { scrollToControls: true }),
+      onAudioSelectionChange: (entry, selection, context) => {
+        const next = this.setAudioLabSession(job, entry.id, { selection }, { commit: context.commit });
+        if (
+          next
+          && (next.session.selection.from !== selection.from || next.session.selection.to !== selection.to)
+        ) this.refreshGeneratedAudioLab(job);
+      },
+      onAudioLoopChange: (entry, loop) => {
+        this.setAudioLabSession(job, entry.id, { loop });
+      },
+      onCreateAudioFragment: (entry, selection) => {
+        this.createAudioLabFragment(job, entry.id, selection);
+      },
+      onOpenAudioLab: (entry, playerState) => {
+        this.setAudioLabSession(job, entry.id, {
+          selection: playerState.selection,
+          loop: playerState.loop,
+          expanded: true,
+        });
+      },
+      onSelectAudioNode: (nodeId, context) => {
+        this.selectAudioLabNode(job, context.id, nodeId);
+      },
+      onAudioLabExpandedChange: (expandedId, context) => {
+        if (!context.result?.id) return;
+        this.setAudioLabSession(job, context.result.id, { expanded: Boolean(expandedId) });
+      },
     };
 
     if (this.generatedResults?.jobId === job.id) {
       this.generatedResults.control.update(config);
+      this.prepareAudioPeaks(job, history.selectedResultId);
       return this.generatedResults.control.node;
     }
     this.releaseGeneratedResults();
     const control = createGeneratedResults(config);
     this.generatedResults = { jobId: job.id, control };
+    this.prepareAudioPeaks(job, history.selectedResultId);
     return control.node;
   }
 
@@ -2464,6 +2772,7 @@ export class App {
     const deletingLatest = current.resultHistory.at(-1)?.id === target.id;
     const next = deleteResult(current, target.id, { projectId: job.id });
     this.releaseGeneratedResults();
+    this.clearAudioLabForResult(job, target);
     Object.assign(job, resultCompatibilityPatch(next));
     const latest = next.resultHistory.at(-1) || null;
 
@@ -2518,6 +2827,8 @@ export class App {
   }
 
   releaseGeneratedResults() {
+    this.audioPeakTask?.controller.abort();
+    this.audioPeakTask = null;
     const node = this.generatedResults?.control.node;
     this.generatedResults?.control.destroy();
     // `destroy()` releases media URLs and listeners, but intentionally keeps
@@ -5834,6 +6145,12 @@ export class App {
             ? Number(addAudioSnapshot?.options?.audioBitrate ?? mergeSnapshot?.options?.audioBitrate ?? job.options.audioBitrate) * 1000 || null
             : null,
           duration: Number.isFinite(plan.duration) && plan.duration > 0 ? plan.duration : null,
+          sampleRate: audioTranscode && Number.isFinite(job.info?.audio?.sampleRate)
+            ? job.info.audio.sampleRate
+            : null,
+          channels: audioTranscode && Number.isInteger(job.info?.audio?.channels)
+            ? job.info.audio.channels
+            : null,
           width: Number.isFinite(plan.width) && plan.width > 0 ? plan.width : null,
           height: Number.isFinite(plan.height) && plan.height > 0 ? plan.height : null,
         },

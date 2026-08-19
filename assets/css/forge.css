@@ -5377,6 +5377,10 @@ html[data-interface="forge"] .generated-result-stage-badge {
   backdrop-filter: blur(10px);
 }
 
+html[data-interface="forge"] .generated-result-stage[data-kind="audio"] > .generated-result-stage-badge {
+  display: none;
+}
+
 html[data-interface="forge"] .generated-result-media-shell {
   display: grid;
   place-items: center;
@@ -5403,126 +5407,606 @@ html[data-interface="forge"] .generated-result-video {
   width: 100%;
 }
 
-html[data-interface="forge"] .generated-audio-player {
-  grid-template-columns: minmax(118px, 180px) minmax(0, 1fr);
-  align-items: center;
+html[data-interface="forge"] .generated-audio-lab-shell {
+  align-items: stretch;
   justify-items: stretch;
-  gap: clamp(1rem, 3vw, 2rem);
-  width: min(720px, 94%);
-  padding: clamp(0.95rem, 2.4vw, 1.45rem);
-  background: rgb(20 29 27 / 0.76);
-  border: 1px solid rgb(255 255 255 / 0.1);
-  border-radius: 18px;
-  box-shadow: 0 28px 74px -34px rgb(0 0 0 / 0.95), 0 1px 0 rgb(255 255 255 / 0.06) inset;
+  gap: 0.85rem;
+  width: min(900px, 96%);
+}
+
+html[data-interface="forge"] .audio-lab-player {
+  display: flex;
+  flex-direction: column;
+  gap: 0.78rem;
+  min-width: 0;
+  padding: clamp(0.85rem, 2vw, 1.15rem);
+  color: #eaf4f1;
+  background:
+    radial-gradient(circle at 18% -30%, rgb(101 210 194 / 0.14), transparent 18rem),
+    rgb(15 23 21 / 0.92);
+  border: 1px solid rgb(255 255 255 / 0.11);
+  border-radius: 16px;
+  box-shadow: 0 28px 72px -38px #000, 0 1px 0 rgb(255 255 255 / 0.06) inset;
+  outline: 0;
   backdrop-filter: blur(18px) saturate(115%);
 }
 
-html[data-interface="forge"] .generated-audio-artwork {
-  position: relative;
-  isolation: isolate;
-  display: grid;
-  aspect-ratio: 1;
-  place-items: center;
-  width: 100%;
-  min-width: 0;
-  overflow: hidden;
-  background:
-    radial-gradient(circle at 34% 28%, rgb(255 255 255 / 0.13), transparent 28%),
-    linear-gradient(145deg, #22665d, #102c28 58%, #0a1816);
-  border: 1px solid rgb(101 210 194 / 0.22);
-  border-radius: 14px;
-  box-shadow: 0 20px 42px -25px #000;
+html[data-interface="forge"] .audio-lab-player:focus-visible {
+  border-color: rgb(101 210 194 / 0.58);
+  box-shadow: 0 0 0 3px rgb(101 210 194 / 0.18), 0 28px 72px -38px #000;
 }
 
-html[data-interface="forge"] .generated-audio-artwork::after {
-  content: "";
-  position: absolute;
-  inset: 12%;
-  z-index: -1;
-  border: 1px solid rgb(255 255 255 / 0.08);
-  border-radius: 50%;
-  box-shadow: 0 0 0 18px rgb(255 255 255 / 0.025), 0 0 0 38px rgb(255 255 255 / 0.018);
+html[data-interface="forge"] .audio-lab-player[hidden] {
+  display: none;
 }
 
-html[data-interface="forge"] .generated-audio-note {
-  color: #b8f1e8;
-  font-size: clamp(30px, 5vw, 52px);
-  line-height: 1;
-  text-shadow: 0 9px 28px rgb(0 0 0 / 0.5);
-}
-
-html[data-interface="forge"] .generated-audio-waveform {
-  position: absolute;
-  right: 8%;
-  bottom: 9%;
-  left: 8%;
+html[data-interface="forge"] .audio-lab-head,
+html[data-interface="forge"] .generated-audio-lab-workspace-head {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 2px;
-  height: 21%;
-  opacity: 0.72;
-}
-
-html[data-interface="forge"] .generated-audio-waveform > i {
-  display: block;
-  flex: 1 1 auto;
-  height: var(--wave);
-  min-height: 2px;
-  background: #9be8dd;
-  border-radius: 999px;
-}
-
-html[data-interface="forge"] .generated-audio-controls {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
+  justify-content: space-between;
   gap: 0.8rem;
-  width: 100%;
-  max-width: 100%;
   min-width: 0;
 }
 
-html[data-interface="forge"] .generated-audio-copy {
+html[data-interface="forge"] .audio-lab-heading,
+html[data-interface="forge"] .generated-audio-lab-workspace-head > div {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
-  gap: 0.15rem;
+  gap: 0.12rem;
   min-width: 0;
 }
 
-html[data-interface="forge"] .generated-audio-copy > span {
-  color: #aabbb5;
-  font-size: 10px;
-  font-weight: 720;
-  letter-spacing: 0.08em;
+html[data-interface="forge"] .audio-lab-heading > span,
+html[data-interface="forge"] .generated-audio-lab-workspace-head > div > span,
+html[data-interface="forge"] .generated-audio-lab-map-head span,
+html[data-interface="forge"] .generated-audio-lab-node-copy > span {
+  color: #99aca6;
+  font-size: 9px;
+  font-weight: 760;
+  letter-spacing: 0.075em;
+  line-height: 1.4;
   text-transform: uppercase;
 }
 
-html[data-interface="forge"] .generated-audio-copy > strong {
+html[data-interface="forge"] .audio-lab-name,
+html[data-interface="forge"] .generated-audio-lab-workspace-head > div > strong {
   overflow: hidden;
-  min-width: 0;
-  color: #edf6f3;
-  font-size: clamp(13px, 2vw, 17px);
+  color: #f1f8f6;
+  font-size: 13px;
   font-weight: 680;
-  line-height: 1.35;
+  line-height: 1.4;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-html[data-interface="forge"] .generated-result-audio {
-  width: 100%;
-  max-width: 100%;
-  min-width: 0;
-  min-height: 40px;
-  box-sizing: border-box;
-  border-radius: 999px;
+html[data-interface="forge"] .audio-lab-button,
+html[data-interface="forge"] .generated-audio-lab-back {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  padding: 0.42rem 0.66rem;
+  color: #b9c7c3;
+  font-size: 10px;
+  font-weight: 690;
+  line-height: 1;
+  background: rgb(255 255 255 / 0.045);
+  border: 1px solid rgb(255 255 255 / 0.1);
+  border-radius: 8px;
+  transition: color 140ms var(--ease), background-color 140ms var(--ease), border-color 140ms var(--ease), transform 140ms var(--ease);
 }
 
-html[data-interface="forge"] .generated-audio-controls > small {
-  max-width: 52ch;
-  color: #aabbb5;
+html[data-interface="forge"] .audio-lab-button:hover:not(:disabled),
+html[data-interface="forge"] .generated-audio-lab-back:hover {
+  color: #effaf7;
+  background: rgb(101 210 194 / 0.12);
+  border-color: rgb(101 210 194 / 0.34);
+  transform: translateY(-1px);
+}
+
+html[data-interface="forge"] .audio-lab-button:focus-visible,
+html[data-interface="forge"] .generated-audio-lab-back:focus-visible,
+html[data-interface="forge"] .generated-audio-lab-breadcrumbs button:focus-visible,
+html[data-interface="forge"] .generated-audio-lab-node:focus-visible {
+  outline: 0;
+  box-shadow: 0 0 0 3px rgb(101 210 194 / 0.22);
+}
+
+html[data-interface="forge"] .audio-lab-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
+}
+
+html[data-interface="forge"] .audio-lab-open-lab,
+html[data-interface="forge"] .audio-lab-create-fragment {
+  color: #09201c;
+  background: #6bd8c8;
+  border-color: #82e6d8;
+}
+
+html[data-interface="forge"] .audio-lab-open-lab:hover:not(:disabled),
+html[data-interface="forge"] .audio-lab-create-fragment:hover:not(:disabled) {
+  color: #061512;
+  background: #83e7d9;
+}
+
+html[data-interface="forge"] .audio-lab-play {
+  width: 38px;
+  padding-inline: 0;
+  color: #071815;
+  font-size: 13px;
+  background: #70dccc;
+  border-color: #8ae8dc;
+  border-radius: 50%;
+}
+
+html[data-interface="forge"] .audio-lab-loop[data-active="true"] {
+  color: #a7eee4;
+  background: rgb(101 210 194 / 0.16);
+  border-color: rgb(101 210 194 / 0.42);
+}
+
+html[data-interface="forge"] .audio-lab-waveform-track {
+  position: relative;
+  isolation: isolate;
+  width: 100%;
+  height: clamp(132px, 20vh, 190px);
+  min-height: 132px;
+  overflow: hidden;
+  cursor: crosshair;
+  touch-action: pan-y;
+  background:
+    linear-gradient(90deg, rgb(255 255 255 / 0.04) 1px, transparent 1px),
+    linear-gradient(rgb(255 255 255 / 0.035) 1px, transparent 1px),
+    linear-gradient(180deg, #0a100f, #070b0a);
+  background-size: 10% 100%, 100% 25%, auto;
+  border: 1px solid rgb(255 255 255 / 0.1);
+  border-radius: 11px;
+  box-shadow: 0 14px 36px -28px #000 inset;
+}
+
+html[data-interface="forge"] .audio-lab-waveform-canvas,
+html[data-interface="forge"] .audio-lab-seek-control,
+html[data-interface="forge"] .audio-lab-selection-band {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+html[data-interface="forge"] .audio-lab-waveform-canvas,
+html[data-interface="forge"] .audio-lab-selection-band,
+html[data-interface="forge"] .audio-lab-playhead {
+  pointer-events: none;
+}
+
+html[data-interface="forge"] .audio-lab-selection-band {
+  right: auto;
+  left: var(--audio-lab-selection-left, 0%);
+  z-index: 1;
+  width: var(--audio-lab-selection-width, 100%);
+  background: linear-gradient(180deg, rgb(101 210 194 / 0.2), rgb(101 210 194 / 0.075));
+  border-inline: 1px solid rgb(140 236 222 / 0.48);
+}
+
+html[data-interface="forge"] .audio-lab-seek-control {
+  z-index: 2;
+  outline: 0;
+}
+
+html[data-interface="forge"] .audio-lab-seek-control:focus-visible {
+  box-shadow: 0 0 0 3px rgb(101 210 194 / 0.28) inset;
+}
+
+html[data-interface="forge"] .audio-lab-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--audio-lab-position, 0%);
+  z-index: 3;
+  width: 1px;
+  background: #f1faf7;
+  box-shadow: 0 0 8px rgb(255 255 255 / 0.72);
+}
+
+html[data-interface="forge"] .audio-lab-playhead::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 7px;
+  height: 7px;
+  background: #f1faf7;
+  border-radius: 0 0 50% 50%;
+  transform: translateX(-50%);
+}
+
+html[data-interface="forge"] .audio-lab-selection-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--audio-lab-position, 0%);
+  z-index: 4;
+  width: 18px;
+  cursor: ew-resize;
+  outline: 0;
+  touch-action: none;
+  transform: translateX(-50%);
+}
+
+html[data-interface="forge"] .audio-lab-selection-handle::before {
+  content: "";
+  position: absolute;
+  top: 9px;
+  bottom: 9px;
+  left: 50%;
+  width: 3px;
+  background: #72dfcf;
+  border: 1px solid rgb(5 19 16 / 0.8);
+  border-radius: 999px;
+  box-shadow: 0 0 0 2px rgb(101 210 194 / 0.18), 0 6px 18px rgb(0 0 0 / 0.5);
+  transform: translateX(-50%);
+}
+
+html[data-interface="forge"] .audio-lab-selection-handle:focus-visible::before {
+  box-shadow: 0 0 0 4px rgb(101 210 194 / 0.34), 0 6px 18px rgb(0 0 0 / 0.5);
+}
+
+html[data-interface="forge"] .audio-lab-selection-from[data-edge="start"] {
+  transform: none;
+}
+
+html[data-interface="forge"] .audio-lab-selection-from[data-edge="start"]::before {
+  left: 0;
+}
+
+html[data-interface="forge"] .audio-lab-selection-to[data-edge="end"] {
+  transform: translateX(-100%);
+}
+
+html[data-interface="forge"] .audio-lab-selection-to[data-edge="end"]::before {
+  left: 100%;
+}
+
+html[data-interface="forge"] .audio-lab-selection-handle[data-outside="before"],
+html[data-interface="forge"] .audio-lab-selection-handle[data-outside="after"] {
+  visibility: hidden;
+}
+
+html[data-interface="forge"] .audio-lab-waveform-fallback {
+  position: absolute;
+  inset: 50% auto auto 50%;
+  z-index: 1;
+  width: min(31rem, 84%);
+  color: #8fa19c;
   font-size: 10px;
-  line-height: 1.45;
+  line-height: 1.5;
+  text-align: center;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+}
+
+html[data-interface="forge"] .audio-lab-transport,
+html[data-interface="forge"] .audio-lab-zoom-controls,
+html[data-interface="forge"] .audio-lab-selection-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.42rem;
+  min-width: 0;
+}
+
+html[data-interface="forge"] .audio-lab-transport {
+  flex-wrap: wrap;
+}
+
+html[data-interface="forge"] .audio-lab-time {
+  min-width: 86px;
+  margin-right: auto;
+  color: #c5d1ce;
+  font-family: var(--mono-font);
+  font-size: 10px;
+  text-align: center;
+}
+
+html[data-interface="forge"] .audio-lab-zoom-controls {
+  padding-top: 0.65rem;
+  border-top: 1px solid rgb(255 255 255 / 0.08);
+}
+
+html[data-interface="forge"] .audio-lab-zoom {
+  margin-left: auto;
+  color: #83dfd2;
+  font-family: var(--mono-font);
+  font-size: 10px;
+}
+
+html[data-interface="forge"] .audio-lab-selection-controls {
+  flex-wrap: wrap;
+  padding: 0.68rem;
+  background: rgb(255 255 255 / 0.025);
+  border: 1px solid rgb(255 255 255 / 0.075);
+  border-radius: 10px;
+}
+
+html[data-interface="forge"] .audio-lab-selection-controls > label {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: #9dafaa;
+  font-size: 9px;
+  font-weight: 680;
+  text-transform: uppercase;
+}
+
+html[data-interface="forge"] .audio-lab-time-field {
+  width: 96px;
+  height: 34px;
+  padding-inline: 0.5rem;
+  color: #e9f3f0;
+  font-family: var(--mono-font);
+  font-size: 10px;
+  background: #090e0d;
+  border: 1px solid rgb(255 255 255 / 0.11);
+  border-radius: 7px;
+  outline: 0;
+}
+
+html[data-interface="forge"] .audio-lab-time-field:focus {
+  border-color: #65d2c2;
+  box-shadow: 0 0 0 3px rgb(101 210 194 / 0.16);
+}
+
+html[data-interface="forge"] .audio-lab-selection-length {
+  margin-right: auto;
+  color: #8fa19c;
+  font-family: var(--mono-font);
+  font-size: 9px;
+}
+
+html[data-interface="forge"] .audio-lab-player[data-disabled="true"] .audio-lab-waveform-track {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+html[data-interface="forge"] .generated-audio-lab-workspace-head {
+  grid-column: 1 / -1;
+  padding: 0.15rem 0 0.25rem;
+}
+
+html[data-interface="forge"] .generated-audio-lab-navigation {
+  display: flex;
+  flex-direction: column;
+  gap: 0.72rem;
+  min-width: 0;
+  padding: 0.85rem;
+  overflow: auto;
+  background: rgb(10 16 14 / 0.8);
+  border: 1px solid rgb(255 255 255 / 0.1);
+  border-radius: 14px;
+}
+
+html[data-interface="forge"] .generated-audio-lab-navigation[hidden],
+html[data-interface="forge"] .generated-audio-lab-workspace-head[hidden] {
+  display: none;
+}
+
+html[data-interface="forge"] .generated-audio-lab-map-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+html[data-interface="forge"] .generated-audio-lab-map-head > div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.08rem;
+  min-width: 0;
+}
+
+html[data-interface="forge"] .generated-audio-lab-map-head h3 {
+  color: #edf6f3;
+  font-size: 12px;
+  font-weight: 680;
+}
+
+html[data-interface="forge"] .generated-audio-lab-map-head > .generated-audio-lab-node-count {
+  display: grid;
+  place-items: center;
+  width: 27px;
+  height: 27px;
+  color: #78ded0;
+  font-family: var(--mono-font);
+  background: rgb(101 210 194 / 0.1);
+  border: 1px solid rgb(101 210 194 / 0.2);
+  border-radius: 8px;
+}
+
+html[data-interface="forge"] .generated-audio-lab-breadcrumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.28rem;
+  align-items: center;
+  padding-bottom: 0.65rem;
+  border-bottom: 1px solid rgb(255 255 255 / 0.08);
+}
+
+html[data-interface="forge"] .generated-audio-lab-breadcrumbs li {
+  display: inline-flex;
+  gap: 0.28rem;
+  align-items: center;
+  min-width: 0;
+  color: #71827d;
+  font-size: 10px;
+}
+
+html[data-interface="forge"] .generated-audio-lab-breadcrumbs button {
+  overflow: hidden;
+  max-width: 145px;
+  padding: 0.28rem 0.4rem;
+  color: #aabbb6;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: rgb(255 255 255 / 0.04);
+  border-radius: 6px;
+}
+
+html[data-interface="forge"] .generated-audio-lab-breadcrumbs button[aria-current="page"] {
+  color: #9de9de;
+  background: rgb(101 210 194 / 0.12);
+}
+
+html[data-interface="forge"] .generated-audio-lab-breadcrumbs button:disabled,
+html[data-interface="forge"] .generated-audio-lab-node:disabled {
+  cursor: default;
+  opacity: 0.56;
+}
+
+html[data-interface="forge"] .generated-audio-lab-node-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.42rem;
+}
+
+html[data-interface="forge"] .generated-audio-lab-node {
+  display: grid;
+  grid-template-columns: 31px minmax(0, 1fr) auto;
+  gap: 0.5rem;
+  align-items: center;
+  width: calc(100% - var(--audio-node-indent, 0px));
+  min-height: 51px;
+  margin-left: var(--audio-node-indent, 0px);
+  padding: 0.48rem;
+  text-align: left;
+  background: rgb(255 255 255 / 0.035);
+  border: 1px solid rgb(255 255 255 / 0.075);
+  border-radius: 9px;
+}
+
+html[data-interface="forge"] .generated-audio-lab-node:hover:not(:disabled),
+html[data-interface="forge"] .generated-audio-lab-node.is-selected {
+  background: rgb(101 210 194 / 0.095);
+  border-color: rgb(101 210 194 / 0.28);
+}
+
+html[data-interface="forge"] .generated-audio-lab-node-icon {
+  display: grid;
+  place-items: center;
+  width: 31px;
+  height: 31px;
+  color: #83dfd2;
+  background: rgb(101 210 194 / 0.08);
+  border: 1px solid rgb(101 210 194 / 0.15);
+  border-radius: 8px;
+}
+
+html[data-interface="forge"] .generated-audio-lab-node-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.04rem;
+  min-width: 0;
+}
+
+html[data-interface="forge"] .generated-audio-lab-node-copy strong,
+html[data-interface="forge"] .generated-audio-lab-node-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[data-interface="forge"] .generated-audio-lab-node-copy strong {
+  color: #e4eeeb;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+html[data-interface="forge"] .generated-audio-lab-node-copy small {
+  color: #83958f;
+  font-family: var(--mono-font);
+  font-size: 8px;
+}
+
+html[data-interface="forge"] .generated-audio-lab-node-current {
+  color: #82dfd2;
+  font-size: 8px;
+  font-weight: 760;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+html[data-interface="forge"] .generated-audio-lab-map-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  min-height: 150px;
+  padding: 1rem;
+  color: #82948e;
+  text-align: center;
+  border: 1px dashed rgb(255 255 255 / 0.1);
+  border-radius: 10px;
+}
+
+html[data-interface="forge"] .generated-audio-lab-map-empty > span {
+  color: #78dace;
+  font-size: 22px;
+}
+
+html[data-interface="forge"] .generated-audio-lab-map-empty strong {
+  color: #dce8e4;
+  font-size: 11px;
+}
+
+html[data-interface="forge"] .generated-audio-lab-map-empty p {
+  max-width: 28ch;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+html[data-interface="forge"] .generated-results[data-audio-lab-expanded="true"] {
+  max-width: 1380px;
+}
+
+html[data-interface="forge"] .generated-results[data-audio-lab-expanded="true"] > .generated-results-head,
+html[data-interface="forge"] .generated-results[data-audio-lab-expanded="true"] .generated-lineage,
+html[data-interface="forge"] .generated-results[data-audio-lab-expanded="true"] .generated-result-summary,
+html[data-interface="forge"] .generated-results[data-audio-lab-expanded="true"] .generated-result-stage-badge,
+html[data-interface="forge"] .generated-results[data-audio-lab-expanded="true"] .audio-lab-open-lab {
+  display: none;
+}
+
+html[data-interface="forge"] .generated-results[data-audio-lab-expanded="true"] .generated-results-body {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+html[data-interface="forge"] .generated-results[data-audio-lab-expanded="true"] .generated-result-stage {
+  min-height: 70vh;
+  min-height: min(760px, 80dvh);
+  padding: clamp(0.8rem, 2vw, 1.35rem);
+  overflow: auto;
+}
+
+html[data-interface="forge"] .generated-results[data-audio-lab-expanded="true"] .generated-audio-lab-shell {
+  grid-template-columns: minmax(0, 1fr) minmax(230px, 290px);
+  grid-template-rows: auto minmax(0, 1fr);
+  align-self: stretch;
+  width: 100%;
+  max-width: 1280px;
+}
+
+html[data-interface="forge"] .generated-results[data-audio-lab-expanded="true"] .audio-lab-player {
+  align-self: start;
+}
+
+html[data-interface="forge"] .generated-results[data-audio-lab-expanded="true"] .audio-lab-waveform-track {
+  height: clamp(210px, 34vh, 330px);
 }
 
 html[data-interface="forge"] .generated-result-unavailable {
@@ -5544,16 +6028,11 @@ html[data-interface="forge"] .generated-result-unavailable[hidden] {
   display: none;
 }
 
-html[data-interface="forge"] .generated-audio-player[data-error="true"] {
+html[data-interface="forge"] .generated-audio-lab-shell[data-error="true"] {
   grid-template-columns: minmax(0, 1fr);
 }
 
-html[data-interface="forge"] .generated-audio-player[data-error="true"] .generated-audio-artwork,
-html[data-interface="forge"] .generated-audio-player[data-error="true"] .generated-audio-controls {
-  display: none;
-}
-
-html[data-interface="forge"] .generated-audio-player > .generated-result-unavailable {
+html[data-interface="forge"] .generated-audio-lab-shell > .generated-result-unavailable {
   grid-column: 1 / -1;
   width: 100%;
 }
@@ -6038,6 +6517,15 @@ html[data-interface="forge"] .generated-results-empty p {
   html[data-interface="forge"] .generated-lineage-flow {
     max-height: 330px;
   }
+
+  html[data-interface="forge"] .generated-results[data-audio-lab-expanded="true"] .generated-audio-lab-shell {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto auto;
+  }
+
+  html[data-interface="forge"] .generated-results[data-audio-lab-expanded="true"] .generated-audio-lab-navigation {
+    max-height: 300px;
+  }
 }
 
 @media (max-width: 560px) {
@@ -6083,24 +6571,69 @@ html[data-interface="forge"] .generated-results-empty p {
     max-height: 50dvh;
   }
 
-  html[data-interface="forge"] .generated-audio-player {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 0.85rem;
-    width: 94%;
-    padding: 0.78rem;
+  html[data-interface="forge"] .generated-audio-lab-shell {
+    width: 100%;
   }
 
-  html[data-interface="forge"] .generated-audio-artwork {
-    aspect-ratio: 2.25 / 1;
-    max-height: 150px;
+  html[data-interface="forge"] .audio-lab-player {
+    gap: 0.65rem;
+    padding: 0.72rem;
+    border-radius: 12px;
   }
 
-  html[data-interface="forge"] .generated-audio-note {
-    font-size: 38px;
+  html[data-interface="forge"] .audio-lab-head {
+    align-items: stretch;
+    flex-direction: column;
   }
 
-  html[data-interface="forge"] .generated-audio-controls {
-    gap: 0.6rem;
+  html[data-interface="forge"] .audio-lab-open-lab {
+    width: 100%;
+  }
+
+  html[data-interface="forge"] .audio-lab-waveform-track {
+    height: 145px;
+    min-height: 145px;
+  }
+
+  html[data-interface="forge"] .audio-lab-time {
+    order: -1;
+    width: 100%;
+    margin: 0;
+    text-align: left;
+  }
+
+  html[data-interface="forge"] .audio-lab-play-selection,
+  html[data-interface="forge"] .audio-lab-loop {
+    flex: 1 1 120px;
+  }
+
+  html[data-interface="forge"] .audio-lab-selection-controls > label {
+    flex: 1 1 120px;
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  html[data-interface="forge"] .audio-lab-time-field {
+    width: 100%;
+  }
+
+  html[data-interface="forge"] .audio-lab-selection-length {
+    flex: 1 0 100%;
+  }
+
+  html[data-interface="forge"] .audio-lab-mark-from,
+  html[data-interface="forge"] .audio-lab-mark-to,
+  html[data-interface="forge"] .audio-lab-create-fragment {
+    flex: 1 1 120px;
+  }
+
+  html[data-interface="forge"] .generated-audio-lab-workspace-head {
+    align-items: stretch;
+    flex-direction: column-reverse;
+  }
+
+  html[data-interface="forge"] .generated-audio-lab-back {
+    width: 100%;
   }
 
   html[data-interface="forge"] .generated-result-summary {
@@ -6137,5 +6670,16 @@ html[data-interface="forge"] .generated-results-empty p {
   html[data-interface="forge"] .generated-lineage-select,
   html[data-interface="forge"] .generated-result-download {
     min-height: 44px;
+  }
+
+  html[data-interface="forge"] .audio-lab-button,
+  html[data-interface="forge"] .generated-audio-lab-back,
+  html[data-interface="forge"] .generated-audio-lab-breadcrumbs button,
+  html[data-interface="forge"] .generated-audio-lab-node {
+    min-height: 44px;
+  }
+
+  html[data-interface="forge"] .audio-lab-selection-handle {
+    width: 44px;
   }
 }

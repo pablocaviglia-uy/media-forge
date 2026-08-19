@@ -184,6 +184,7 @@ function button(label, action, text, attrs = {}) {
  * @param {boolean} [options.loop]
  * @param {boolean} [options.disabled]
  * @param {(selection: AudioLabSelection, context: {source: string, commit: boolean}) => void} [options.onSelectionChange]
+ * @param {(loop: boolean, context: {source: 'button'|'shortcut'}) => void} [options.onLoopChange]
  * @param {(selection: AudioLabSelection, context: {name: string, duration: number}) => void} [options.onCreateFragment]
  * @param {(state: {selection: AudioLabSelection, view: AudioLabView, currentTime: number, loop: boolean}) => void} [options.onOpenLab]
  * @returns {{
@@ -212,6 +213,7 @@ export function createAudioLabPlayer(options = {}) {
     loop: false,
     disabled: false,
     onSelectionChange: null,
+    onLoopChange: null,
     onCreateFragment: null,
     onOpenLab: null,
     ...options,
@@ -465,6 +467,8 @@ export function createAudioLabPlayer(options = {}) {
     playhead.style.left = `${needle * 100}%`;
     fromHandle.dataset.outside = selection.from < view.start ? 'before' : selection.from > view.end ? 'after' : 'false';
     toHandle.dataset.outside = selection.to < view.start ? 'before' : selection.to > view.end ? 'after' : 'false';
+    fromHandle.dataset.edge = from <= 1e-6 ? 'start' : 'inside';
+    toHandle.dataset.edge = to >= 1 - 1e-6 ? 'end' : 'inside';
 
     seekControl.setAttribute('aria-valuemin', '0');
     seekControl.setAttribute('aria-valuemax', String(duration));
@@ -654,7 +658,7 @@ export function createAudioLabPlayer(options = {}) {
     startMedia();
   }
 
-  function toggleLoop() {
+  function toggleLoop(source) {
     if (disabled || !(selection.to > selection.from)) return;
     looping = !looping;
     if (looping && media.paused === false) {
@@ -663,6 +667,7 @@ export function createAudioLabPlayer(options = {}) {
     }
     render();
     announce(looping ? 'Loop de la selección activado.' : 'Loop desactivado.');
+    config.onLoopChange?.(looping, { source });
   }
 
   function changeZoom(factor, at = currentTime()) {
@@ -807,7 +812,7 @@ export function createAudioLabPlayer(options = {}) {
     stopPlaybackMonitor();
     media.pause();
     media.removeAttribute('src');
-    media.load?.();
+    try { media.load?.(); } catch { /* resetting a failed media element is best-effort */ }
     try { media.currentTime = 0; } catch { /* an empty media element may reject a seek */ }
     if (ownedUrl && typeof globalThis.URL?.revokeObjectURL === 'function') {
       globalThis.URL.revokeObjectURL(ownedUrl);
@@ -842,6 +847,7 @@ export function createAudioLabPlayer(options = {}) {
         installedSourceUrl = source;
         delete node.dataset.mediaError;
       } catch {
+        media.removeAttribute('src');
         if (ownedUrl && typeof globalThis.URL?.revokeObjectURL === 'function') {
           globalThis.URL.revokeObjectURL(ownedUrl);
         }
@@ -856,7 +862,7 @@ export function createAudioLabPlayer(options = {}) {
     on(backButton, 'click', () => seek(currentTime() - BUTTON_SEEK_SECONDS)),
     on(forwardButton, 'click', () => seek(currentTime() + BUTTON_SEEK_SECONDS)),
     on(playSelectionButton, 'click', playSelection),
-    on(loopButton, 'click', toggleLoop),
+    on(loopButton, 'click', () => toggleLoop('button')),
     on(zoomInButton, 'click', () => changeZoom(0.5)),
     on(zoomOutButton, 'click', () => changeZoom(2)),
     on(fitButton, 'click', () => { view = fit(duration); render(); paintWaveform(); }),
@@ -906,7 +912,7 @@ export function createAudioLabPlayer(options = {}) {
       if (disabled || !shortcutAllowed(event)) return;
       const key = event.key;
       if (key === ' ') { event.preventDefault(); togglePlayback(); }
-      else if (key === 'l' || key === 'L') { event.preventDefault(); toggleLoop(); }
+      else if (key === 'l' || key === 'L') { event.preventDefault(); toggleLoop('shortcut'); }
       else if (key === 'i' || key === 'I') {
         event.preventDefault();
         setSelectionEdge('from', currentTime(), { source: 'shortcut', commit: true });
