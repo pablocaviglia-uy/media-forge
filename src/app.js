@@ -1825,7 +1825,12 @@ export class App {
 
   async runQueue({ skipFocused = false } = {}) {
     this.stopRequested = false;
-    for (const job of this.jobs) {
+    // Iterate the identities that were pending when this run started. The live
+    // array can change while `runJob` is awaiting FFmpeg — for example, when a
+    // completed row before the running one is removed. Iterating that mutated
+    // array would advance past the next job. `runJob` still checks membership,
+    // so a job removed from this snapshot is safely ignored.
+    for (const job of [...this.jobs]) {
       if (this.stopRequested) break;
       if (job.status !== 'ready' && job.status !== 'queued') continue;
       if (skipFocused && focusedQuickTool(job.forgeToolId)) continue;
@@ -1836,8 +1841,10 @@ export class App {
   async runJob(job) {
     // A queued task closes over its job object. It may have been removed while
     // waiting for the single FFmpeg instance; never spend CPU on a file the
-    // user has already dismissed.
-    if (!this.jobs.includes(job) || !job.info || job.status === 'running') return;
+    // user has already dismissed. Requiring a pending status also makes stale
+    // tasks idempotent: if "Process queue" consumes a job before an individual
+    // task for that same job gets its turn, the latter sees `done` and exits.
+    if (!this.jobs.includes(job) || !job.info || !['ready', 'queued'].includes(job.status)) return;
     if (!this.validateQuickJob(job, { notify: job.status !== 'queued' })) {
       if (job.status === 'queued') job.status = 'ready';
       this.paintQueue();

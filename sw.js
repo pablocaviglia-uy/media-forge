@@ -156,6 +156,18 @@ self.addEventListener('activate', (event) => {
  */
 const IMMUTABLE = /\/assets\/ffmpeg\/(?:mt\/)?ffmpeg-core\./;
 
+/**
+ * Only the scope root and its explicit `index.html` are app-shell
+ * navigations. Keeping this test tied to the registration scope matters on
+ * GitHub Pages, where MediaForge is served below `/media-forge/` rather than
+ * at the origin root.
+ */
+function isAppShellNavigation(url) {
+  const scopeRoot = new URL('./', self.registration.scope);
+  const index = new URL('./index.html', scopeRoot);
+  return url.pathname === scopeRoot.pathname || url.pathname === index.pathname;
+}
+
 self.addEventListener('fetch', (event) => {
   if (DEVELOPMENT) return; // let every request go straight to the dev server
 
@@ -168,15 +180,41 @@ self.addEventListener('fetch', (event) => {
   if (request.mode === 'navigate') {
     event.respondWith(
       (async () => {
+        let response;
         try {
-          const response = await fetch(request);
-          const cache = await caches.open(CACHE_NAME);
-          cache.put('./index.html', response.clone());
-          return response;
+          response = await fetch(request);
         } catch {
-          const cached = await caches.match('./index.html', { ignoreSearch: true });
-          return cached || new Response('Offline and nothing cached yet.', { status: 503 });
+          // The shell has one canonical cache key. Install also pre-caches the
+          // scope root, but that alias is only an install snapshot and may be
+          // older than a later network refresh of index.html.
+          if (isAppShellNavigation(url)) {
+            const shell = await caches.match('./index.html', { ignoreSearch: true });
+            return shell || new Response('Offline and nothing cached yet.', { status: 503 });
+          }
+
+          // Preserve real multi-page navigations offline (notably
+          // about.html); unknown routes still fall back to the app shell.
+          const requested = await caches.match(request, { ignoreSearch: true });
+          if (requested) return requested;
+
+          const shell = await caches.match('./index.html', { ignoreSearch: true });
+          return shell || new Response('Offline and nothing cached yet.', { status: 503 });
         }
+
+        // A response for about.html (or, worse, a server's 404 document)
+        // must never replace the app shell. Only a successful request for
+        // the scope root or index.html is allowed to refresh that key.
+        if (response.ok && isAppShellNavigation(url)) {
+          try {
+            const cache = await caches.open(CACHE_NAME);
+            await cache.put('./index.html', response.clone());
+          } catch (error) {
+            // Cache quota/corruption must not turn a valid online navigation
+            // into an apparent network failure.
+            console.warn('[sw] could not refresh the app shell', error.message);
+          }
+        }
+        return response;
       })()
     );
     return;
