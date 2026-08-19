@@ -233,6 +233,50 @@ describe('every operation runs', { skip: VENDORED ? false : 'core not vendored' 
     assert.equal(info.hasAudio, false);
   });
 
+  test('volume gain is applied by the vendored audio filter', () => {
+    const level = (name) => {
+      const report = exec(
+        '-hide_banner', '-loglevel', 'info', '-i', name,
+        '-af', 'volumedetect', '-vn', '-f', 'null', '-'
+      ).text;
+      return Number(/mean_volume:\s*(-?[\d.]+) dB/.exec(report)?.[1]);
+    };
+    const before = level('input.mp4');
+    const plan = buildPlan(clip, 'convert', {
+      format: 'mp4-h264', volumeGain: 1.5, evenDimensions: true, speed: 'ultrafast',
+    });
+    runPlan(plan);
+
+    const after = level(plan.outputs[0]);
+    assert.ok(Number.isFinite(before) && Number.isFinite(after));
+    assert.ok(after - before > 3 && after - before < 4, `gain moved mean volume from ${before} dB to ${after} dB`);
+  });
+
+  test('speed keeps video and audio together through a chained atempo filter', () => {
+    const plan = buildPlan(clip, 'convert', {
+      format: 'mp4-h264', playbackRate: 4, evenDimensions: true, speed: 'ultrafast',
+    });
+    assert.match(valueAfter(plan.steps[0].args, '-af'), /atempo=2,atempo=2/);
+    runPlan(plan);
+
+    const info = parseProbeJson(ffprobeJson(plan.outputs[0]));
+    assert.ok(info.hasVideo && info.hasAudio);
+    assert.ok(Math.abs(info.duration - plan.duration) < 0.2, `speed output was ${info.duration}, planned ${plan.duration}`);
+    assert.ok(Math.abs(info.video.duration - info.audio.duration) < 0.2);
+  });
+
+  test('loop repeats both streams to the planned bounded duration', () => {
+    const plan = buildPlan(clip, 'convert', {
+      format: 'mp4-h264', loopMode: 'count', loopCount: 2, evenDimensions: true, speed: 'ultrafast',
+    });
+    runPlan(plan);
+
+    const info = parseProbeJson(ffprobeJson(plan.outputs[0]));
+    assert.ok(info.hasVideo && info.hasAudio);
+    assert.ok(Math.abs(info.duration - plan.duration) < 0.2, `loop output was ${info.duration}, planned ${plan.duration}`);
+    assert.ok(Math.abs(info.video.duration - info.audio.duration) < 0.2);
+  });
+
   test('trimming produces a shorter file', () => {
     const plan = buildPlan(clip, 'convert', { format: 'mp4-h264', trimStart: 0.5, trimEnd: 1.5, speed: 'ultrafast' });
     assert.equal(plan.duration, 1);
@@ -347,6 +391,71 @@ describe('every operation runs', { skip: VENDORED ? false : 'core not vendored' 
     const info = parseProbeJson(ffprobeJson('output.mp3'));
     assert.equal(info.audio.codec, 'mp3');
     assert.equal(plan.downloadName, 'holiday.mp3');
+  });
+});
+
+describe('speed timestamps on an isolated core', { skip: VENDORED ? false : 'core not vendored' }, () => {
+  test('scales a one-second A/V start delay from a non-zero origin', async () => {
+    const fresh = await loadCore();
+    let freshLines = [];
+    fresh.setLogger(({ message }) => freshLines.push(message));
+    const runFresh = (...args) => {
+      freshLines = [];
+      fresh.reset();
+      const code = fresh.exec(...args);
+      return { code, text: freshLines.join('\n') };
+    };
+    const probeFresh = (name, reportName) => {
+      freshLines = [];
+      fresh.reset();
+      fresh.ffprobe(
+        '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams',
+        '-o', reportName, name
+      );
+      const report = JSON.parse(new TextDecoder().decode(fresh.FS.readFile(reportName)));
+      fresh.FS.unlink(reportName);
+      return report;
+    };
+
+    const made = runFresh(
+      '-f', 'lavfi', '-i', 'testsrc2=size=192x144:rate=15:duration=3',
+      '-f', 'lavfi', '-i', 'sine=frequency=660:sample_rate=44100:duration=3',
+      '-filter_complex', '[0:v]setpts=PTS+5/TB[v];[1:a]asetpts=PTS+6/TB[a]',
+      '-map', '[v]', '-map', '[a]',
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac', '-b:a', '64k', '-copyts', '-y', 'input.mp4'
+    );
+    assert.equal(made.code, 0, `could not synthesise offset input:\n${made.text.split('\n').slice(-8).join('\n')}`);
+
+    const inputReport = probeFresh('input.mp4', 'offset-input.json');
+    const inputVideo = Number(inputReport.streams.find((stream) => stream.codec_type === 'video')?.start_time);
+    const inputAudio = Number(inputReport.streams.find((stream) => stream.codec_type === 'audio')?.start_time);
+    assert.ok(Math.abs(inputVideo - 5) < 0.05, `input video started at ${inputVideo}`);
+    assert.ok(Math.abs(inputAudio - 6) < 0.05, `input audio started at ${inputAudio}`);
+    assert.ok(Math.abs((inputAudio - inputVideo) - 1) < 0.05, `input delay was ${inputAudio - inputVideo}`);
+    const offsetInfo = parseProbeJson(JSON.stringify(inputReport));
+    const plan = buildPlan(source('offset.mp4', offsetInfo), 'convert', {
+      format: 'mp4-h264', playbackRate: 2, evenDimensions: true, speed: 'ultrafast',
+    });
+    for (const step of plan.steps) {
+      const result = runFresh(...step.args);
+      assert.equal(result.code, 0, `offset speed failed:\n${result.text.split('\n').slice(-10).join('\n')}`);
+    }
+
+    const outputReport = probeFresh(plan.outputs[0], 'offset-output.json');
+    const outputVideo = Number(outputReport.streams.find((stream) => stream.codec_type === 'video')?.start_time);
+    const outputAudio = Number(outputReport.streams.find((stream) => stream.codec_type === 'audio')?.start_time);
+    assert.ok(Math.abs(outputVideo) < 0.05, `output video started at ${outputVideo}`);
+    assert.ok(Math.abs(outputAudio - 0.5) < 0.06, `output audio started at ${outputAudio}`);
+    assert.ok(
+      Math.abs((outputAudio - outputVideo) - 0.5) < 0.06,
+      `scaled A/V delay was ${outputAudio - outputVideo}`
+    );
+    const outputInfo = parseProbeJson(JSON.stringify(outputReport));
+    assert.ok(
+      Math.abs(outputInfo.duration - plan.duration) < 0.2,
+      `offset speed output was ${outputInfo.duration}, planned ${plan.duration}`
+    );
   });
 });
 

@@ -26,7 +26,15 @@ import {
   remuxContainerById,
 } from './formats.js';
 import { formatTimestamp } from '../ui/dom.js';
-import { normalizeCropRect } from './quick-tools.js';
+import {
+  VIDEO_LOOP_LIMITS,
+  loopOutputDuration,
+  normalizeCropRect,
+  normalizePlaybackRate,
+  normalizeVideoLoopOptions,
+  normalizeVolumeGain,
+  playableMediaDuration,
+} from './quick-tools.js';
 
 /**
  * @typedef {object} Plan
@@ -155,6 +163,13 @@ export const DEFAULT_OPTIONS = {
   cropWidth: null,
   cropHeight: null,
   evenDimensions: false,
+  // Neutral engine values. Focused tools replace them with their useful
+  // defaults; keeping the generic converter neutral avoids surprise effects.
+  volumeGain: 1,
+  playbackRate: 1,
+  loopMode: 'count',
+  loopCount: 1,
+  loopDuration: null,
   mergeFit: 'contain', // contain | cover
   gifFps: 12,
   gifWidth: 480,
@@ -176,18 +191,62 @@ const extensionOf = (name) => {
 
 const stemOf = (name) => String(name || 'output').replace(/\.[A-Za-z0-9]{1,8}$/, '') || 'output';
 
+/** A stable decimal for FFmpeg filter arguments, without floating-point tails. */
+const filterNumber = (value) => String(Number(Number(value).toFixed(6)));
+
 /**
- * How long the output will be, which is what the progress bar divides by.
- * Trimming changes it; nothing else does.
+ * How long the selected source range is before playback and repeat effects.
+ * Builders derive their final progress duration from this base.
  */
 function outputDuration(info, options) {
-  const total = Number.isFinite(info?.duration) ? info.duration : null;
+  const total = playableMediaDuration(info);
   const start = Number.isFinite(options.trimStart) ? Math.max(0, options.trimStart) : 0;
   const end = Number.isFinite(options.trimEnd) ? options.trimEnd : null;
 
   if (end !== null && end > start) return end - start;
   if (total === null) return null;
   return Math.max(0, total - start);
+}
+
+/** A finite timestamp from probe metadata, or null when that origin is unknown. */
+function mediaTimestamp(value) {
+  if (value === undefined || value === null || value === '' || value === 'N/A') return null;
+  const timestamp = Number(value);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+/**
+ * Describe the selected A/V streams on one shared timeline after a speed
+ * change. Filters have to subtract each stream's own STARTPTS, so the relative
+ * delay would otherwise disappear. ffprobe's per-stream starts let us add it
+ * back, divided by the playback rate just like every other point in time.
+ */
+function focusedPlaybackTimeline(info, playbackRate) {
+  const containerStart = mediaTimestamp(info?.startTime);
+  const tracks = [
+    ['video', info?.video],
+    ['audio', info?.audio],
+  ].filter(([, stream]) => Boolean(stream));
+
+  const entries = tracks.map(([kind, stream]) => ({
+    kind,
+    start: mediaTimestamp(stream.startTime) ?? containerStart,
+  }));
+  const knownStarts = entries.map(({ start }) => start).filter((start) => start !== null);
+  const origin = knownStarts.length ? Math.min(...knownStarts) : null;
+  const offsets = { video: 0, audio: 0 };
+
+  for (const entry of entries) {
+    const sourceOffset = origin !== null && entry.start !== null ? entry.start - origin : 0;
+    offsets[entry.kind] = sourceOffset / playbackRate;
+  }
+
+  const sourceSpan = playableMediaDuration(info);
+
+  return {
+    ...offsets,
+    duration: sourceSpan === null ? null : sourceSpan / playbackRate,
+  };
 }
 
 /**
@@ -248,7 +307,13 @@ function rotationFilters(options) {
  * Optional padding stays last so it repairs the dimensions produced by every
  * earlier geometric transformation without changing their proportions.
  */
-function videoFilters(options, { height = null, fps = null, info = null } = {}) {
+function videoFilters(options, {
+  height = null,
+  fps = null,
+  info = null,
+  playbackRate = 1,
+  playbackOffset = 0,
+} = {}) {
   const filters = [];
   if (fps) filters.push(`fps=${fps}`);
   const crop = normalizeCropRect(info, options);
@@ -256,6 +321,12 @@ function videoFilters(options, { height = null, fps = null, info = null } = {}) 
   filters.push(...rotationFilters(options));
   const scale = scaleFilter(height);
   if (scale) filters.push(scale);
+  if (playbackRate !== 1) {
+    // Rebase this stream, scale its cadence, then restore its position on the
+    // shared A/V timeline. The earliest selected stream starts at zero.
+    const offset = playbackOffset !== 0 ? `+${filterNumber(playbackOffset)}/TB` : '';
+    filters.push(`setpts=(PTS-STARTPTS)/${filterNumber(playbackRate)}${offset}`);
+  }
   if (options.evenDimensions) filters.push('pad=ceil(iw/2)*2:ceil(ih/2)*2');
   return filters;
 }
@@ -311,6 +382,68 @@ function audioArguments(formatId, options, { allowNone = true } = {}) {
 /** MP4 and MOV keep their index at the end of the file unless told otherwise. */
 const faststart = (format) => (format.muxer === 'mp4' || format.muxer === 'mov' || format.muxer === 'ipod' ? ['-movflags', '+faststart'] : []);
 
+function playbackRateFor(options) {
+  const rate = normalizePlaybackRate(options.playbackRate);
+  if (rate === null) throw new Error('Playback speed must be between 0.25x and 4x.');
+  return rate;
+}
+
+function volumeGainFor(options) {
+  const gain = normalizeVolumeGain(options.volumeGain);
+  if (gain === null) throw new Error('Volume must be between 0% and 200%.');
+  return gain;
+}
+
+/**
+ * `atempo` accepts one factor from 0.5 through 2. Chaining preserves pitch and
+ * supports the full focused-tool range without feeding FFmpeg an invalid
+ * value: 0.25 becomes 0.5×0.5, while 4 becomes 2×2.
+ */
+function tempoFilters(rate) {
+  const filters = [];
+  let remaining = rate;
+
+  while (remaining < 0.5 - 1e-9) {
+    filters.push('atempo=0.5');
+    remaining /= 0.5;
+  }
+  while (remaining > 2 + 1e-9) {
+    filters.push('atempo=2');
+    remaining /= 2;
+  }
+  if (Math.abs(remaining - 1) > 1e-9) filters.push(`atempo=${filterNumber(remaining)}`);
+  return filters;
+}
+
+function focusedAudioFilters(muted, playbackRate, volumeGain, playbackOffset = 0) {
+  if (muted) return [];
+  return [
+    ...tempoFilters(playbackRate),
+    // atempo changes cadence but does not scale an initial PTS reliably. Set
+    // the final origin explicitly after it, including the scaled A/V delay.
+    ...(playbackRate !== 1 ? [
+      `asetpts=PTS-STARTPTS${playbackOffset !== 0 ? `+${filterNumber(playbackOffset)}/TB` : ''}`,
+    ] : []),
+    ...(volumeGain !== 1 ? [`volume=${filterNumber(volumeGain)}`] : []),
+  ];
+}
+
+function requestedLoop(options) {
+  return options.loopMode === 'count'
+    ? Number(options.loopCount) !== 1
+    : true;
+}
+
+function loopForCommand(info, options) {
+  if (!requestedLoop(options)) return null;
+  const normalized = normalizeVideoLoopOptions(info, options);
+  const duration = normalized ? loopOutputDuration(info, normalized) : null;
+  if (!normalized || duration === null) {
+    throw new Error('The repeat must add time and keep the result at or below 30 minutes.');
+  }
+  return { ...normalized, duration };
+}
+
 /* ------------------------------------------------------------------ *
  * Builders
  * ------------------------------------------------------------------ */
@@ -320,22 +453,59 @@ function buildConvert(source, options, names) {
   if (format.kind === 'audio') return buildExtractAudio(source, { ...options, audioFormat: format.id }, names);
   if (format.id === 'gif') return buildGif(source, options, names);
 
-  const duration = outputDuration(source.info, options);
+  const playbackRate = playbackRateFor(options);
+  const muted = options.mute === true;
+  // Mute wins over gain: a stale or hand-written gain cannot prevent the
+  // explicit request to remove the audio stream entirely.
+  const volumeGain = muted ? 1 : volumeGainFor(options);
+  if (!source.info?.hasAudio && volumeGain !== 1) {
+    throw new Error('Changing volume needs an audio track.');
+  }
+  const loop = loopForCommand(source.info, options);
+  const sourceDuration = loop?.duration ?? outputDuration(source.info, options);
+  const playbackTimeline = focusedPlaybackTimeline(source.info, playbackRate);
+  let duration = sourceDuration === null ? null : sourceDuration / playbackRate;
+  // A stream delayed relative to the other extends the shared timeline. The
+  // specialised speed tool does not trim or loop; keep those compound cases
+  // on their explicit requested duration instead of reintroducing old media.
+  if (!loop && !Number.isFinite(options.trimStart) && !Number.isFinite(options.trimEnd)) {
+    duration = playbackTimeline.duration ?? duration;
+  }
+  if (playbackRate < 1 && sourceDuration === null) {
+    throw new Error('Slower playback needs a source duration so the output can be bounded safely.');
+  }
+  if (playbackRate !== 1 && duration !== null && duration > VIDEO_LOOP_LIMITS.maxDuration) {
+    throw new Error('Playback speed must keep the result at or below 30 minutes.');
+  }
   const encoder = format.encoders[0];
   const filters = videoFilters(options, {
     height: resolutionHeight(options.resolution),
     fps: frameRate(options.fps),
     info: source.info,
+    playbackRate,
+    playbackOffset: playbackTimeline.video,
   });
+  const audioFilters = focusedAudioFilters(muted, playbackRate, volumeGain, playbackTimeline.audio);
+  const loopCount = loop?.loopMode === 'duration' ? -1 : (loop?.loopCount ?? 1) - 1;
 
   const args = [
     ...seekArguments(options, duration),
+    ...(loop ? ['-stream_loop', String(loopCount)] : []),
     '-i', names.input,
     '-c:v', encoder,
     ...videoQualityArguments(encoder, options),
     ...(filters.length ? ['-vf', filters.join(',')] : []),
-    ...(source.info?.hasAudio ? audioArguments(format.encoders[1] === 'libopus' ? 'opus' : format.encoders[1] === 'libvorbis' ? 'ogg' : 'm4a', options) : ['-an']),
+    ...(source.info?.hasAudio && !muted && audioFilters.length
+      ? ['-af', audioFilters.join(',')]
+      : []),
+    ...(source.info?.hasAudio
+      ? audioArguments(
+        format.encoders[1] === 'libopus' ? 'opus' : format.encoders[1] === 'libvorbis' ? 'ogg' : 'm4a',
+        { ...options, mute: muted },
+      )
+      : ['-an']),
     ...faststart(format),
+    ...(loop ? ['-t', formatTimestamp(duration)] : []),
     names.output,
   ];
 
@@ -693,9 +863,6 @@ function buildRaw(source, options, names) {
 /* ------------------------------------------------------------------ *
  * Multi-file builders
  * ------------------------------------------------------------------ */
-
-/** A stable decimal for filter arguments, without floating-point tails. */
-const filterNumber = (value) => String(Number(Number(value).toFixed(6)));
 
 const evenFloor = (value) => Math.max(2, Math.floor(Number(value) / 2) * 2);
 

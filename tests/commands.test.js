@@ -287,6 +287,135 @@ test('a join refuses incomplete projects before it reaches FFmpeg', () => {
 });
 
 /* ------------------------------------------------------------------ *
+ * Quick video effects
+ * ------------------------------------------------------------------ */
+
+test('volume gain filters audio while explicit mute removes the track', () => {
+  const gained = buildPlan(VIDEO, 'convert', { volumeGain: 1.5, evenDimensions: true });
+  const gainedArgs = body(gained);
+  assert.equal(valueAfter(gainedArgs, '-af'), 'volume=1.5');
+  assert.equal(valueAfter(gainedArgs, '-vf'), 'pad=ceil(iw/2)*2:ceil(ih/2)*2');
+  assert.equal(gained.duration, VIDEO.info.duration);
+
+  const mutedArgs = body(buildPlan(VIDEO, 'convert', {
+    volumeGain: 999,
+    mute: true,
+    evenDimensions: true,
+  }));
+  assert.ok(mutedArgs.includes('-an'));
+  assert.equal(mutedArgs.includes('-af'), false);
+  assert.throws(() => buildPlan(VIDEO, 'convert', { volumeGain: 2.01 }), /between 0% and 200%/);
+  assert.throws(() => buildPlan(SILENT, 'convert', { volumeGain: 1.5 }), /needs an audio track/);
+});
+
+test('speed changes picture and sound together, chaining atempo at both extremes', () => {
+  const slow = buildPlan(VIDEO, 'convert', { playbackRate: 0.25, evenDimensions: true });
+  const slowArgs = body(slow);
+  assert.equal(
+    valueAfter(slowArgs, '-vf'),
+    'setpts=(PTS-STARTPTS)/0.25,pad=ceil(iw/2)*2:ceil(ih/2)*2',
+  );
+  assert.equal(valueAfter(slowArgs, '-af'), 'atempo=0.5,atempo=0.5,asetpts=PTS-STARTPTS');
+  assert.equal(slow.duration, 480);
+
+  const fast = buildPlan(VIDEO, 'convert', { playbackRate: 4 });
+  const fastArgs = body(fast);
+  assert.equal(valueAfter(fastArgs, '-vf'), 'setpts=(PTS-STARTPTS)/4');
+  assert.equal(valueAfter(fastArgs, '-af'), 'atempo=2,atempo=2,asetpts=PTS-STARTPTS');
+  assert.equal(fast.duration, 30);
+
+  const silentArgs = body(buildPlan(SILENT, 'convert', { playbackRate: 1.5 }));
+  assert.equal(valueAfter(silentArgs, '-vf'), 'setpts=(PTS-STARTPTS)/1.5');
+  assert.equal(silentArgs.includes('-af'), false);
+  assert.ok(silentArgs.includes('-an'));
+  assert.throws(() => buildPlan(VIDEO, 'convert', { playbackRate: 0.249 }), /between 0.25x and 4x/);
+  assert.throws(() => buildPlan(VIDEO, 'convert', { playbackRate: 4.01 }), /between 0.25x and 4x/);
+});
+
+test('speed rebases a non-zero origin and preserves a relative A/V delay', () => {
+  const offset = source('broadcast.mov', {
+    ...VIDEO.info,
+    startTime: 5,
+    duration: 9.023,
+    video: { ...VIDEO.info.video, startTime: 5, duration: 3 },
+    audio: { ...VIDEO.info.audio, startTime: 6, duration: 3.023 },
+  });
+  const plan = buildPlan(offset, 'convert', { playbackRate: 2 });
+  const args = body(plan);
+
+  assert.equal(valueAfter(args, '-vf'), 'setpts=(PTS-STARTPTS)/2');
+  assert.equal(valueAfter(args, '-af'), 'atempo=2,asetpts=PTS-STARTPTS+0.5/TB');
+  assert.ok(args.indexOf('-af') < args.indexOf('-c:a'));
+  assert.equal(plan.duration, 2.0115);
+});
+
+test('speed refuses unbounded or overlong slow-motion plans before FFmpeg starts', () => {
+  const long = source('lecture.mp4', { hasVideo: true, hasAudio: false, duration: 600 });
+  assert.throws(
+    () => buildPlan(long, 'convert', { playbackRate: 0.25 }),
+    /at or below 30 minutes/,
+  );
+  assert.throws(
+    () => buildPlan(UNKNOWN, 'convert', { playbackRate: 0.5 }),
+    /needs a source duration/,
+  );
+  assert.doesNotThrow(() => buildPlan(UNKNOWN, 'convert', { playbackRate: 2 }));
+
+  const partial = source('partial-duration.mp4', {
+    hasVideo: true,
+    hasAudio: true,
+    duration: 1900,
+    startTime: 0,
+    video: { ...VIDEO.info.video, duration: 100, startTime: 0 },
+    audio: { ...VIDEO.info.audio, duration: null, startTime: 0 },
+  });
+  assert.throws(
+    () => buildPlan(partial, 'convert', { playbackRate: 0.25 }),
+    /at or below 30 minutes/,
+  );
+  const unboundedFast = buildPlan(source('partial-unknown.mp4', {
+    ...partial.info,
+    duration: null,
+  }), 'convert', { playbackRate: 2 });
+  assert.equal(unboundedFast.duration, null, 'one known stream must not bound another unknown stream');
+});
+
+test('loop repeats the input by total count or exact duration within hard limits', () => {
+  const counted = buildPlan(VIDEO, 'convert', {
+    loopMode: 'count',
+    loopCount: 3,
+    evenDimensions: true,
+  });
+  const countArgs = body(counted);
+  assert.equal(valueAfter(countArgs, '-stream_loop'), '2');
+  assert.ok(countArgs.indexOf('-stream_loop') < countArgs.indexOf('-i'));
+  assert.equal(valueAfter(countArgs, '-t'), '00:06:00.000');
+  assert.equal(counted.duration, 360);
+
+  const targeted = buildPlan(VIDEO, 'convert', {
+    loopMode: 'duration',
+    loopDuration: 275.5,
+  });
+  const targetArgs = body(targeted);
+  assert.equal(valueAfter(targetArgs, '-stream_loop'), '-1');
+  assert.equal(valueAfter(targetArgs, '-t'), '00:04:35.500');
+  assert.equal(targeted.duration, 275.5);
+
+  assert.throws(
+    () => buildPlan(VIDEO, 'convert', { loopMode: 'count', loopCount: 16 }),
+    /at or below 30 minutes/,
+  );
+  assert.throws(
+    () => buildPlan(VIDEO, 'convert', { loopMode: 'duration', loopDuration: 1801 }),
+    /at or below 30 minutes/,
+  );
+  assert.throws(
+    () => buildPlan(UNKNOWN, 'convert', { loopMode: 'count', loopCount: 2 }),
+    /at or below 30 minutes/,
+  );
+});
+
+/* ------------------------------------------------------------------ *
  * Trimming
  * ------------------------------------------------------------------ */
 

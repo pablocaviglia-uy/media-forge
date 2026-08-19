@@ -7,7 +7,7 @@
  * pure lets the shell, inspector and tests agree without involving the DOM.
  */
 
-import { formatDuration, formatTimestamp } from '../ui/dom.js';
+import { formatBytes, formatDuration, formatTimestamp } from '../ui/dom.js';
 import { RESOLUTIONS, VIDEO_FORMATS } from './formats.js';
 
 const VIDEO_TRIM = Object.freeze({
@@ -64,12 +64,44 @@ const VIDEO_CROP = Object.freeze({
   }),
 });
 
+const VIDEO_VOLUME = Object.freeze({
+  id: 'video-volume',
+  title: 'Cambiar volumen',
+  operation: 'convert',
+  accept: 'video/*',
+  focus: 'volume',
+  defaultOptions: Object.freeze({ volumeGain: 1.5, mute: false }),
+});
+
+const VIDEO_SPEED = Object.freeze({
+  id: 'video-speed',
+  title: 'Cambiar velocidad',
+  operation: 'convert',
+  accept: 'video/*',
+  focus: 'speed',
+  // `speed` already means the video encoder preset in commands.js. Keeping
+  // playback in its own field prevents a 2x choice from becoming `-preset 2`.
+  defaultOptions: Object.freeze({ playbackRate: 1.5 }),
+});
+
+const VIDEO_LOOP = Object.freeze({
+  id: 'video-loop',
+  title: 'Repetir video',
+  operation: 'convert',
+  accept: 'video/*',
+  focus: 'loop',
+  defaultOptions: Object.freeze({ loopMode: 'count', loopCount: 2, loopDuration: null }),
+});
+
 const FOCUSED_TOOLS = new Map([
   [VIDEO_TRIM.id, VIDEO_TRIM],
   [VIDEO_ROTATE.id, VIDEO_ROTATE],
   [VIDEO_FLIP.id, VIDEO_FLIP],
   [VIDEO_RESIZE.id, VIDEO_RESIZE],
   [VIDEO_CROP.id, VIDEO_CROP],
+  [VIDEO_VOLUME.id, VIDEO_VOLUME],
+  [VIDEO_SPEED.id, VIDEO_SPEED],
+  [VIDEO_LOOP.id, VIDEO_LOOP],
 ]);
 
 const ROTATIONS = new Set([90, 180, 270]);
@@ -92,6 +124,46 @@ export const CROP_ASPECT_PRESETS = Object.freeze([
 
 const CROP_ASPECTS_BY_ID = new Map(CROP_ASPECT_PRESETS.map((preset) => [preset.id, preset]));
 
+export const VOLUME_GAIN_LIMITS = Object.freeze({ min: 0, max: 2, default: 1.5 });
+export const PLAYBACK_RATE_LIMITS = Object.freeze({ min: 0.25, max: 4, default: 1.5 });
+export const VIDEO_LOOP_LIMITS = Object.freeze({
+  minCount: 2,
+  maxCount: 20,
+  maxDuration: 30 * 60,
+});
+
+/**
+ * A focused effect keeps both its source and its result in FFmpeg's MEMFS.
+ * Stay well below the WebAssembly heap wall and keep deliberately expanding
+ * operations bounded to a duration browsers can finish reliably.
+ */
+export const QUICK_EFFECT_PREFLIGHT_LIMITS = Object.freeze({
+  maxOutputDuration: VIDEO_LOOP_LIMITS.maxDuration,
+  maxMemfsBytes: 500 * 1024 * 1024,
+});
+
+export const VOLUME_GAIN_PRESETS = Object.freeze([
+  Object.freeze({ value: 0, label: '0%' }),
+  Object.freeze({ value: 0.5, label: '50%' }),
+  Object.freeze({ value: 1, label: '100%' }),
+  Object.freeze({ value: 1.5, label: '150%' }),
+  Object.freeze({ value: 2, label: '200%' }),
+]);
+
+export const PLAYBACK_RATE_PRESETS = Object.freeze([
+  Object.freeze({ value: 0.25, label: '0,25×' }),
+  Object.freeze({ value: 0.5, label: '0,5×' }),
+  Object.freeze({ value: 0.75, label: '0,75×' }),
+  Object.freeze({ value: 1, label: '1×' }),
+  Object.freeze({ value: 1.25, label: '1,25×' }),
+  Object.freeze({ value: 1.5, label: '1,5×' }),
+  Object.freeze({ value: 2, label: '2×' }),
+  Object.freeze({ value: 3, label: '3×' }),
+  Object.freeze({ value: 4, label: '4×' }),
+]);
+
+export const LOOP_COUNT_PRESETS = Object.freeze([2, 3, 4, 5, 10, 20]);
+
 /** Return a focused tool's execution contract, or null for the generic flow. */
 export function focusedQuickTool(toolId) {
   return FOCUSED_TOOLS.get(toolId) || null;
@@ -99,7 +171,11 @@ export function focusedQuickTool(toolId) {
 
 /** A focused video tool only becomes useful after probing a real video track. */
 export function supportsFocusedQuickTool(toolId, info) {
-  return Boolean(focusedQuickTool(toolId) && info?.hasVideo);
+  const tool = focusedQuickTool(toolId);
+  if (!tool || !info?.hasVideo) return false;
+  if (tool.focus === 'volume') return info.hasAudio === true;
+  if (tool.focus === 'loop') return playableMediaDuration(info) !== null;
+  return true;
 }
 
 function finiteOption(options, primary, alias) {
@@ -314,6 +390,147 @@ export function normalizeResolution(value, info = null) {
   return id;
 }
 
+const stableDecimal = (value) => Number(Number(value).toFixed(6));
+
+function numericChoice(value, fallback) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+/** A linear gain from silence (0%) to the deliberately conservative 200%. */
+export function normalizeVolumeGain(value) {
+  const gain = numericChoice(value, VOLUME_GAIN_LIMITS.default);
+  if (gain === null || gain < VOLUME_GAIN_LIMITS.min || gain > VOLUME_GAIN_LIMITS.max) return null;
+  return stableDecimal(gain);
+}
+
+/** Playback rate accepted by both setpts and FFmpeg's chained atempo filters. */
+export function normalizePlaybackRate(value) {
+  const rate = numericChoice(value, PLAYBACK_RATE_LIMITS.default);
+  if (rate === null || rate < PLAYBACK_RATE_LIMITS.min || rate > PLAYBACK_RATE_LIMITS.max) return null;
+  return stableDecimal(rate);
+}
+
+/**
+ * Playable seconds on the shared A/V timeline, preferring stream metadata over
+ * a container end clock.
+ *
+ * Some muxers report a +5s stream that plays for 3s as an 8s container. The
+ * stream duration remains 3s. When one selected stream deliberately starts
+ * later than the other, that relative delay is part of what plays and must be
+ * included in effect estimates, progress and safety limits.
+ */
+export function playableMediaDuration(info) {
+  const containerStart = Number.isFinite(info?.startTime) ? info.startTime : null;
+  const selectedStreams = [info?.video, info?.audio].filter(Boolean);
+  const containerDuration = Number.isFinite(info?.duration) && info.duration > 0
+    ? info.duration
+    : null;
+
+  // One known track cannot bound another selected track whose duration is
+  // missing. Fall back to the container conservatively; if that is missing as
+  // well, callers must treat the result as unknown instead of underestimating
+  // a slow-motion or repeat job.
+  if (selectedStreams.some((stream) => !Number.isFinite(stream.duration) || stream.duration <= 0)) {
+    return containerDuration;
+  }
+
+  const streams = selectedStreams
+    .map((stream) => ({
+      duration: stream.duration,
+      start: Number.isFinite(stream.startTime) ? stream.startTime : containerStart,
+    }));
+  if (streams.length) {
+    const starts = streams.map(({ start }) => start).filter((start) => start !== null);
+    const origin = starts.length ? Math.min(...starts) : null;
+    return Math.max(...streams.map(({ duration, start }) => (
+      duration + (origin !== null && start !== null ? Math.max(0, start - origin) : 0)
+    )));
+  }
+  return containerDuration;
+}
+
+function knownPositiveDuration(info) {
+  return playableMediaDuration(info);
+}
+
+/** Largest total play count that can still stay inside the 30-minute guard. */
+export function maxLoopCountFor(info) {
+  const duration = knownPositiveDuration(info);
+  if (duration === null) return null;
+  return Math.min(
+    VIDEO_LOOP_LIMITS.maxCount,
+    Math.floor((VIDEO_LOOP_LIMITS.maxDuration + 1e-9) / duration),
+  );
+}
+
+/**
+ * Pick a useful loop that is valid for this source.
+ *
+ * Two full plays are clearest when they fit. For a source between 15 and 30
+ * minutes, a duration target repeats only enough of the beginning to add 50%
+ * (or reach the guard), so the initial state remains runnable. At 30 minutes
+ * there is no honest repeat that can stay under the limit.
+ */
+export function defaultVideoLoopOptions(info) {
+  const duration = knownPositiveDuration(info);
+  if (duration === null || duration >= VIDEO_LOOP_LIMITS.maxDuration) return null;
+  if (maxLoopCountFor(info) >= VIDEO_LOOP_LIMITS.minCount) {
+    return { loopMode: 'count', loopCount: 2, loopDuration: null };
+  }
+
+  const target = stableDecimal(Math.min(VIDEO_LOOP_LIMITS.maxDuration, duration * 1.5));
+  return target > duration
+    ? { loopMode: 'duration', loopCount: null, loopDuration: target }
+    : null;
+}
+
+/**
+ * Validate total plays or a target output duration against the source.
+ * Values are rejected rather than silently clamped: the summary and the
+ * generated command must never claim a different repeat than the user chose.
+ */
+export function normalizeVideoLoopOptions(info, options = {}) {
+  const duration = knownPositiveDuration(info);
+  if (duration === null) return null;
+
+  const hasChoice = options.loopMode !== undefined
+    || options.loopCount !== undefined
+    || options.loopDuration !== undefined;
+  const fallback = defaultVideoLoopOptions(info);
+  if (!hasChoice) return fallback;
+
+  const mode = options.loopMode ?? 'count';
+  if (mode === 'count') {
+    const count = numericChoice(options.loopCount, VIDEO_LOOP.defaultOptions.loopCount);
+    if (!Number.isInteger(count)) return null;
+    if (count < VIDEO_LOOP_LIMITS.minCount || count > VIDEO_LOOP_LIMITS.maxCount) return null;
+    if (count > maxLoopCountFor(info)) return null;
+    return { loopMode: 'count', loopCount: count, loopDuration: null };
+  }
+
+  if (mode === 'duration') {
+    const target = numericChoice(options.loopDuration, null);
+    if (target === null || target <= duration || target > VIDEO_LOOP_LIMITS.maxDuration) return null;
+    const stableTarget = stableDecimal(target);
+    return stableTarget > duration
+      ? { loopMode: 'duration', loopCount: null, loopDuration: stableTarget }
+      : null;
+  }
+
+  return null;
+}
+
+/** Exact planned duration of a valid loop, or null when it cannot run. */
+export function loopOutputDuration(info, options = {}) {
+  const normalized = normalizeVideoLoopOptions(info, options);
+  if (!normalized) return null;
+  return normalized.loopMode === 'count'
+    ? knownPositiveDuration(info) * normalized.loopCount
+    : normalized.loopDuration;
+}
+
 /**
  * Return only the command options owned by one focused tool.
  *
@@ -355,9 +572,168 @@ export function normalizeFocusedQuickOptions(toolId, options = {}, info = null) 
       const crop = normalizeCropRect(info, options);
       return crop === null ? null : { ...crop, evenDimensions: true };
     }
+    case 'volume': {
+      if (info !== null && info?.hasAudio !== true) return null;
+      // Removing the track is different from encoding a silent track, and an
+      // explicit mute always wins even if a stale gain value is malformed.
+      if (options.mute === true) {
+        return {
+          volumeGain: normalizeVolumeGain(options.volumeGain) ?? VOLUME_GAIN_LIMITS.default,
+          mute: true,
+          evenDimensions: true,
+        };
+      }
+      const volumeGain = normalizeVolumeGain(options.volumeGain);
+      if (volumeGain === null || volumeGain === 1) return null;
+      return { volumeGain, mute: false, evenDimensions: true };
+    }
+    case 'speed': {
+      const playbackRate = normalizePlaybackRate(options.playbackRate);
+      return playbackRate === null || playbackRate === 1
+        ? null
+        : { playbackRate, evenDimensions: true };
+    }
+    case 'loop': {
+      const loop = normalizeVideoLoopOptions(info, options);
+      return loop ? { ...loop, evenDimensions: true } : null;
+    }
     default:
       return null;
   }
+}
+
+/**
+ * Estimate a focused result without duplicating transformation math in UI.
+ * Geometry and volume preserve time; trim, speed and loop own it explicitly.
+ */
+export function focusedQuickOutputDuration(toolId, options = {}, info = null) {
+  const tool = focusedQuickTool(toolId);
+  const sourceDuration = knownPositiveDuration(info);
+  if (!tool || sourceDuration === null) return null;
+
+  if (tool.focus === 'trim') return trimRange(info, options).duration;
+  if (tool.focus === 'speed') {
+    const rate = normalizePlaybackRate(options.playbackRate);
+    return rate === null || rate === 1 ? null : sourceDuration / rate;
+  }
+  if (tool.focus === 'loop') return loopOutputDuration(info, options);
+  return normalizeFocusedQuickOptions(toolId, options, info) ? sourceDuration : null;
+}
+
+/**
+ * Duration expansion preflight for queue warnings and memory policy.
+ *
+ * The helper deliberately reports facts rather than choosing a warning
+ * threshold: a 4x duration increase can be harmless for a two-second clip and
+ * expensive for a long one. Callers get both absolute seconds and the ratio.
+ */
+export function focusedQuickExpansion(toolId, options = {}, info = null) {
+  const sourceDuration = knownPositiveDuration(info);
+  const outputDuration = focusedQuickOutputDuration(toolId, options, info);
+  if (sourceDuration === null || outputDuration === null) return null;
+
+  return {
+    sourceDuration,
+    outputDuration,
+    durationDelta: stableDecimal(outputDuration - sourceDuration),
+    factor: stableDecimal(outputDuration / sourceDuration),
+    expands: outputDuration > sourceDuration,
+  };
+}
+
+/**
+ * Refuse focused effects that cannot fit their projected source + result in
+ * FFmpeg's in-memory filesystem.
+ *
+ * This is intentionally conservative: re-encoding can make a short result
+ * larger than the source, so the output estimate never drops below 1x the
+ * input size even for faster playback. The estimate is not a promised output
+ * size; it is a preflight budget used to avoid a dead worker or tab.
+ */
+export function focusedQuickPreflight(toolId, options = {}, info = null, inputBytes = null) {
+  const tool = focusedQuickTool(toolId);
+  const normalized = normalizeFocusedQuickOptions(toolId, options, info);
+  const supportedFocus = tool && ['volume', 'speed', 'loop'].includes(tool.focus);
+  const sourceDuration = knownPositiveDuration(info);
+  const base = {
+    sourceDuration,
+    outputDuration: null,
+    factor: null,
+    inputBytes: Number.isFinite(inputBytes) && inputBytes >= 0 ? inputBytes : null,
+    estimatedOutputBytes: null,
+    estimatedMemfsBytes: null,
+    limits: QUICK_EFFECT_PREFLIGHT_LIMITS,
+  };
+
+  if (!supportedFocus || !normalized) {
+    return {
+      ok: false,
+      code: 'invalid-effect',
+      message: 'Elegí un efecto válido antes de crear el resultado.',
+      ...base,
+    };
+  }
+
+  let factor = 1;
+  if (tool.focus === 'speed') factor = stableDecimal(1 / normalized.playbackRate);
+  if (tool.focus === 'loop') {
+    const loopDuration = loopOutputDuration(info, normalized);
+    factor = sourceDuration === null || loopDuration === null
+      ? null
+      : stableDecimal(loopDuration / sourceDuration);
+  }
+  const outputDuration = focusedQuickOutputDuration(toolId, normalized, info);
+  const facts = { ...base, outputDuration, factor };
+
+  if (tool.focus === 'speed' && factor > 1 && sourceDuration === null) {
+    return {
+      ok: false,
+      code: 'unknown-duration',
+      message: 'No pudimos calcular la duración final. Probá con un video cuya duración pueda leerse.',
+      ...facts,
+    };
+  }
+
+  if (
+    (tool.focus === 'speed' || tool.focus === 'loop')
+    && outputDuration !== null
+    && outputDuration > QUICK_EFFECT_PREFLIGHT_LIMITS.maxOutputDuration
+  ) {
+    return {
+      ok: false,
+      code: 'duration-limit',
+      message: `La salida duraría ${formatDuration(outputDuration)}. El máximo seguro es ${formatDuration(QUICK_EFFECT_PREFLIGHT_LIMITS.maxOutputDuration)}.`,
+      ...facts,
+    };
+  }
+
+  if (!Number.isFinite(inputBytes) || inputBytes < 0) {
+    return {
+      ok: false,
+      code: 'invalid-input-size',
+      message: 'No pudimos calcular el espacio necesario para procesar este video.',
+      ...facts,
+    };
+  }
+
+  const estimatedOutputBytes = Math.ceil(inputBytes * Math.max(1, factor));
+  const estimatedMemfsBytes = inputBytes + estimatedOutputBytes;
+  const estimates = { ...facts, estimatedOutputBytes, estimatedMemfsBytes };
+  if (estimatedMemfsBytes > QUICK_EFFECT_PREFLIGHT_LIMITS.maxMemfsBytes) {
+    return {
+      ok: false,
+      code: 'memory-limit',
+      message: `La conversión necesitaría cerca de ${formatBytes(estimatedMemfsBytes)} entre el original y la salida. El límite seguro es ${formatBytes(QUICK_EFFECT_PREFLIGHT_LIMITS.maxMemfsBytes)}.`,
+      ...estimates,
+    };
+  }
+
+  return {
+    ok: true,
+    code: 'ok',
+    message: null,
+    ...estimates,
+  };
 }
 
 /** Concise Spanish copy for the transformation summary beside the action. */
@@ -382,6 +758,20 @@ export function describeFocusedQuickTransformation(toolId, options = {}, info = 
       return `Salida de hasta ${normalized.resolution}p`;
     case 'crop':
       return `Encuadre: ${normalized.cropWidth} × ${normalized.cropHeight} px · x ${normalized.cropX}, y ${normalized.cropY}`;
+    case 'volume':
+      return normalized.mute ? 'Audio eliminado' : `Volumen: ${Math.round(normalized.volumeGain * 100)}%`;
+    case 'speed': {
+      const rate = String(normalized.playbackRate).replace('.', ',');
+      const duration = focusedQuickOutputDuration(toolId, normalized, info);
+      return `Velocidad: ${rate}×${duration === null ? '' : ` · salida ${formatDuration(duration)}`}`;
+    }
+    case 'loop': {
+      const duration = loopOutputDuration(info, normalized);
+      const choice = normalized.loopMode === 'count'
+        ? `${normalized.loopCount} reproducciones`
+        : `hasta ${formatDuration(normalized.loopDuration)}`;
+      return `Repetición: ${choice}${duration === null ? '' : ` · salida ${formatDuration(duration)}`}`;
+    }
     default:
       return null;
   }

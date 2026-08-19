@@ -16,7 +16,7 @@ Your files are never uploaded, because there is nowhere to upload them to.
 - Video to MP4, WebM, MKV, MOV or an animated GIF
 - Audio to MP3, M4A, Opus, OGG, WAV or FLAC
 - Resolution, frame rate and quality, with the source never enlarged
-- Trim to a time range, crop the frame, rotate, flip, resize, or drop the sound
+- Trim, crop, rotate, flip, resize, adjust volume, change playback speed, or repeat a video
 - Join an ordered sequence of videos, even when their sizes, frame rates or audio tracks differ
 - Extract the audio from a video, or the video's frames as images
 - Compress to a target file size, in two passes
@@ -148,6 +148,7 @@ src/
     commands.js       {source, operation, options} -> exact ffmpeg arguments
     merge.js          Ordered multi-file project state and immutable snapshots
     probe.js          ffprobe JSON, the log as a fallback, and progress
+    quick-tools.js    Focused-tool contracts, safe limits and UI summaries
     zip.js            A store-only ZIP writer, for "download all"
 
   worker/
@@ -204,6 +205,9 @@ Worth knowing before you file an issue:
 - **Joining has a lower aggregate limit.** Every source and the completed output
   coexist in FFmpeg's in-memory filesystem, so one merge project is capped at
   350 MB across all of its clips and at 24 clips.
+- **Repeating is capped at 30 minutes.** A loop expands both decode work and the
+  final file, so the focused tool refuses any count or target duration beyond
+  that boundary.
 - **WebM output is VP8, not VP9.** `libvpx-vp9` is compiled into the core and
   listed by `-encoders`, but on a freshly instantiated core it traps with
   "memory access out of bounds" before the first frame. It is not simply

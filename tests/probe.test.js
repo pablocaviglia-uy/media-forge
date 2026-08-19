@@ -16,6 +16,7 @@ import assert from 'node:assert/strict';
 import {
   parseClock,
   parseProbe,
+  parseProbeJson,
   parseProgress,
   progressFraction,
   estimateRemaining,
@@ -147,6 +148,7 @@ test('an MP4 with video and audio is read completely', () => {
   assert.equal(info.video.pixelFormat, 'yuv420p');
   assert.equal(info.video.fps, 30);
   assert.equal(info.video.bitrate, 788_000);
+  assert.equal(info.video.startTime, null, 'the fallback must not invent a per-stream origin');
 
   assert.equal(info.hasAudio, true);
   assert.equal(info.audio.codec, 'aac');
@@ -156,6 +158,44 @@ test('an MP4 with video and audio is read completely', () => {
   assert.equal(info.audio.channelLayout, 'mono');
   assert.equal(info.audio.sampleFormat, 'fltp');
   assert.equal(info.audio.bitrate, 123_000);
+  assert.equal(info.audio.startTime, null, 'the fallback must not reuse the container start per stream');
+});
+
+test('ffprobe JSON preserves each stream start on a shared container timeline', () => {
+  const info = parseProbeJson(JSON.stringify({
+    format: {
+      format_name: 'mov,mp4,m4a,3gp,3g2,mj2',
+      duration: '9.023000',
+      start_time: '5.000000',
+    },
+    streams: [
+      {
+        index: 0,
+        codec_type: 'video',
+        codec_name: 'h264',
+        width: 320,
+        height: 240,
+        duration: '3.000000',
+        start_time: '5.000000',
+        avg_frame_rate: '30/1',
+      },
+      {
+        index: 1,
+        codec_type: 'audio',
+        codec_name: 'aac',
+        duration: '3.023000',
+        start_time: '6.000000',
+        sample_rate: '48000',
+        channels: 2,
+      },
+    ],
+  }));
+
+  assert.equal(info.startTime, 5);
+  assert.equal(info.video.startTime, 5);
+  assert.equal(info.audio.startTime, 6);
+  assert.equal(info.streams[0].startTime, 5);
+  assert.equal(info.streams[1].startTime, 6);
 });
 
 test('Matroska prints SAR without brackets and it still parses', () => {

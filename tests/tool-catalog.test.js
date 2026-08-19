@@ -14,10 +14,13 @@ const EXPECTED_AVAILABLE = [
   'video-converter',
   'video-crop',
   'video-flip',
+  'video-loop',
   'video-merge',
   'video-resize',
   'video-rotate',
+  'video-speed',
   'video-trim',
+  'video-volume',
 ];
 
 test('the canonical catalogue contains exactly 55 unique tools', () => {
@@ -78,7 +81,7 @@ test('only honest entry points backed by the current local engine are available'
     .sort();
 
   assert.deepEqual(available, EXPECTED_AVAILABLE);
-  assert.equal(TOOL_CATALOG.filter((tool) => tool.availability === 'planned').length, 46);
+  assert.equal(TOOL_CATALOG.filter((tool) => tool.availability === 'planned').length, 43);
 });
 
 test('lookup and listing helpers return canonical entries', () => {

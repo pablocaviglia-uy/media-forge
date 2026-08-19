@@ -28,6 +28,9 @@ const AVAILABLE_ENTRY_POINTS = new Set([
   'video-rotate',
   'video-flip',
   'video-resize',
+  'video-loop',
+  'video-volume',
+  'video-speed',
 ]);
 
 function defineTool(

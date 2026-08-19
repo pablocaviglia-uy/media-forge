@@ -3,18 +3,35 @@ import assert from 'node:assert/strict';
 
 import {
   CROP_ASPECT_PRESETS,
+  LOOP_COUNT_PRESETS,
+  PLAYBACK_RATE_LIMITS,
+  PLAYBACK_RATE_PRESETS,
+  QUICK_EFFECT_PREFLIGHT_LIMITS,
+  VIDEO_LOOP_LIMITS,
+  VOLUME_GAIN_LIMITS,
+  VOLUME_GAIN_PRESETS,
   cropRectForAspect,
+  defaultVideoLoopOptions,
   defaultResizeResolution,
   describeFocusedQuickTransformation,
   describeTrimRange,
+  focusedQuickExpansion,
+  focusedQuickOutputDuration,
+  focusedQuickPreflight,
   focusedQuickTool,
   fullCropRect,
+  loopOutputDuration,
+  maxLoopCountFor,
   normalizeCropAspect,
   normalizeCropRect,
   normalizeFlip,
   normalizeFocusedQuickOptions,
+  normalizePlaybackRate,
   normalizeResolution,
   normalizeRotation,
+  normalizeVideoLoopOptions,
+  normalizeVolumeGain,
+  playableMediaDuration,
   supportsFocusedQuickTool,
   trimRange,
   trimOptionsForRun,
@@ -69,17 +86,325 @@ test('focused video tools expose their Spanish execution contracts', () => {
       cropHeight: null,
     },
   });
+  assert.deepEqual(focusedQuickTool('video-volume'), {
+    id: 'video-volume',
+    title: 'Cambiar volumen',
+    operation: 'convert',
+    accept: 'video/*',
+    focus: 'volume',
+    defaultOptions: { volumeGain: 1.5, mute: false },
+  });
+  assert.deepEqual(focusedQuickTool('video-speed'), {
+    id: 'video-speed',
+    title: 'Cambiar velocidad',
+    operation: 'convert',
+    accept: 'video/*',
+    focus: 'speed',
+    defaultOptions: { playbackRate: 1.5 },
+  });
+  assert.deepEqual(focusedQuickTool('video-loop'), {
+    id: 'video-loop',
+    title: 'Repetir video',
+    operation: 'convert',
+    accept: 'video/*',
+    focus: 'loop',
+    defaultOptions: { loopMode: 'count', loopCount: 2, loopDuration: null },
+  });
   assert.equal(focusedQuickTool('audio-trim'), null);
   assert.equal(focusedQuickTool('missing-tool'), null);
 });
 
 test('every focused tool requires a probed video track', () => {
-  for (const toolId of ['video-trim', 'video-rotate', 'video-flip', 'video-resize', 'video-crop']) {
+  for (const toolId of ['video-trim', 'video-rotate', 'video-flip', 'video-resize', 'video-crop', 'video-speed']) {
     assert.equal(supportsFocusedQuickTool(toolId, { hasVideo: true }), true);
     assert.equal(supportsFocusedQuickTool(toolId, { hasVideo: false }), false);
     assert.equal(supportsFocusedQuickTool(toolId, null), false);
   }
+  assert.equal(supportsFocusedQuickTool('video-volume', { hasVideo: true, hasAudio: true }), true);
+  assert.equal(supportsFocusedQuickTool('video-volume', { hasVideo: true, hasAudio: false }), false);
+  assert.equal(supportsFocusedQuickTool('video-loop', { hasVideo: true, duration: 4 }), true);
+  assert.equal(supportsFocusedQuickTool('video-loop', {
+    hasVideo: true,
+    duration: null,
+    video: { duration: 4 },
+  }), true, 'a measured stream duration is sufficient even when the container clock is missing');
+  assert.equal(supportsFocusedQuickTool('video-loop', { hasVideo: true, duration: null }), false);
+  assert.equal(supportsFocusedQuickTool('video-loop', { hasVideo: true, duration: 0 }), false);
   assert.equal(supportsFocusedQuickTool('audio-trim', { hasVideo: true }), false);
+});
+
+test('effect presets expose the same bounded choices their normalizers accept', () => {
+  assert.deepEqual(VOLUME_GAIN_LIMITS, { min: 0, max: 2, default: 1.5 });
+  assert.deepEqual(VOLUME_GAIN_PRESETS.map(({ value }) => value), [0, 0.5, 1, 1.5, 2]);
+  assert.deepEqual(PLAYBACK_RATE_LIMITS, { min: 0.25, max: 4, default: 1.5 });
+  assert.deepEqual(
+    PLAYBACK_RATE_PRESETS.map(({ value }) => value),
+    [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4],
+  );
+  assert.deepEqual(VIDEO_LOOP_LIMITS, { minCount: 2, maxCount: 20, maxDuration: 1800 });
+  assert.deepEqual(LOOP_COUNT_PRESETS, [2, 3, 4, 5, 10, 20]);
+});
+
+test('volume is strict, keeps explicit mute, and never invites gain beyond 200%', () => {
+  assert.equal(normalizeVolumeGain(undefined), 1.5);
+  assert.equal(normalizeVolumeGain('0.75'), 0.75);
+  assert.equal(normalizeVolumeGain(0), 0);
+  assert.equal(normalizeVolumeGain(2), 2);
+  assert.equal(normalizeVolumeGain(-0.01), null);
+  assert.equal(normalizeVolumeGain(2.01), null);
+  assert.equal(normalizeVolumeGain(2.0000001), null);
+  assert.equal(normalizeVolumeGain('loud'), null);
+
+  const audioVideo = { hasVideo: true, hasAudio: true, duration: 10 };
+  assert.deepEqual(normalizeFocusedQuickOptions('video-volume', {}, audioVideo), {
+    volumeGain: 1.5,
+    mute: false,
+    evenDimensions: true,
+  });
+  assert.deepEqual(normalizeFocusedQuickOptions('video-volume', {
+    volumeGain: 99,
+    mute: true,
+  }, audioVideo), {
+    volumeGain: 1.5,
+    mute: true,
+    evenDimensions: true,
+  });
+  assert.deepEqual(normalizeFocusedQuickOptions('video-volume', {
+    volumeGain: 0,
+    mute: false,
+  }, audioVideo), {
+    volumeGain: 0,
+    mute: false,
+    evenDimensions: true,
+  });
+  assert.equal(normalizeFocusedQuickOptions('video-volume', { volumeGain: 1 }, audioVideo), null);
+  assert.equal(normalizeFocusedQuickOptions('video-volume', {}, { hasVideo: true, hasAudio: false }), null);
+});
+
+test('playback speed spans 0.25x through 4x and treats 1x as a no-op', () => {
+  assert.equal(normalizePlaybackRate(undefined), 1.5);
+  assert.equal(normalizePlaybackRate('0.25'), 0.25);
+  assert.equal(normalizePlaybackRate(4), 4);
+  assert.equal(normalizePlaybackRate(0.249), null);
+  assert.equal(normalizePlaybackRate(0.2499999), null);
+  assert.equal(normalizePlaybackRate(4.001), null);
+  assert.equal(normalizePlaybackRate(Infinity), null);
+  assert.deepEqual(normalizeFocusedQuickOptions('video-speed', {}, { duration: 120 }), {
+    playbackRate: 1.5,
+    evenDimensions: true,
+  });
+  assert.equal(normalizeFocusedQuickOptions('video-speed', { playbackRate: 1 }, { duration: 120 }), null);
+  assert.equal(focusedQuickOutputDuration('video-speed', { playbackRate: 1.5 }, { duration: 120 }), 80);
+  assert.equal(focusedQuickOutputDuration('video-speed', { playbackRate: 0.25 }, { duration: 120 }), 480);
+});
+
+test('effect expansion preflight reports absolute and relative duration costs', () => {
+  assert.deepEqual(focusedQuickExpansion('video-speed', { playbackRate: 0.25 }, { duration: 120 }), {
+    sourceDuration: 120,
+    outputDuration: 480,
+    durationDelta: 360,
+    factor: 4,
+    expands: true,
+  });
+  assert.deepEqual(focusedQuickExpansion('video-loop', {
+    loopMode: 'count', loopCount: 3,
+  }, { duration: 90 }), {
+    sourceDuration: 90,
+    outputDuration: 270,
+    durationDelta: 180,
+    factor: 3,
+    expands: true,
+  });
+  assert.deepEqual(focusedQuickExpansion('video-volume', { volumeGain: 1.5 }, {
+    hasAudio: true, duration: 10,
+  }), {
+    sourceDuration: 10,
+    outputDuration: 10,
+    durationDelta: 0,
+    factor: 1,
+    expands: false,
+  });
+  assert.equal(focusedQuickExpansion('video-speed', { playbackRate: 1 }, { duration: 10 }), null);
+  assert.equal(focusedQuickExpansion('video-loop', {}, { duration: null }), null);
+});
+
+test('focused effect preflight shares a conservative 500 MiB MEMFS budget', () => {
+  const MiB = 1024 * 1024;
+  assert.deepEqual(QUICK_EFFECT_PREFLIGHT_LIMITS, {
+    maxOutputDuration: 1800,
+    maxMemfsBytes: 500 * MiB,
+  });
+
+  assert.deepEqual(
+    focusedQuickPreflight(
+      'video-volume',
+      { volumeGain: 1.5 },
+      { hasVideo: true, hasAudio: true, duration: 120 },
+      250 * MiB,
+    ),
+    {
+      ok: true,
+      code: 'ok',
+      message: null,
+      sourceDuration: 120,
+      outputDuration: 120,
+      factor: 1,
+      inputBytes: 250 * MiB,
+      estimatedOutputBytes: 250 * MiB,
+      estimatedMemfsBytes: 500 * MiB,
+      limits: QUICK_EFFECT_PREFLIGHT_LIMITS,
+    },
+  );
+
+  const tooLarge = focusedQuickPreflight(
+    'video-loop',
+    { loopMode: 'count', loopCount: 3 },
+    { hasVideo: true, duration: 10 },
+    126 * MiB,
+  );
+  assert.equal(tooLarge.ok, false);
+  assert.equal(tooLarge.code, 'memory-limit');
+  assert.equal(tooLarge.factor, 3);
+  assert.equal(tooLarge.estimatedOutputBytes, 378 * MiB);
+  assert.equal(tooLarge.estimatedMemfsBytes, 504 * MiB);
+  assert.match(tooLarge.message, /504 MB/);
+  assert.match(tooLarge.message, /500 MB/);
+});
+
+test('focused effect preflight blocks overlong expansion and unknown slow output', () => {
+  const MiB = 1024 * 1024;
+  const overlong = focusedQuickPreflight(
+    'video-speed',
+    { playbackRate: 0.25 },
+    { hasVideo: true, duration: 600 },
+    MiB,
+  );
+  assert.equal(overlong.ok, false);
+  assert.equal(overlong.code, 'duration-limit');
+  assert.equal(overlong.outputDuration, 2400);
+  assert.match(overlong.message, /40:00/);
+  assert.match(overlong.message, /30:00/);
+
+  const unknown = focusedQuickPreflight(
+    'video-speed',
+    { playbackRate: 0.5 },
+    { hasVideo: true, duration: null },
+    MiB,
+  );
+  assert.equal(unknown.ok, false);
+  assert.equal(unknown.code, 'unknown-duration');
+  assert.equal(unknown.factor, 2);
+  assert.match(unknown.message, /duración final/);
+});
+
+test('faster playback still reserves at least one input-sized result', () => {
+  const MiB = 1024 * 1024;
+  const safe = focusedQuickPreflight(
+    'video-speed',
+    { playbackRate: 4 },
+    { hasVideo: true, duration: 120 },
+    250 * MiB,
+  );
+  assert.equal(safe.ok, true);
+  assert.equal(safe.factor, 0.25);
+  assert.equal(safe.outputDuration, 30);
+  assert.equal(safe.estimatedOutputBytes, 250 * MiB);
+  assert.equal(safe.estimatedMemfsBytes, 500 * MiB);
+
+  const invalidSize = focusedQuickPreflight(
+    'video-volume',
+    { mute: true },
+    { hasVideo: true, hasAudio: true, duration: 10 },
+  );
+  assert.equal(invalidSize.ok, false);
+  assert.equal(invalidSize.code, 'invalid-input-size');
+  assert.match(invalidSize.message, /espacio necesario/);
+
+  const invalidEffect = focusedQuickPreflight(
+    'video-speed',
+    { playbackRate: 1 },
+    { hasVideo: true, duration: 10 },
+    MiB,
+  );
+  assert.equal(invalidEffect.ok, false);
+  assert.equal(invalidEffect.code, 'invalid-effect');
+});
+
+test('effect duration prefers playable stream length over an offset container clock', () => {
+  const offset = {
+    duration: 8.023,
+    startTime: 5,
+    video: { duration: 3 },
+    audio: { duration: 3.023 },
+  };
+  assert.equal(playableMediaDuration(offset), 3.023);
+  assert.equal(focusedQuickOutputDuration('video-speed', { playbackRate: 2 }, offset), 1.5115);
+  assert.deepEqual(defaultVideoLoopOptions(offset), {
+    loopMode: 'count', loopCount: 2, loopDuration: null,
+  });
+  assert.equal(focusedQuickOutputDuration('video-loop', {
+    loopMode: 'count', loopCount: 2,
+  }, offset), 6.046);
+  const delayedAudio = {
+    ...offset,
+    video: { ...offset.video, startTime: 5 },
+    audio: { ...offset.audio, startTime: 6 },
+  };
+  assert.equal(playableMediaDuration(delayedAudio), 4.023);
+  assert.equal(focusedQuickOutputDuration('video-speed', { playbackRate: 2 }, delayedAudio), 2.0115);
+  const partial = {
+    duration: 1900,
+    startTime: 0,
+    hasVideo: true,
+    hasAudio: true,
+    video: { duration: 100, startTime: 0 },
+    audio: { duration: null, startTime: 0 },
+  };
+  assert.equal(playableMediaDuration(partial), 1900, 'an unknown selected track falls back to the container');
+  assert.equal(playableMediaDuration({ ...partial, duration: null }), null);
+  assert.equal(
+    focusedQuickPreflight('video-speed', { playbackRate: 0.25 }, partial, 1024 * 1024).code,
+    'duration-limit',
+  );
+  assert.equal(normalizeVideoLoopOptions(partial, { loopMode: 'count', loopCount: 2 }), null);
+  assert.equal(playableMediaDuration({ duration: 8, video: { duration: null } }), 8);
+  assert.equal(playableMediaDuration({ duration: null }), null);
+});
+
+test('loop defaults stay runnable and every result is capped at 30 minutes', () => {
+  assert.deepEqual(defaultVideoLoopOptions({ duration: 120 }), {
+    loopMode: 'count', loopCount: 2, loopDuration: null,
+  });
+  assert.deepEqual(defaultVideoLoopOptions({ duration: 1200 }), {
+    loopMode: 'duration', loopCount: null, loopDuration: 1800,
+  });
+  assert.equal(defaultVideoLoopOptions({ duration: 1800 }), null);
+  assert.equal(defaultVideoLoopOptions({ duration: null }), null);
+  assert.equal(maxLoopCountFor({ duration: 90 }), 20);
+  assert.equal(maxLoopCountFor({ duration: 600 }), 3);
+  assert.equal(maxLoopCountFor({ duration: 901 }), 1);
+
+  assert.deepEqual(normalizeVideoLoopOptions({ duration: 90 }, {}), {
+    loopMode: 'count', loopCount: 2, loopDuration: null,
+  });
+  assert.deepEqual(normalizeVideoLoopOptions({ duration: 90 }, {
+    loopMode: 'count', loopCount: '20',
+  }), {
+    loopMode: 'count', loopCount: 20, loopDuration: null,
+  });
+  assert.equal(normalizeVideoLoopOptions({ duration: 91 }, { loopMode: 'count', loopCount: 20 }), null);
+  assert.equal(normalizeVideoLoopOptions({ duration: 10 }, { loopMode: 'count', loopCount: 2.5 }), null);
+  assert.equal(normalizeVideoLoopOptions({ duration: 10 }, { loopMode: 'count', loopCount: 21 }), null);
+  assert.deepEqual(normalizeVideoLoopOptions({ duration: 1200 }, {
+    loopMode: 'duration', loopDuration: '1500',
+  }), {
+    loopMode: 'duration', loopCount: null, loopDuration: 1500,
+  });
+  assert.equal(normalizeVideoLoopOptions({ duration: 1200 }, { loopMode: 'duration', loopDuration: 1200 }), null);
+  assert.equal(normalizeVideoLoopOptions({ duration: 1200 }, { loopMode: 'duration', loopDuration: 1801 }), null);
+  assert.equal(loopOutputDuration({ duration: 90 }, { loopMode: 'count', loopCount: 3 }), 270);
+  assert.equal(loopOutputDuration({ duration: 90 }, { loopMode: 'duration', loopDuration: 200 }), 200);
+  assert.equal(focusedQuickOutputDuration('video-loop', {}, { duration: 120 }), 240);
 });
 
 test('focused transform values are reduced to options the engine understands', () => {
@@ -360,6 +685,34 @@ test('focused transformations have concise Spanish summaries', () => {
       video: { width: 1920, height: 1080 },
     }),
     null,
+  );
+  assert.equal(
+    describeFocusedQuickTransformation('video-volume', { volumeGain: 1.5 }, {
+      hasVideo: true, hasAudio: true, duration: 120,
+    }),
+    'Volumen: 150%',
+  );
+  assert.equal(
+    describeFocusedQuickTransformation('video-volume', { mute: true, volumeGain: 1.5 }, {
+      hasVideo: true, hasAudio: true, duration: 120,
+    }),
+    'Audio eliminado',
+  );
+  assert.equal(
+    describeFocusedQuickTransformation('video-speed', { playbackRate: 1.5 }, { duration: 120 }),
+    'Velocidad: 1,5× · salida 1:20',
+  );
+  assert.equal(
+    describeFocusedQuickTransformation('video-loop', {
+      loopMode: 'count', loopCount: 2,
+    }, { duration: 120 }),
+    'Repetición: 2 reproducciones · salida 4:00',
+  );
+  assert.equal(
+    describeFocusedQuickTransformation('video-loop', {
+      loopMode: 'duration', loopDuration: 300,
+    }, { duration: 120 }),
+    'Repetición: hasta 5:00 · salida 5:00',
   );
   assert.equal(describeFocusedQuickTransformation('missing-tool', {}), null);
 });

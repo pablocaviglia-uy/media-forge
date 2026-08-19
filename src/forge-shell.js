@@ -74,6 +74,27 @@ if (document.documentElement.dataset.interface === 'forge') {
       options: { cropAspect: 'free' },
       single: true,
     },
+    'video-volume': {
+      operation: 'convert',
+      accept: 'video/*',
+      format: 'mp4-h264',
+      options: { volumeGain: 1.5, mute: false },
+      single: true,
+    },
+    'video-speed': {
+      operation: 'convert',
+      accept: 'video/*',
+      format: 'mp4-h264',
+      options: { playbackRate: 1.5 },
+      single: true,
+    },
+    'video-loop': {
+      operation: 'convert',
+      accept: 'video/*',
+      format: 'mp4-h264',
+      options: { loopMode: 'count', loopCount: 3, loopDuration: null },
+      single: true,
+    },
   };
 
   const state = {

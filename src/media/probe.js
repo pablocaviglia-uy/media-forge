@@ -288,6 +288,10 @@ export function parseProbe(log) {
       language: stream[3] && stream[3] !== 'und' ? stream[3] : null,
       kind,
       default: /\(default\)/.test(stream[5]),
+      // The human-readable fallback does not reliably print a start time for
+      // every stream. Keep the field explicit so callers can distinguish
+      // "unknown" from a genuine zero without guessing from the container.
+      startTime: null,
     };
 
     let parsed;
@@ -383,6 +387,10 @@ export function parseProbeJson(json) {
       default: raw.disposition?.default === 1,
       bitrate: num(raw.bit_rate),
       duration: num(raw.duration),
+      // Per-stream origins are needed to preserve an intentional A/V delay
+      // when filters rebase PTS. The container start alone cannot describe a
+      // video beginning at 5s and its audio beginning at 6s.
+      startTime: num(raw.start_time),
     };
 
     if (kind === 'video') {

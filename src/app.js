@@ -40,13 +40,25 @@ import {
 import { createZip } from './media/zip.js';
 import {
   CROP_ASPECT_PRESETS,
+  LOOP_COUNT_PRESETS,
+  PLAYBACK_RATE_PRESETS,
+  VIDEO_LOOP_LIMITS,
+  VOLUME_GAIN_LIMITS,
+  VOLUME_GAIN_PRESETS,
   cropRectForAspect,
   defaultResizeResolution,
+  defaultVideoLoopOptions,
   describeFocusedQuickTransformation,
   describeTrimRange,
+  focusedQuickOutputDuration,
+  focusedQuickPreflight,
   focusedQuickTool,
   fullCropRect,
+  maxLoopCountFor,
+  normalizePlaybackRate,
   normalizeFocusedQuickOptions,
+  normalizeVolumeGain,
+  playableMediaDuration,
   quickVideoFormat,
   supportsFocusedQuickTool,
   trimRange,
@@ -480,6 +492,38 @@ export class App {
     return this.chain;
   }
 
+  quickToolSupportMessage(tool, info) {
+    if (tool?.focus === 'volume' && info?.hasVideo && !info?.hasAudio) {
+      return 'Este video no tiene una pista de audio para ajustar. Abrimos el conversor general.';
+    }
+    if (tool?.focus === 'loop' && info?.hasVideo) {
+      return 'No pudimos medir una duración segura para repetir este video. Abrimos el conversor general.';
+    }
+    return `${tool?.title || 'Esta herramienta'} necesita un archivo de video. Abrimos el conversor general para este archivo.`;
+  }
+
+  neutraliseFocusedQuickOptions(job) {
+    Object.assign(job.options, {
+      trimStart: null,
+      trimEnd: null,
+      rotate: 0,
+      flip: 'none',
+      cropAspect: 'free',
+      cropX: null,
+      cropY: null,
+      cropWidth: null,
+      cropHeight: null,
+      evenDimensions: false,
+      volumeGain: 1,
+      playbackRate: 1,
+      loopMode: 'count',
+      loopCount: 1,
+      loopDuration: null,
+      mute: false,
+    });
+    job.validationError = null;
+  }
+
   async probeJob(job) {
     if (!this.jobs.includes(job)) return;
     try {
@@ -491,8 +535,9 @@ export class App {
         job.operation = quickTool.operation;
         this.initialiseQuickTool(job, quickTool);
       } else if (quickTool) {
+        this.neutraliseFocusedQuickOptions(job);
         job.forgeToolId = null;
-        this.toast(`${quickTool.title} necesita un archivo de video. Abrimos el conversor general para este archivo.`, {
+        this.toast(this.quickToolSupportMessage(quickTool, job.info), {
           duration: 7000,
         });
       }
@@ -605,7 +650,7 @@ export class App {
       ? `${this.jobs.length} file${this.jobs.length === 1 ? '' : 's'}`
       : 'Nothing queued';
     this.dom.app.dataset.empty = String(this.jobs.length === 0);
-    this.dom.startAll.disabled = !this.jobs.some((job) => job.status === 'ready' || job.status === 'queued');
+    this.dom.startAll.disabled = !this.jobs.some((job) => this.jobPendingForRun(job));
     this.dom.downloadAll.disabled = done.length === 0;
 
     const running = this.jobs.filter((job) => job.status === 'running').length;
@@ -635,11 +680,15 @@ export class App {
       else if (job.status === 'done') bits.push(STATUS_LABELS.done);
       return bits.join(' · ');
     }
+    const quickTool = focusedQuickTool(job?.forgeToolId);
     if (job.status === 'failed') return job.error ? truncateName(job.error, 44) : 'Failed';
     if (job.status === 'running') {
       const percent = Math.round(job.progress * 100);
       const left = job.remaining !== null ? ` · ${formatDuration(job.remaining)} left` : '';
       return `${percent}%${left}`;
+    }
+    if (job.status === 'done' && quickTool && (job.dirtySinceOutput || job.validationError)) {
+      return job.validationError ? 'Revisar ajustes' : 'Cambios pendientes';
     }
     if (job.status === 'done') return `${formatBytes(job.outputSize || 0)} · ${STATUS_LABELS.done}`;
     if (job.status === 'probing') return STATUS_LABELS.probing;
@@ -655,7 +704,48 @@ export class App {
 
   jobIsSettledDone(job) {
     if (job?.status !== 'done') return false;
-    return !this.isMergeJob(job) || (!job.dirtySinceOutput && !job.validationError);
+    if (this.isMergeJob(job)) return !job.dirtySinceOutput && !job.validationError;
+    if (focusedQuickTool(job.forgeToolId)) return !job.dirtySinceOutput && !job.validationError;
+    return true;
+  }
+
+  jobPendingForRun(job) {
+    if (!job) return false;
+    if (job.status === 'ready' || job.status === 'queued') return true;
+    if (job.status !== 'done' || !job.dirtySinceOutput) return false;
+    return this.isMergeJob(job) || Boolean(focusedQuickTool(job.forgeToolId));
+  }
+
+  /**
+   * A processed Quick result belongs to an exact FFmpeg plan. Comparing that
+   * plan — instead of merely remembering that a control was touched — keeps a
+   * result settled when someone clicks the active preset, or changes a value
+   * and then returns to the exported one.
+   */
+  quickPlanSignature(job) {
+    const tool = focusedQuickTool(job?.forgeToolId);
+    if (!tool || !this.quickJobRunnable(job, tool)) return null;
+    const normalised = tool.focus === 'trim'
+      ? trimOptionsForRun(job.info, job.options)
+      : normalizeFocusedQuickOptions(tool.id, job.options, job.info);
+    if (!normalised) return null;
+
+    try {
+      const plan = buildPlan(
+        { name: job.name, info: job.info },
+        job.operation,
+        { ...job.options, ...normalised, format: quickVideoFormat(job.options.format) },
+      );
+      return planToCommand(plan);
+    } catch {
+      return null;
+    }
+  }
+
+  syncQuickDirty(job) {
+    if (!focusedQuickTool(job?.forgeToolId) || !job.outputs?.length) return;
+    const signature = this.quickPlanSignature(job);
+    job.dirtySinceOutput = !signature || signature !== job.quickExportSignature;
   }
 
   /* ------------------------------------------------------------------ *
@@ -695,6 +785,26 @@ export class App {
       job.options.flip = 'none';
       job.options.resolution = 'source';
       Object.assign(job.options, fullCropRect(job.info));
+    } else if (tool.id === 'video-volume') {
+      job.options.rotate = 0;
+      job.options.flip = 'none';
+      job.options.resolution = 'source';
+      job.options.volumeGain = tool.defaultOptions.volumeGain;
+      job.options.mute = false;
+    } else if (tool.id === 'video-speed') {
+      job.options.rotate = 0;
+      job.options.flip = 'none';
+      job.options.resolution = 'source';
+      job.options.playbackRate = tool.defaultOptions.playbackRate;
+      job.options.mute = false;
+    } else if (tool.id === 'video-loop') {
+      job.options.rotate = 0;
+      job.options.flip = 'none';
+      job.options.resolution = 'source';
+      job.options.mute = false;
+      const loop = defaultVideoLoopOptions(job.info);
+      if (loop) Object.assign(job.options, loop);
+      else job.validationError = 'Este video es demasiado largo para repetirlo dentro del límite seguro de 30 minutos.';
     }
 
     job.quickToolInitialised = tool.id;
@@ -869,7 +979,11 @@ export class App {
 
     const parts = [formatBytes(job.size)];
     if (info.formatLabel || info.format) parts.push(info.formatLabel || info.format);
-    if (info.duration) parts.push(formatDuration(info.duration));
+    const quickTool = focusedQuickTool(job.forgeToolId);
+    const duration = ['volume', 'speed', 'loop'].includes(quickTool?.focus)
+      ? playableMediaDuration(info)
+      : info.duration;
+    if (duration) parts.push(formatDuration(duration));
     if (info.video) {
       parts.push(`${info.video.codec} ${info.video.width}×${info.video.height}`);
       if (info.video.fps) parts.push(`${info.video.fps} fps`);
@@ -1009,7 +1123,12 @@ export class App {
         play.textContent = media.paused ? 'Reproducir vista previa' : 'Pausar vista previa';
       };
       play.addEventListener('click', () => {
-        if (media.paused) media.play().catch(syncPlayLabel);
+        if (media.paused) {
+          media.play().catch(() => {
+            syncPlayLabel();
+            overlay.textContent = 'No pudimos iniciar la vista previa · probá de nuevo o procesá el resultado';
+          });
+        }
         else media.pause();
       });
       media.addEventListener('play', syncPlayLabel);
@@ -1024,12 +1143,28 @@ export class App {
     const preview = this.quickSourcePreview;
     const rotation = tool.id === 'video-rotate' ? Number(job.options.rotate) || 0 : 0;
     const flip = tool.id === 'video-flip' ? job.options.flip : 'none';
+    const playbackRate = tool.focus === 'speed'
+      ? (normalizePlaybackRate(job.options.playbackRate) || 1)
+      : 1;
+    const volumeGain = tool.focus === 'volume'
+      ? (normalizeVolumeGain(job.options.volumeGain) ?? 1)
+      : 1;
     preview.media.style.setProperty('--quick-rotation', `${rotation}deg`);
     preview.media.style.setProperty('--quick-flip-x', flip === 'horizontal' ? '-1' : '1');
     preview.media.style.setProperty('--quick-flip-y', flip === 'vertical' ? '-1' : '1');
+    preview.media.playbackRate = playbackRate;
+    preview.media.defaultPlaybackRate = playbackRate;
+    preview.media.preservesPitch = true;
+    if ('webkitPreservesPitch' in preview.media) preview.media.webkitPreservesPitch = true;
+    preview.media.muted = job.options.mute === true || (tool.focus === 'volume' && volumeGain === 0);
+    preview.media.volume = Math.min(1, Math.max(0, volumeGain));
     preview.stage.dataset.sideways = String(rotation === 90 || rotation === 270);
     preview.stage.dataset.focus = 'input';
-    preview.overlay.textContent = this.quickTransformDescription(job, tool);
+    preview.stage.dataset.effect = tool.focus;
+    const description = this.quickTransformDescription(job, tool);
+    preview.overlay.textContent = tool.focus === 'loop'
+      ? `${description} · vista previa continua`
+      : description;
 
     const locked = job.status === 'running' || job.status === 'queued';
     preview.stage.inert = locked;
@@ -1071,7 +1206,7 @@ export class App {
         job.options.trimEnd = to < job.info.duration ? to : null;
         job.previewMode = 'source';
         job.validationError = null;
-        if (job.status === 'done') job.dirtySinceOutput = true;
+        this.syncQuickDirty(job);
         this.scheduleCommandPreview();
         this.paintQueue();
         this.updateQuickRangeSummary(job);
@@ -1128,7 +1263,7 @@ export class App {
         });
         job.previewMode = 'source';
         if (!job.cropPreviewUnavailable) job.validationError = null;
-        if (job.status === 'done') job.dirtySinceOutput = true;
+        this.syncQuickDirty(job);
         this.scheduleCommandPreview();
         this.paintQueue();
         this.updateQuickCropSummary(job);
@@ -1569,7 +1704,14 @@ export class App {
    * Controls
    * ------------------------------------------------------------------ */
 
-  quickInvalidMessage(tool) {
+  quickEffectPreflight(job, tool = this.quickToolFor(job)) {
+    if (!tool || !['volume', 'speed', 'loop'].includes(tool.focus)) return null;
+    return focusedQuickPreflight(tool.id, job.options, job.info, job.size);
+  }
+
+  quickInvalidMessage(tool, job = null) {
+    const preflight = job ? this.quickEffectPreflight(job, tool) : null;
+    if (preflight && !preflight.ok && preflight.code !== 'invalid-effect') return preflight.message;
     switch (tool?.focus) {
       case 'trim':
         return 'El inicio y el final tienen que dejar al menos un instante de video seleccionado.';
@@ -1581,6 +1723,12 @@ export class App {
         return 'Elegí un tamaño que reduzca realmente este video.';
       case 'crop':
         return 'Reducí o mové el marco para definir un encuadre distinto del original.';
+      case 'volume':
+        return 'Elegí un volumen distinto de 100% o activá Silenciar.';
+      case 'speed':
+        return 'Elegí una velocidad distinta de 1×.';
+      case 'loop':
+        return 'Elegí una repetición que dure más que el original y no supere 30 minutos.';
       default:
         return 'Revisá los ajustes antes de crear el resultado.';
     }
@@ -1589,6 +1737,8 @@ export class App {
   quickJobRunnable(job, tool = this.quickToolFor(job)) {
     if (!tool || !job?.info || job.validationError || job.cropPreviewUnavailable) return false;
     if (tool.focus === 'trim') return Boolean(trimOptionsForRun(job.info, job.options));
+    const preflight = this.quickEffectPreflight(job, tool);
+    if (preflight) return preflight.ok;
     return Boolean(normalizeFocusedQuickOptions(tool.id, job.options, job.info));
   }
 
@@ -1608,6 +1758,12 @@ export class App {
       const percent = Math.round(job.progress * 100);
       const remaining = job.remaining !== null ? ` · ${formatDuration(job.remaining)} restantes` : '';
       return { title: `Creando resultado · ${percent}%`, detail: `Procesamiento local${remaining}` };
+    }
+    if ((job.status === 'ready' || job.dirtySinceOutput) && tool && !this.quickJobRunnable(job, tool)) {
+      return {
+        title: tool.focus === 'crop' ? 'Definí el encuadre' : 'Elegí un cambio',
+        detail: this.quickInvalidMessage(tool, job),
+      };
     }
     if (job.status === 'done') {
       if (job.dirtySinceOutput) {
@@ -1635,18 +1791,12 @@ export class App {
         detail: `Tus ajustes siguen intactos y podés volver a intentarlo.${previous}`,
       };
     }
-    if (job.status === 'ready' && tool?.focus === 'crop' && !this.quickJobRunnable(job, tool)) {
-      return {
-        title: 'Definí el encuadre',
-        detail: 'Mové los bordes sobre el video o elegí una relación de aspecto.',
-      };
-    }
     return { title: 'Listo para procesar', detail: 'El resultado se creará en este dispositivo.' };
   }
 
   quickProcessingCard(job) {
     const copy = this.quickStatusCopy(job);
-    const visualStatus = job.validationError ? 'failed' : (job.dirtySinceOutput ? 'ready' : job.status);
+    const visualStatus = this.quickVisualStatus(job);
     const progress = el('progress', {
       class: 'quick-progress',
       max: 1,
@@ -1662,6 +1812,12 @@ export class App {
       el('span', { text: copy.detail, dataset: { quickProgressDetail: '' } }),
       progress,
     ]);
+  }
+
+  quickVisualStatus(job) {
+    if (job.validationError) return 'failed';
+    if (['probing', 'queued', 'running', 'failed', 'cancelled'].includes(job.status)) return job.status;
+    return job.dirtySinceOutput ? 'ready' : job.status;
   }
 
   quickFormatNote(formatId) {
@@ -1685,7 +1841,7 @@ export class App {
     return QUALITIES.map((item) => ({ value: item.id, label: labels[item.id] || item.label }));
   }
 
-  quickOutputSection(job, { includeResolution = true } = {}) {
+  quickOutputSection(job, { includeResolution = true, includeMute = true } = {}) {
     const formatControl = this.selectControl(
       this.usable(VIDEO_FORMATS.filter((item) => item.kind === 'video')),
       job.options.format,
@@ -1711,7 +1867,7 @@ export class App {
     );
     qualityControl.dataset.quickOption = 'quality';
     advancedFields.append(this.field('Calidad', qualityControl));
-    if (job.info?.hasAudio) {
+    if (includeMute && job.info?.hasAudio) {
       const muteControl = this.checkbox(
         job.options.mute,
         'Quitar el audio',
@@ -1766,6 +1922,10 @@ export class App {
   }
 
   renderQuickToolControls(job, tool) {
+    if (['volume', 'speed', 'loop'].includes(tool.focus)) {
+      this.renderQuickEffectControls(job, tool);
+      return;
+    }
     if (tool.id !== 'video-trim') {
       this.renderQuickTransformControls(job, tool);
       return;
@@ -2010,6 +2170,548 @@ export class App {
     return grid;
   }
 
+  quickEffectSegments(job, {
+    key,
+    label,
+    items,
+    columns = 4,
+    onSelect = (value) => this.setJobOption(job, key, value),
+  }) {
+    const locked = job.status === 'running' || job.status === 'queued';
+    const group = el('div', {
+      class: 'quick-segmented',
+      dataset: { columns: String(columns) },
+      attrs: { role: 'radiogroup', 'aria-label': label },
+    });
+    const activeIndex = items.findIndex((item) => String(item.value) === String(job.options[key]));
+
+    for (const [index, item] of items.entries()) {
+      const active = index === activeIndex;
+      const button = el('button', {
+        type: 'button',
+        class: `quick-segment${active ? ' is-active' : ''}`,
+        disabled: locked || item.disabled,
+        tabIndex: active || (activeIndex < 0 && index === 0) ? 0 : -1,
+        dataset: {
+          active: String(active),
+          quickOption: key,
+          quickValue: String(item.value),
+        },
+        attrs: { role: 'radio', 'aria-checked': String(active) },
+      }, [
+        el('strong', { text: item.label }),
+        item.meta ? el('small', { text: item.meta }) : null,
+      ]);
+      button.addEventListener('click', () => onSelect(item.value));
+      button.addEventListener('keydown', (event) => {
+        if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+        const buttons = Array.from(group.querySelectorAll('[role="radio"]:not(:disabled)'));
+        if (!buttons.length) return;
+        const current = Math.max(0, buttons.indexOf(button));
+        let next = current;
+        if (event.key === 'Home') next = 0;
+        else if (event.key === 'End') next = buttons.length - 1;
+        else {
+          const forward = event.key === 'ArrowRight' || event.key === 'ArrowDown';
+          next = (current + (forward ? 1 : -1) + buttons.length) % buttons.length;
+        }
+        event.preventDefault();
+        buttons[next].click();
+      });
+      group.append(button);
+    }
+    return group;
+  }
+
+  quickEffectRange(job, {
+    key,
+    label,
+    description,
+    min,
+    max,
+    step,
+    value,
+    formatValue,
+    scale,
+    onInput,
+    disabled = false,
+  }) {
+    const locked = disabled || job.status === 'running' || job.status === 'queued';
+    const safeValue = Math.min(max, Math.max(min, Number(value)));
+    const position = max === min ? 0 : ((safeValue - min) / (max - min)) * 100;
+    const labelId = `quick-effect-${key}-${job.id}`;
+    const output = el('output', {
+      class: 'quick-effect-value',
+      text: formatValue(safeValue),
+      dataset: { quickEffectValue: key },
+      attrs: { for: `${labelId}-input` },
+    });
+    const input = el('input', {
+      id: `${labelId}-input`,
+      class: 'quick-effect-range',
+      type: 'range',
+      disabled: locked,
+      dataset: { quickOption: key },
+      attrs: {
+        min: String(min),
+        max: String(max),
+        step: String(step),
+        'aria-labelledby': labelId,
+        'aria-valuetext': formatValue(safeValue),
+      },
+    });
+    // Range inputs start with a browser-defined midpoint. Set the value only
+    // after min/max/step exist; otherwise Safari and Chromium can clamp the
+    // earlier property assignment while those constraints are still changing.
+    input.value = String(safeValue);
+    input.addEventListener('input', () => {
+      const next = Number(input.value);
+      output.textContent = formatValue(next);
+      input.setAttribute('aria-valuetext', formatValue(next));
+      const nextPosition = max === min ? 0 : ((next - min) / (max - min)) * 100;
+      input.closest('.quick-effect-control')?.style.setProperty('--quick-range-position', `${nextPosition}%`);
+      onInput(next);
+    });
+
+    return el('div', {
+      class: 'quick-effect-control',
+      style: `--quick-range-position:${position}%`,
+    }, [
+      el('div', { class: 'quick-effect-control-head' }, [
+        el('div', { class: 'quick-effect-control-copy' }, [
+          el('strong', { id: labelId, text: label }),
+          el('span', { text: description }),
+        ]),
+        output,
+      ]),
+      input,
+      el('div', { class: 'quick-effect-scale', attrs: { 'aria-hidden': 'true' } },
+        scale.map((item) => el('span', { text: item }))
+      ),
+    ]);
+  }
+
+  quickEffectSummary(job, tool) {
+    const sourceDuration = playableMediaDuration(job.info);
+    if (tool.focus === 'volume') {
+      const gain = normalizeVolumeGain(job.options.volumeGain);
+      const output = job.options.mute
+        ? 'Sin pista de audio'
+        : (gain === null ? '—' : `${Math.round(gain * 100)}%`);
+      return el('div', { class: 'quick-effect-summary', dataset: { quickEffectSummary: '' } }, [
+        el('div', { class: 'quick-effect-stat' }, [
+          el('span', { text: 'Original' }),
+          el('strong', { text: '100%' }),
+        ]),
+        el('div', { class: 'quick-effect-stat', dataset: { emphasis: 'true' } }, [
+          el('span', { text: 'Resultado' }),
+          el('output', { text: output }),
+        ]),
+      ]);
+    }
+
+    const outputDuration = focusedQuickOutputDuration(tool.id, job.options, job.info);
+    return el('div', {
+      class: 'quick-effect-summary',
+      dataset: {
+        quickEffectSummary: '',
+        ...(outputDuration && outputDuration >= VIDEO_LOOP_LIMITS.maxDuration ? { status: 'warning' } : {}),
+      },
+    }, [
+      el('div', { class: 'quick-effect-stat' }, [
+        el('span', { text: 'Duración original' }),
+        el('strong', { text: sourceDuration ? formatDuration(sourceDuration) : '—' }),
+      ]),
+      el('div', { class: 'quick-effect-stat', dataset: { emphasis: 'true' } }, [
+        el('span', { text: 'Resultado estimado' }),
+        el('output', { text: outputDuration ? formatDuration(outputDuration) : '—' }),
+      ]),
+    ]);
+  }
+
+  setQuickEffectLiveOption(job, key, value, { unmute = false, validationError = null } = {}) {
+    job.options[key] = value;
+    if (unmute) job.options.mute = false;
+    if (!job.cropPreviewUnavailable) job.validationError = validationError;
+    this.syncQuickDirty(job);
+    const tool = this.quickToolFor(job);
+    if (!tool || this.selectedId !== job.id) return;
+
+    if (this.quickSourcePreview?.jobId === job.id) this.quickSourcePreviewFor(job, tool);
+    const valueNode = this.dom.controls.querySelector(`[data-quick-effect-value="${key}"]`);
+    if (valueNode) {
+      if (key === 'volumeGain') valueNode.textContent = `${Math.round(Number(value) * 100)}%`;
+      else if (key === 'loopCount') valueNode.textContent = `${value} veces`;
+      else if (key === 'loopDuration') valueNode.textContent = Number.isFinite(value) ? formatDuration(value) : '—';
+    }
+    const summary = this.dom.controls.querySelector('[data-quick-effect-summary]');
+    if (summary) summary.replaceWith(this.quickEffectSummary(job, tool));
+    const description = this.quickTransformDescription(job, tool);
+    const copy = this.dom.controls.querySelector('[data-quick-effect-description]');
+    if (copy) copy.textContent = job.previewMode === 'result' && job.outputs?.length
+      ? `${formatBytes(job.outputSize || 0)} · resultado anterior`
+      : description;
+    const resultTab = this.dom.controls.querySelector('[data-action="preview-result"]');
+    if (resultTab && job.outputs?.length) resultTab.textContent = 'Resultado anterior';
+    const effectSegments = Array.from(
+      this.dom.controls.querySelectorAll(`[data-quick-option="${key}"][role="radio"]`)
+    );
+    let matchedSegment = false;
+    for (const segment of effectSegments) {
+      const active = String(segment.dataset.quickValue) === String(value);
+      if (active) matchedSegment = true;
+      segment.classList.toggle('is-active', active);
+      segment.dataset.active = String(active);
+      segment.setAttribute('aria-checked', String(active));
+      segment.tabIndex = active ? 0 : -1;
+    }
+    if (!matchedSegment && effectSegments[0]) effectSegments[0].tabIndex = 0;
+    const mute = this.dom.controls.querySelector('.quick-mute-toggle');
+    if (mute && unmute) {
+      mute.setAttribute('aria-pressed', 'false');
+      mute.dataset.quickValue = 'false';
+      const copy = mute.querySelector('small');
+      if (copy) copy.textContent = 'Conservamos la pista con el nivel elegido.';
+    }
+    this.scheduleCommandPreview();
+    this.paintQueue();
+    this.updateQuickProgress(job);
+    this.renderDetailActions(job, tool);
+  }
+
+  setQuickLoopMode(job, mode) {
+    if (this.dom.controls.contains(document.activeElement)) {
+      job.pendingQuickFocus = { key: 'loopMode', value: mode };
+    }
+    const sourceDuration = playableMediaDuration(job.info) || 0;
+    job.options.loopMode = mode;
+    if (mode === 'count') {
+      const maximum = maxLoopCountFor(job.info) || 0;
+      job.options.loopCount = Math.min(maximum, Math.max(2, Number(job.options.loopCount) || 2));
+      job.options.loopDuration = null;
+    } else {
+      const current = Number(job.options.loopDuration);
+      job.options.loopCount = null;
+      job.options.loopDuration = Number.isFinite(current) && current > sourceDuration
+        ? Math.min(VIDEO_LOOP_LIMITS.maxDuration, current)
+        : Math.min(VIDEO_LOOP_LIMITS.maxDuration, sourceDuration * 2);
+    }
+    job.previewMode = 'source';
+    job.validationError = null;
+    this.syncQuickDirty(job);
+    this.scheduleCommandPreview();
+    this.paintQueue();
+    if (this.selectedId === job.id) this.paintDetail();
+  }
+
+  quickVolumeControls(job) {
+    const gain = normalizeVolumeGain(job.options.volumeGain) ?? VOLUME_GAIN_LIMITS.default;
+    const stack = el('div', { class: 'quick-effect-stack' });
+    stack.append(
+      this.quickEffectRange(job, {
+        key: 'volumeGain',
+        label: 'Nivel de salida',
+        description: 'Ajustá el volumen sin modificar el archivo original.',
+        min: VOLUME_GAIN_LIMITS.min,
+        max: VOLUME_GAIN_LIMITS.max,
+        step: 0.05,
+        value: gain,
+        formatValue: (value) => `${Math.round(value * 100)}%`,
+        scale: ['Silencio', '100%', '200%'],
+        onInput: (value) => this.setQuickEffectLiveOption(job, 'volumeGain', value, { unmute: true }),
+      }),
+      this.quickEffectSegments(job, {
+        key: 'volumeGain',
+        label: 'Presets de volumen',
+        columns: 3,
+        items: VOLUME_GAIN_PRESETS.map((preset) => ({
+          value: preset.value,
+          label: preset.label,
+          meta: preset.value === 1 ? 'Original' : null,
+        })),
+        onSelect: (value) => {
+          job.options.mute = false;
+          this.setJobOption(job, 'volumeGain', value);
+        },
+      }),
+    );
+
+    const muted = job.options.mute === true;
+    const mute = el('button', {
+      type: 'button',
+      class: 'quick-mute-toggle',
+      disabled: job.status === 'running' || job.status === 'queued',
+      dataset: { quickOption: 'mute', quickValue: String(muted) },
+      attrs: { 'aria-pressed': String(muted) },
+    }, [
+      el('span', {
+        class: 'quick-mute-icon',
+        html: '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 8h3l4-3v10l-4-3H3z" stroke-width="1.5" stroke-linejoin="round"/><path d="m14 8 4 4m0-4-4 4" stroke-width="1.5" stroke-linecap="round"/></svg>',
+      }),
+      el('span', {}, [
+        el('strong', { text: 'Silenciar por completo' }),
+        el('small', { text: muted ? 'La salida no tendrá pista de audio.' : 'Conservamos la pista con el nivel elegido.' }),
+      ]),
+    ]);
+    mute.addEventListener('click', () => this.setJobOption(job, 'mute', !muted));
+    stack.append(mute, this.quickEffectSummary(job, this.quickToolFor(job)));
+    if (gain > 1 && !muted) stack.append(el('p', {
+      class: 'quick-effect-note',
+      dataset: { tone: 'warning' },
+      text: 'La vista previa llega hasta 100%. La amplificación completa se aplica al crear el resultado y puede saturar audio que ya esté cerca del máximo.',
+    }));
+    return stack;
+  }
+
+  quickSpeedControls(job) {
+    const items = PLAYBACK_RATE_PRESETS.map((preset) => ({
+      value: preset.value,
+      label: preset.label,
+      meta: preset.value < 1 ? 'Más lento' : (preset.value > 1 ? 'Más rápido' : 'Original'),
+    }));
+    return el('div', { class: 'quick-effect-stack' }, [
+      this.quickEffectSegments(job, {
+        key: 'playbackRate',
+        label: 'Velocidad de reproducción',
+        items,
+        columns: 3,
+      }),
+      this.quickEffectSummary(job, this.quickToolFor(job)),
+      el('p', {
+        class: 'quick-effect-note',
+        text: job.info?.hasAudio
+          ? 'La imagen y el sonido cambian juntos; conservamos el tono de las voces.'
+          : 'La duración cambia sin inventar una pista de audio.',
+      }),
+    ]);
+  }
+
+  quickLoopControls(job) {
+    const sourceDuration = playableMediaDuration(job.info) || 0;
+    const maximumCount = maxLoopCountFor(job.info) || 0;
+    const countAvailable = maximumCount >= VIDEO_LOOP_LIMITS.minCount;
+    const mode = job.options.loopMode === 'duration' ? 'duration' : 'count';
+    const stack = el('div', { class: 'quick-effect-stack' });
+    if (sourceDuration >= VIDEO_LOOP_LIMITS.maxDuration) {
+      stack.append(
+        this.quickEffectSummary(job, this.quickToolFor(job)),
+        el('p', {
+          class: 'quick-effect-note',
+          dataset: { tone: 'warning' },
+          text: 'El original ya dura 30 minutos o más; repetirlo superaría el límite seguro de esta herramienta local.',
+        }),
+      );
+      return stack;
+    }
+    stack.append(this.quickEffectSegments(job, {
+      key: 'loopMode',
+      label: 'Cómo definir la repetición',
+      columns: 2,
+      items: [
+        { value: 'count', label: 'Repeticiones', meta: 'Veces totales', disabled: !countAvailable },
+        { value: 'duration', label: 'Duración', meta: 'Tiempo final' },
+      ],
+      onSelect: (value) => this.setQuickLoopMode(job, value),
+    }));
+
+    if (mode === 'count' && countAvailable) {
+      const count = Math.min(maximumCount, Math.max(2, Number(job.options.loopCount) || 2));
+      stack.append(this.quickEffectRange(job, {
+        key: 'loopCount',
+        label: 'Cantidad total',
+        description: 'Incluye la reproducción original.',
+        min: VIDEO_LOOP_LIMITS.minCount,
+        max: maximumCount,
+        step: 1,
+        value: count,
+        formatValue: (value) => `${value} veces`,
+        scale: ['2×', `${Math.max(2, Math.round((maximumCount + 2) / 2))}×`, `${maximumCount}×`],
+        onInput: (value) => this.setQuickEffectLiveOption(job, 'loopCount', value),
+      }));
+      const presets = LOOP_COUNT_PRESETS.filter((value) => value <= maximumCount);
+      if (presets.length > 1) stack.append(this.quickEffectSegments(job, {
+        key: 'loopCount',
+        label: 'Presets de repeticiones',
+        columns: Math.min(4, presets.length),
+        items: presets.map((value) => ({ value, label: `${value}×` })),
+      }));
+    } else {
+      const current = Number(job.options.loopDuration);
+      const fallback = Math.min(VIDEO_LOOP_LIMITS.maxDuration, sourceDuration * 2);
+      const duration = Number.isFinite(current) && current > sourceDuration ? current : fallback;
+      const input = el('input', {
+        class: 'control-input',
+        type: 'text',
+        value: formatTimestamp(duration),
+        placeholder: '00:01:00',
+        spellcheck: false,
+        disabled: job.status === 'running' || job.status === 'queued',
+        dataset: { quickOption: 'loopDuration' },
+        attrs: { inputmode: 'decimal', 'aria-label': 'Duración final del video repetido' },
+      });
+      const apply = () => {
+        const value = parseTimestamp(input.value);
+        const valid = Number.isFinite(value)
+          && value > sourceDuration
+          && value <= VIDEO_LOOP_LIMITS.maxDuration;
+        this.setQuickEffectLiveOption(job, 'loopDuration', valid ? value : null, {
+          validationError: valid
+            ? null
+            : 'La duración final debe superar al original y no puede pasar de 30 minutos.',
+        });
+      };
+      // Validate while the person types. The lightweight updater keeps this
+      // exact textbox in place, so feedback is immediate without stealing
+      // focus or rebuilding the inspector on every character.
+      input.addEventListener('input', apply);
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') input.blur();
+      });
+      stack.append(el('div', { class: 'quick-effect-control' }, [
+        el('div', { class: 'quick-effect-control-head' }, [
+          el('div', { class: 'quick-effect-control-copy' }, [
+            el('strong', { text: 'Duración final' }),
+            el('span', { text: 'Se corta la última repetición exactamente en este punto.' }),
+          ]),
+          el('output', {
+            class: 'quick-effect-value',
+            text: formatDuration(duration),
+            dataset: { quickEffectValue: 'loopDuration' },
+          }),
+        ]),
+        input,
+      ]));
+      const candidates = [...new Set([
+        sourceDuration * 2,
+        30, 60, 120, 300, 600, 900, VIDEO_LOOP_LIMITS.maxDuration,
+      ].map((value) => Math.round(value * 1000) / 1000))]
+        .filter((value) => value > sourceDuration && value <= VIDEO_LOOP_LIMITS.maxDuration)
+        .sort((left, right) => left - right)
+        .slice(0, 8);
+      if (candidates.length) stack.append(this.quickEffectSegments(job, {
+        key: 'loopDuration',
+        label: 'Presets de duración final',
+        columns: Math.min(4, candidates.length),
+        items: candidates.map((value) => ({ value, label: formatDuration(value) })),
+      }));
+    }
+
+    stack.append(
+      this.quickEffectSummary(job, this.quickToolFor(job)),
+      el('p', {
+        class: 'quick-effect-note',
+        text: 'La vista previa se repite de forma continua; el archivo final respeta la cantidad o duración elegida y el límite local de 30 minutos.',
+      }),
+    );
+    return stack;
+  }
+
+  quickEffectControls(job, tool) {
+    if (tool.focus === 'volume') return this.quickVolumeControls(job);
+    if (tool.focus === 'speed') return this.quickSpeedControls(job);
+    return this.quickLoopControls(job);
+  }
+
+  renderQuickEffectControls(job, tool) {
+    const container = this.dom.controls;
+    const hasInfo = Boolean(job.info);
+    if (hasInfo) job.options.format = quickVideoFormat(job.options.format);
+    const resultAvailable = Boolean(job.outputs?.length);
+    if (!resultAvailable && job.previewMode === 'result') job.previewMode = 'source';
+    const showingResult = resultAvailable && job.previewMode === 'result';
+    const panelId = `quick-preview-panel-${job.id}`;
+    const sourceTabId = `quick-preview-source-${job.id}`;
+    const resultTabId = `quick-preview-result-${job.id}`;
+
+    const sourceTab = el('button', {
+      id: sourceTabId,
+      type: 'button',
+      class: `quick-preview-tab${showingResult ? '' : ' is-active'}`,
+      text: 'Vista previa',
+      tabIndex: showingResult ? -1 : 0,
+      dataset: { action: 'preview-source' },
+      attrs: { role: 'tab', 'aria-selected': String(!showingResult), 'aria-controls': panelId },
+    });
+    const resultTab = el('button', {
+      id: resultTabId,
+      type: 'button',
+      class: `quick-preview-tab${showingResult ? ' is-active' : ''}`,
+      text: resultAvailable && (job.dirtySinceOutput || job.status !== 'done') ? 'Resultado anterior' : 'Resultado',
+      disabled: !resultAvailable,
+      tabIndex: showingResult ? 0 : -1,
+      dataset: { action: 'preview-result' },
+      attrs: { role: 'tab', 'aria-selected': String(showingResult), 'aria-controls': panelId },
+    });
+    this.wireQuickTabs(job, sourceTab, resultTab);
+
+    const previewContent = el('div', {
+      id: panelId,
+      class: 'quick-preview-content',
+      attrs: { role: 'tabpanel', 'aria-labelledby': showingResult ? resultTabId : sourceTabId },
+    });
+    if (!hasInfo) previewContent.append(this.quickProcessingCard(job));
+    else if (showingResult) {
+      this.pauseQuickSourcePreview();
+      previewContent.append(this.quickOutputPreviewFor(job));
+    } else {
+      this.pauseQuickOutputPreview();
+      this.releaseCropper();
+      previewContent.append(this.quickSourcePreviewFor(job, tool));
+    }
+
+    const description = hasInfo ? this.quickTransformDescription(job, tool) : 'Preparando la vista previa…';
+    const canvas = el('section', { class: 'quick-canvas' }, [
+      el('header', { class: 'quick-preview-head' }, [
+        el('div', { class: 'quick-preview-copy' }, [
+          el('strong', { text: job.name }),
+          el('span', {
+            text: showingResult ? `${formatBytes(job.outputSize || 0)} · resultado procesado` : description,
+            dataset: { quickEffectDescription: '' },
+          }),
+          el('small', { text: 'Local · el archivo no sale de este dispositivo' }),
+        ]),
+        el('div', { class: 'quick-preview-switch', attrs: { role: 'tablist', 'aria-label': 'Vista previa' } }, [
+          sourceTab,
+          resultTab,
+        ]),
+      ]),
+      previewContent,
+    ]);
+
+    const inspector = el('aside', {
+      class: 'quick-inspector',
+      attrs: { 'aria-label': `Ajustes de ${tool.title.toLowerCase()}` },
+    });
+    if (!hasInfo) {
+      inspector.append(el('section', { class: 'quick-inspector-section' }, [
+        el('h3', { text: `Preparando: ${tool.title}` }),
+        el('p', { text: 'Cuando termine el análisis vas a poder configurar el efecto y revisar la salida.' }),
+        this.quickProcessingCard(job),
+      ]));
+    } else {
+      const titles = {
+        volume: ['Volumen', 'Ajustá el nivel o quitá el sonido por completo.'],
+        speed: ['Velocidad', 'Elegí un ritmo y revisá la nueva duración antes de procesar.'],
+        loop: ['Repetición', 'Definí cuántas veces se reproduce o cuánto debe durar.'],
+      };
+      const [title, copy] = titles[tool.focus];
+      inspector.append(
+        el('section', { class: 'quick-inspector-section' }, [
+          el('h3', { text: title }),
+          el('p', { text: copy }),
+          this.quickEffectControls(job, tool),
+        ]),
+        this.quickOutputSection(job, { includeMute: tool.focus !== 'volume' }),
+        el('section', { class: 'quick-inspector-section' }, [this.quickProcessingCard(job)]),
+      );
+    }
+
+    container.append(el('div', {
+      class: 'quick-tool-layout',
+      attrs: { 'aria-busy': String(job.status === 'probing' || job.status === 'queued' || job.status === 'running') },
+    }, [canvas, inspector]));
+  }
+
   quickDimensionSummary(job) {
     const dimensions = this.quickTransformDimensions(job);
     if (!dimensions) return null;
@@ -2181,7 +2883,7 @@ export class App {
     const card = this.dom.controls.querySelector('.quick-processing-card');
     if (card) {
       const copy = this.quickStatusCopy(job);
-      card.dataset.status = job.validationError ? 'failed' : (job.dirtySinceOutput ? 'ready' : job.status);
+      card.dataset.status = this.quickVisualStatus(job);
       const title = card.querySelector('[data-quick-progress-title]');
       const detail = card.querySelector('[data-quick-progress-detail]');
       const progress = card.querySelector('progress');
@@ -2350,7 +3052,7 @@ export class App {
     Object.assign(job.options, rect);
     job.previewMode = 'source';
     if (!job.cropPreviewUnavailable) job.validationError = null;
-    if (job.status === 'done') job.dirtySinceOutput = true;
+    this.syncQuickDirty(job);
 
     const preset = CROP_ASPECT_PRESETS.find((item) => item.id === value);
     this.cropper?.control.setAspectRatio(preset?.ratio || null);
@@ -2367,7 +3069,7 @@ export class App {
     job.options[key] = value;
     job.previewMode = 'source';
     if (!job.cropPreviewUnavailable) job.validationError = null;
-    if (job.status === 'done') job.dirtySinceOutput = true;
+    this.syncQuickDirty(job);
     if (key === 'format') prefs.set('preset', value);
     this.scheduleCommandPreview();
     this.paintQueue();
@@ -2622,7 +3324,7 @@ export class App {
     }
     const quickTool = this.quickToolFor(job);
     if (quickTool && !this.quickJobRunnable(job, quickTool)) {
-      this.dom.commandText.textContent = this.quickInvalidMessage(quickTool);
+      this.dom.commandText.textContent = this.quickInvalidMessage(quickTool, job);
       this.dom.commandText.dataset.invalid = 'true';
       return;
     }
@@ -2651,11 +3353,21 @@ export class App {
       return false;
     }
 
+    const preflight = this.quickEffectPreflight(job, tool);
+    if (preflight && !preflight.ok) {
+      job.validationError = preflight.code === 'invalid-effect'
+        ? this.quickInvalidMessage(tool, job)
+        : preflight.message;
+      if (notify) this.toast(job.validationError, { kind: 'error', duration: 6500 });
+      this.paintDetail();
+      return false;
+    }
+
     const normalised = tool.focus === 'trim'
       ? trimOptionsForRun(job.info, job.options)
       : normalizeFocusedQuickOptions(tool.id, job.options, job.info);
     if (!normalised) {
-      job.validationError = this.quickInvalidMessage(tool);
+      job.validationError = this.quickInvalidMessage(tool, job);
       if (notify) this.toast(job.validationError, { kind: 'error', duration: 6500 });
       this.paintDetail();
       return false;
@@ -2700,7 +3412,7 @@ export class App {
     // so a job removed from this snapshot is safely ignored.
     for (const job of [...this.jobs]) {
       if (this.stopRequested) break;
-      if (job.status !== 'ready' && job.status !== 'queued') continue;
+      if (!this.jobPendingForRun(job)) continue;
       if (skipFocused && focusedQuickTool(job.forgeToolId)) continue;
       await this.runJob(job);
     }
@@ -2712,7 +3424,7 @@ export class App {
     // user has already dismissed. Requiring a pending status also makes stale
     // tasks idempotent: if "Process queue" consumes a job before an individual
     // task for that same job gets its turn, the latter sees `done` and exits.
-    if (!this.jobs.includes(job) || !job.info || !['ready', 'queued'].includes(job.status)) return;
+    if (!this.jobs.includes(job) || !job.info || !this.jobPendingForRun(job)) return;
     const valid = this.isMergeJob(job)
       ? this.validateMergeJob(job, { notify: job.status !== 'queued' })
       : this.validateQuickJob(job, { notify: job.status !== 'queued' });
@@ -2793,6 +3505,7 @@ export class App {
       if (this.isMergeJob(job)) {
         Object.assign(job, markMergeExported(job, mergeSnapshot.revision));
       } else {
+        if (this.quickToolFor(job)) job.quickExportSignature = planToCommand(plan);
         job.dirtySinceOutput = false;
       }
       if (this.quickToolFor(job) || this.isMergeJob(job)) job.previewMode = 'result';

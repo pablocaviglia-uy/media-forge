@@ -16,9 +16,8 @@
  * the single exception called out at IMMUTABLE.
  */
 
-// v7 adds the multi-file merge project, its sequence controller and the
-// worker protocol that writes every ordered input atomically offline.
-const CACHE_VERSION = 'v7';
+// v8 adds the focused volume, playback-speed and bounded-loop experiences.
+const CACHE_VERSION = 'v8';
 const CACHE_NAME = `media-forge-${CACHE_VERSION}`;
 
 /**
