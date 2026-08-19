@@ -16,8 +16,8 @@
  * the single exception called out at IMMUTABLE.
  */
 
-// v11 adds persistent result history and local audio/video result players.
-const CACHE_VERSION = 'v11';
+// v12 refreshes the generated audio player layout for long filenames.
+const CACHE_VERSION = 'v12';
 const CACHE_NAME = `media-forge-${CACHE_VERSION}`;
 
 /**
