@@ -395,6 +395,86 @@ test('a missing result is dropped without making the editable source unusable', 
   assert.ok(restored.issues.some((issue) => issue.code === 'missing-output-blob'));
 });
 
+test('a partially missing multi-output result is discarded instead of restoring a misleading archive', () => {
+  const graph = serializeWorkspace([
+    simpleJob({
+      status: 'done',
+      downloadName: 'frames.zip',
+      outputs: [
+        { name: 'frame-001.png', blob: new Blob(['one'], { type: 'image/png' }) },
+        { name: 'frame-002.png', blob: new Blob(['two'], { type: 'image/png' }) },
+      ],
+    }),
+  ], { registry: createBlobIdentityRegistry(ids()) });
+  const missingOutput = graph.outputs[1];
+  graph.blobs = graph.blobs.filter((record) => record.id !== missingOutput.blobId);
+
+  const restored = hydrateWorkspace(graph);
+  const job = restored.jobs[0];
+  const incomplete = restored.issues.find((issue) => issue.code === 'incomplete-result');
+
+  assert.deepEqual(job.resultHistory, []);
+  assert.equal(job.outputs, null);
+  assert.equal(job.status, 'ready');
+  assert.equal(incomplete.projectId, job.id);
+  assert.equal(incomplete.expectedOutputCount, 2);
+  assert.equal(incomplete.availableOutputCount, 1);
+  assert.deepEqual(incomplete.missingOutputIds, [missingOutput.id]);
+});
+
+test('a corrupt nested result history is isolated to its project and protects the workspace', () => {
+  const graph = serializeWorkspace([
+    simpleJob({ id: 'healthy-project', name: 'healthy.mp4' }),
+    simpleJob({
+      id: 'corrupt-project',
+      name: 'corrupt.mp4',
+      status: 'done',
+      downloadName: 'corrupt-result.mp4',
+      outputs: [{ name: 'corrupt-result.mp4', blob: new Blob(['result'], { type: 'video/mp4' }) }],
+    }),
+  ], { registry: createBlobIdentityRegistry(ids()) });
+  const corruptProject = graph.projects.find((project) => project.id === 'corrupt-project');
+  corruptProject.resultHistory.push({ ...corruptProject.resultHistory[0] });
+
+  const restored = hydrateWorkspace(graph);
+  const healthy = restored.jobs.find((job) => job.id === 'healthy-project');
+  const corrupt = restored.jobs.find((job) => job.id === 'corrupt-project');
+  const issue = restored.issues.find((entry) => (
+    entry.code === 'invalid-record' && entry.store === 'resultHistory'
+  ));
+
+  assert.equal(restored.jobs.length, 2);
+  assert.ok(healthy.file);
+  assert.ok(corrupt.file);
+  assert.deepEqual(corrupt.resultHistory, []);
+  assert.equal(corrupt.outputs, null);
+  assert.equal(corrupt.status, 'ready');
+  assert.equal(issue.projectId, 'corrupt-project');
+  assert.equal(issue.causeCode, 'duplicate-result-id');
+});
+
+test('a future result-history schema is preserved behind the protected workspace gate', () => {
+  const graph = serializeWorkspace([
+    simpleJob({
+      id: 'future-result-project',
+      status: 'done',
+      downloadName: 'future.mp3',
+      outputs: [{ name: 'future.mp3', blob: new Blob(['future'], { type: 'audio/mpeg' }) }],
+    }),
+  ], { registry: createBlobIdentityRegistry(ids()) });
+  graph.projects[0].resultHistory[0].schemaVersion = 2;
+
+  const restored = hydrateWorkspace(graph);
+  const issue = restored.issues.find((entry) => entry.code === 'unsupported-schema');
+
+  assert.equal(restored.jobs.length, 1);
+  assert.deepEqual(restored.jobs[0].resultHistory, []);
+  assert.equal(restored.jobs[0].outputs, null);
+  assert.equal(issue.store, 'resultHistory');
+  assert.equal(issue.projectId, 'future-result-project');
+  assert.equal(issue.schemaVersion, 2);
+});
+
 test('newer schemas and malformed records are reported instead of crashing restore', () => {
   const restored = hydrateWorkspace({
     projects: [

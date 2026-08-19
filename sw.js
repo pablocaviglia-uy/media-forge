@@ -16,8 +16,8 @@
  * the single exception called out at IMMUTABLE.
  */
 
-// v10 adds recoverable local projects and their IndexedDB persistence layer.
-const CACHE_VERSION = 'v10';
+// v11 adds persistent result history and local audio/video result players.
+const CACHE_VERSION = 'v11';
 const CACHE_NAME = `media-forge-${CACHE_VERSION}`;
 
 /**
@@ -57,6 +57,7 @@ const PRECACHE = [
   './src/media/quick-tools.js',
   './src/media/merge.js',
   './src/media/add-audio.js',
+  './src/media/results.js',
   './src/media/timeline.js',
   './src/media/zip.js',
   './src/storage/ids.js',
@@ -68,6 +69,7 @@ const PRECACHE = [
   './src/ui/cropper.js',
   './src/ui/merge-sequence.js',
   './src/ui/audio-mix-timeline.js',
+  './src/ui/generated-results.js',
 
   /*
    * The FFmpeg core, minus the part of it that matters most.

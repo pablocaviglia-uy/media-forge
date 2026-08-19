@@ -41,13 +41,30 @@ Almost everything below is a consequence of that sentence.
         │     FS.readFile(output).slice()
         │
         └── outputs come back as transferred bytes ──► Blob
-              ├── save the new project revision ──► IndexedDB
-              └── download on explicit request
+              └── append a result generation       media/results.js
+                    ├── persist manifest + outputs ─► IndexedDB
+                    └── select, preview, download ─► ui/generated-results.js
 ```
 
 Every arrow crossing to the worker is a `postMessage` carrying an id, and every
 reply carries the same id back. A reply that forgets it is a promise that never
 settles, which is a mistake worth making only once.
+
+## Generated results
+
+The durable model is project → result generations → output files. A completed
+FFmpeg invocation appends one generation to the oldest-to-newest history; a
+generation can contain one file or several, as frame extraction does.
+`selectedResultId` records which generation the user is viewing, while the
+newest generation is also projected onto the legacy single-result fields used
+by the queue and download paths.
+
+`ui/generated-results.js` makes the selected generation the main result and
+keeps the rest as a compact history. It uses native audio/video players and an
+image preview when possible, with a file presentation for other output kinds.
+Selection, download and confirmed removal work per retained generation. All
+previews use local object URLs created from Blobs and revoke them when the view
+changes or is destroyed.
 
 ## Local projects
 
@@ -68,12 +85,14 @@ Identifiers come from `storage/ids.js`; a counter that restarts at one would
 collide with a restored project after every reload.
 
 Schema v1 uses five stores: `projects`, `assets`, `outputs`, `blobs` and
-`meta`. Media bytes live only in `blobs`; descriptors and editing state stay
-small, and stable blob identities mean an option edit does not rewrite a
-500 MB source. A workspace revision provides optimistic conflict detection.
-`BroadcastChannel` announces commits to other tabs; a tab that sees an external
-change stops autosaving and asks for a reload instead of silently overwriting
-the other editor.
+`meta`. Project manifests keep the ordered generation history and current
+selection; output records link files to their generation, while media bytes
+live only in `blobs`. Descriptors and editing state stay small, and stable blob
+identities mean an option edit does not rewrite a 500 MB source. Every retained
+generation still consumes quota through its output blobs. A workspace revision
+provides optimistic conflict detection. `BroadcastChannel` announces commits
+to other tabs; a tab that sees an external change stops autosaving and asks for
+a reload instead of silently overwriting the other editor.
 
 Autosave is continuous. Source changes and completed outputs are written when
 they happen, while option-only changes are coalesced so dragging a control does
@@ -91,16 +110,20 @@ in-memory previews.
 The browser owns the quota. `navigator.storage.estimate()` gives the Settings
 sheet a useful, approximate usage report, and `navigator.storage.persist()` can
 request protection from storage-pressure eviction after an explicit user
-action. Neither is a promise of a particular number of bytes. A failed or full
-database does not make the in-memory editor or converter unusable. If media
-bytes exceed quota but metadata still fits, the edit graph is preserved and
-the restored project asks the user to reconnect its original files. A failed
-replacement output never evicts the last output that was already durable.
+action. Neither is a promise of a particular number of bytes. Before writing a
+generation, storage preflight estimates its new Blob bytes. A failed or full
+database does not make the in-memory editor or converter unusable: the new
+result can remain available for the current session while metadata-only
+fallback preserves the edit graph. The last generation already durable is not
+evicted when a newer one does not fit. A restored project without its source
+bytes asks the user to reconnect the original file.
 
 Turning autosave off stops new writes; it intentionally does not destroy data
 as a side effect of a checkbox. Removing a project removes its stored record,
 and the destructive Settings action clears every local project. Clearing site
 data or ending a private-browsing session can do the same outside the app.
+Stored media and the Blob URLs used for result playback remain local to this
+origin and are never uploaded.
 
 ## One job at a time
 

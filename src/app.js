@@ -25,6 +25,7 @@ import { createScrubber } from './ui/scrubber.js';
 import { createCropper } from './ui/cropper.js';
 import { createMergeSequence } from './ui/merge-sequence.js';
 import { createAudioMixTimeline } from './ui/audio-mix-timeline.js';
+import { createGeneratedResults } from './ui/generated-results.js';
 import { supportsFormat } from './ffmpeg/capabilities.js';
 import {
   buildJoinVideosPlan,
@@ -104,6 +105,15 @@ import {
   validateAddAudioProject,
 } from './media/add-audio.js';
 import { audioTrackDuration, videoTrackDuration } from './media/probe.js';
+import {
+  RESULT_HISTORY_SCHEMA_VERSION,
+  appendResult,
+  deleteResult,
+  normalizeResultHistory,
+  resultCompatibilityPatch,
+  selectResult,
+  selectedResult,
+} from './media/results.js';
 
 /**
  * Where the app refuses rather than letting FFmpeg run out of heap.
@@ -163,6 +173,7 @@ export class App {
     this.mergeSequence = null;
     this.audioMixPreview = null;
     this.audioMixTimeline = null;
+    this.generatedResults = null;
     this.pickerIntent = null;
     this.nextPickerToken = 1;
 
@@ -313,6 +324,8 @@ export class App {
 
   setProjectStorageState(state, message) {
     this.projectStorageState = state;
+    // Updating the durability badge must not rebuild an active media player.
+    this.generatedResults?.control.update({ storageStatus: state });
     const badge = this.dom?.statusStorage;
     if (!badge) return;
     badge.dataset.state = state;
@@ -714,6 +727,7 @@ export class App {
     this.releaseMergeSequence();
     this.releaseAudioMixPreview();
     this.releaseAudioMixTimeline();
+    this.releaseGeneratedResults();
     this.clearPickerIntent();
     this.jobs = [];
     this.selectedId = null;
@@ -890,7 +904,10 @@ export class App {
         progress: 0,
         speed: null,
         remaining: null,
+        resultHistory: [],
+        selectedResultId: null,
         outputs: null,
+        previewMode: 'source',
         error: null,
         log: [],
       };
@@ -947,6 +964,7 @@ export class App {
         .filter((asset) => asset && !asset.file)
         .map((asset) => ({ owner: asset, role: asset.role, id: asset.id, name: asset.name, size: asset.size, lastModified: asset.lastModified }));
     }
+    if (this.generatedResults?.jobId === job.id) this.releaseGeneratedResults();
     // Some queue/domain tests and embedders use minimal status-only records.
     // Absence of a `file` field is not itself a persisted relink marker; a
     // hydrated metadata-only project has the field explicitly set to null.
@@ -1127,6 +1145,8 @@ export class App {
       progress: 0,
       speed: null,
       remaining: null,
+      resultHistory: [],
+      selectedResultId: null,
       outputs: null,
       error: null,
       validationError: null,
@@ -1252,6 +1272,8 @@ export class App {
       progress: 0,
       speed: null,
       remaining: null,
+      resultHistory: [],
+      selectedResultId: null,
       outputs: null,
       error: null,
       validationError: null,
@@ -1832,10 +1854,16 @@ export class App {
       this.releaseMergeSequence();
       this.releaseAudioMixPreview();
       this.releaseAudioMixTimeline();
+      this.releaseGeneratedResults();
       return;
     }
 
-    this.dom.detail.dataset.workspace = mergeJob
+    const resultState = this.resultHistoryFor(job);
+    const showingResults = Boolean(resultState.resultHistory.length && job.previewMode === 'result');
+
+    this.dom.detail.dataset.workspace = showingResults
+      ? 'results'
+      : mergeJob
       ? 'video-merge'
       : (audioMixJob ? 'video-add-audio' : (quickTool ? 'quick-tool' : 'converter'));
     this.dom.detail.dataset.status = job.status === 'done' && job.dirtySinceOutput ? 'ready' : job.status;
@@ -1861,6 +1889,7 @@ export class App {
     if (this.quickOutputPreview && this.quickOutputPreview.jobId !== job.id) this.releaseQuickOutputPreview();
     if (this.audioMixPreview && this.audioMixPreview.jobId !== job.id) this.releaseAudioMixPreview();
     if (this.audioMixTimeline && this.audioMixTimeline.jobId !== job.id) this.releaseAudioMixTimeline();
+    if (this.generatedResults && this.generatedResults.jobId !== job.id) this.releaseGeneratedResults();
 
     this.dom.detailName.textContent = mergeJob
       ? 'Unir videos'
@@ -1872,6 +1901,13 @@ export class App {
       : quickTool
       ? `${job.name} · ${this.describeSource(job)}`
       : this.describeSource(job);
+
+    if (showingResults) {
+      this.renderResultWorkspace(job);
+      return;
+    }
+
+    this.releaseGeneratedResults();
 
     if (job.needsRelink || this.missingProjectAssets(job).length) {
       this.renderRelinkState(job);
@@ -2098,10 +2134,221 @@ export class App {
     return parts.join(' · ');
   }
 
+  resultHistoryFor(job) {
+    const existing = Array.isArray(job.resultHistory) ? job.resultHistory : null;
+    if (
+      existing
+      && (existing.length || !job.outputs?.length)
+      && existing.every((result) => (
+        result?.schemaVersion === RESULT_HISTORY_SCHEMA_VERSION
+        && result.projectId === job.id
+        && Array.isArray(result.outputs)
+      ))
+    ) {
+      const latest = existing.at(-1) || null;
+      const selectedId = existing.some((result) => result.id === job.selectedResultId)
+        ? job.selectedResultId
+        : latest?.id || null;
+      const history = { resultHistory: existing, selectedResultId: selectedId };
+      const compatibility = resultCompatibilityPatch(history);
+      if (
+        job.outputs !== compatibility.outputs
+        || job.downloadName !== compatibility.downloadName
+        || job.outputSize !== compatibility.outputSize
+        || job.selectedResultId !== compatibility.selectedResultId
+      ) Object.assign(job, compatibility);
+      return history;
+    }
+    const history = normalizeResultHistory(job, { projectId: job.id });
+    Object.assign(job, resultCompatibilityPatch(history));
+    return history;
+  }
+
+  resultHistoryBytes(job) {
+    return this.resultHistoryFor(job).resultHistory
+      .reduce((total, result) => total + Number(result.totalSize || 0), 0);
+  }
+
+  resultOperationLabel(result) {
+    if (result.metadata?.label) return result.metadata.label;
+    if (result.forgeToolId === MERGE_TOOL_ID) return 'Unión de videos';
+    if (result.forgeToolId === ADD_AUDIO_TOOL_ID) return 'Video con audio';
+    const quick = focusedQuickTool(result.forgeToolId);
+    if (quick?.title) return quick.title;
+    return {
+      convert: 'Conversión',
+      remux: 'Cambio de contenedor',
+      'extract-audio': 'Audio extraído',
+      gif: 'GIF animado',
+      compress: 'Video comprimido',
+      frames: 'Fotogramas extraídos',
+      thumbnail: 'Miniatura',
+      raw: 'Resultado personalizado',
+      'join-videos': 'Unión de videos',
+      'add-audio-to-video': 'Video con audio',
+    }[result.operation] || 'Archivo generado';
+  }
+
+  resultSource(job) {
+    if (this.isMergeJob(job)) {
+      return {
+        name: `${job.clips.length} ${job.clips.length === 1 ? 'video' : 'videos'} de origen`,
+        size: job.size,
+        type: 'video/*',
+        info: job.info,
+      };
+    }
+    if (this.isAddAudioJob(job)) {
+      return {
+        name: job.video?.name || job.name,
+        size: job.video?.size || job.size,
+        type: job.video?.file?.type || 'video/*',
+        info: job.video?.info || job.info,
+      };
+    }
+    return {
+      name: job.name,
+      size: job.size,
+      type: job.type || job.file?.type || '',
+      info: job.info,
+    };
+  }
+
+  generatedResultEntries(job, history = this.resultHistoryFor(job)) {
+    const newest = history.resultHistory.at(-1);
+    return [...history.resultHistory].reverse().map((result) => {
+      const onlyOutput = result.outputs.length === 1 ? result.outputs[0] : null;
+      const playableKind = ['audio', 'video', 'image'].includes(result.mediaKind)
+        ? result.mediaKind
+        : 'file';
+      return {
+        id: result.id,
+        name: result.downloadName,
+        downloadName: result.downloadName,
+        blob: onlyOutput?.blob || null,
+        type: onlyOutput?.type || result.metadata?.mime || '',
+        mime: result.metadata?.mime || onlyOutput?.type || '',
+        kind: onlyOutput ? playableKind : 'file',
+        size: result.totalSize,
+        duration: result.metadata?.duration,
+        width: result.metadata?.width,
+        height: result.metadata?.height,
+        metadata: result.metadata,
+        createdAt: result.createdAt,
+        operation: this.resultOperationLabel(result),
+        current: result.id === newest?.id,
+        stale: result.id !== newest?.id,
+      };
+    });
+  }
+
+  generatedResultsFor(job) {
+    const history = this.resultHistoryFor(job);
+    const config = {
+      source: this.resultSource(job),
+      results: this.generatedResultEntries(job, history),
+      activeId: history.selectedResultId,
+      title: history.resultHistory.length === 1 ? 'Tu resultado está listo' : 'Tus resultados están listos',
+      storageStatus: this.projectStorageState || (this.projectPersistenceEnabled() ? 'saving' : 'off'),
+      allowRemove: !['queued', 'running'].includes(job.status),
+      onSelect: (entry) => {
+        const current = this.resultHistoryFor(job);
+        const next = selectResult(current, entry.id, { projectId: job.id });
+        Object.assign(job, resultCompatibilityPatch(next));
+        this.scheduleProjectSave();
+      },
+      onDownload: (entry) => this.downloadResult(job, entry.id),
+      onRemove: (entry) => this.removeGeneratedResult(job, entry.id),
+      onCreateAnother: () => {
+        job.previewMode = 'source';
+        this.releaseGeneratedResults();
+        this.paintDetail();
+        requestAnimationFrame(() => this.dom.controls.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+      },
+    };
+
+    if (this.generatedResults?.jobId === job.id) {
+      this.generatedResults.control.update(config);
+      return this.generatedResults.control.node;
+    }
+    this.releaseGeneratedResults();
+    const control = createGeneratedResults(config);
+    this.generatedResults = { jobId: job.id, control };
+    return control.node;
+  }
+
+  async removeGeneratedResult(job, resultId) {
+    if (!job || ['queued', 'running'].includes(job.status)) return;
+    const current = this.resultHistoryFor(job);
+    const target = current.resultHistory.find((result) => result.id === String(resultId));
+    if (!target) return;
+    const sure = await this.confirm({
+      title: '¿Quitar esta versión generada?',
+      message: `Se borrará «${target.downloadName}» y su copia local. El archivo original y las demás versiones no se modifican.`,
+      confirmLabel: 'Quitar versión',
+      danger: true,
+    });
+    if (!sure || !this.jobs.includes(job)) return;
+
+    const deletingLatest = current.resultHistory.at(-1)?.id === target.id;
+    const next = deleteResult(current, target.id, { projectId: job.id });
+    this.releaseGeneratedResults();
+    Object.assign(job, resultCompatibilityPatch(next));
+    const latest = next.resultHistory.at(-1) || null;
+
+    if (deletingLatest) {
+      if (this.isMergeJob(job) || this.isAddAudioJob(job)) {
+        job.exportedRevision = Number.isInteger(latest?.revision) ? latest.revision : null;
+      } else if (this.quickToolFor(job)) {
+        // Older generations predate the current single-signature field. Keep
+        // them downloadable, but mark the current edits as needing a new run.
+        job.quickExportSignature = null;
+        job.dirtySinceOutput = Boolean(latest);
+      }
+    }
+
+    if (this.isMergeJob(job)) this.syncMergeProject(job);
+    else if (this.isAddAudioJob(job)) this.syncAddAudioProject(job);
+    else if (!latest) {
+      job.status = job.info ? 'ready' : job.status;
+      job.progress = 0;
+      job.error = null;
+      job.dirtySinceOutput = false;
+    }
+
+    job.previewMode = latest ? 'result' : 'source';
+    this.scheduleProjectSave({ immediate: true, force: true });
+    this.paintQueue();
+    this.paintDetail();
+    this.toast(latest ? 'Versión eliminada del historial local.' : 'Resultado eliminado; el proyecto sigue disponible.');
+  }
+
+  renderResultWorkspace(job) {
+    this.releasePreview();
+    this.releaseQuickSourcePreview();
+    this.releaseQuickOutputPreview();
+    this.releaseScrubber();
+    this.releaseCropper();
+    this.releaseMergeSourcePreview();
+    this.releaseMergeSequence();
+    this.releaseAudioMixPreview();
+    this.releaseAudioMixTimeline();
+    this.dom.preview.dataset.job = job.id;
+    this.dom.preview.replaceChildren(this.generatedResultsFor(job));
+    this.dom.controls.replaceChildren();
+    this.dom.commandBlock.hidden = true;
+    this.dom.quickFootSummary.hidden = true;
+  }
+
   releasePreview() {
     if (!this.previewUrl) return;
     URL.revokeObjectURL(this.previewUrl);
     this.previewUrl = null;
+  }
+
+  releaseGeneratedResults() {
+    this.generatedResults?.control.destroy();
+    this.generatedResults = null;
   }
 
   releaseQuickOutputPreview() {
@@ -3079,7 +3326,7 @@ export class App {
 
   addAudioValidation(job) {
     const validation = validateAddAudioProject(job, job?.options);
-    const retainedBytes = Number(job?.outputSize) || 0;
+    const retainedBytes = this.resultHistoryBytes(job);
     if (
       validation.ok
       && retainedBytes > 0
@@ -3089,7 +3336,7 @@ export class App {
         ...validation,
         ok: false,
         code: 'retained-output-memory-limit',
-        message: 'El resultado anterior y esta nueva exportación superarían el límite seguro de memoria. Descargá el anterior y creá un proyecto nuevo para esta versión.',
+        message: 'Los resultados guardados y esta nueva exportación superarían el límite seguro de memoria. Descargalos y creá un proyecto nuevo para esta versión.',
       };
     }
     return validation;
@@ -4749,6 +4996,26 @@ export class App {
     }
     if (job.status === 'probing') return;
 
+    const history = this.resultHistoryFor(job);
+    if (history.resultHistory.length) {
+      const count = history.resultHistory.length;
+      const showResults = el('button', {
+        type: 'button',
+        class: 'text-button',
+        text: count === 1 ? 'Ver resultado' : `Ver ${count} resultados`,
+        dataset: { action: 'preview-result' },
+      });
+      container.append(el('section', { class: 'generated-results-return' }, [
+        el('div', {}, [
+          el('strong', { text: count === 1 ? 'Tenés un archivo generado' : `Tenés ${count} versiones generadas` }),
+          el('span', { text: count === 1
+            ? 'Podés reproducirlo y descargarlo sin perder estos ajustes.'
+            : 'Podés reproducirlas y descargarlas sin perder estos ajustes.' }),
+        ]),
+        showResults,
+      ]));
+    }
+
     const operations = operationsFor(job.info);
     if (!operations.some((operation) => operation.id === job.operation)) job.operation = operations[0].id;
     const operation = operationById(job.operation);
@@ -5283,11 +5550,11 @@ export class App {
     try {
       if (this.isAddAudioJob(job)) {
         addAudioSnapshot = job.pendingAddAudioSnapshot || createAddAudioSnapshot(job);
-        const retainedBytes = Number(job.outputSize) || 0;
+        const retainedBytes = this.resultHistoryBytes(job);
         const validation = validateAddAudioProject(addAudioSnapshot, addAudioSnapshot.options);
         if (!validation.ok) throw new Error(validation.message);
         if (validation.estimatedWorkingBytes + retainedBytes > ADD_AUDIO_LIMITS.maxWorkingBytes) {
-          throw new Error('El resultado anterior y esta nueva exportación superarían el límite seguro de memoria. Descargá el anterior y quitá el proyecto antes de volver a procesar.');
+          throw new Error('Los resultados guardados y esta nueva exportación superarían el límite seguro de memoria. Descargalos y quitá el proyecto antes de volver a procesar.');
         }
         plan = buildAddAudioPlan(addAudioSnapshot.source, addAudioSnapshot.options);
       } else if (this.isMergeJob(job)) {
@@ -5349,12 +5616,54 @@ export class App {
 
     try {
       const { outputs } = await running.finished;
-      job.outputs = outputs.map((output) => ({
+      const completedOutputs = outputs.map((output) => ({
         name: output.name,
         blob: new Blob([output.bytes], { type: plan.mime }),
       }));
-      job.outputSize = job.outputs.reduce((total, output) => total + output.blob.size, 0);
-      job.downloadName = plan.downloadName;
+      const currentHistory = this.resultHistoryFor(job);
+      const outputExtension = String(plan.downloadName || completedOutputs[0]?.name || '')
+        .toLowerCase()
+        .match(/\.([a-z0-9]+)$/)?.[1] || '';
+      const optionFormats = [
+        formatById(job.options.format),
+        formatById(job.options.audioFormat),
+        formatById(job.options.imageFormat),
+      ].filter(Boolean);
+      const knownFormats = [...VIDEO_FORMATS, ...AUDIO_FORMATS, ...IMAGE_FORMATS];
+      const resultFormat = optionFormats.find((format) => (
+        format.mime === plan.mime && format.extension === outputExtension
+      ))
+        || knownFormats.find((format) => format.mime === plan.mime && format.extension === outputExtension)
+        || optionFormats.find((format) => format.mime === plan.mime)
+        || knownFormats.find((format) => format.extension === outputExtension)
+        || null;
+      const resultRevision = addAudioSnapshot?.revision ?? mergeSnapshot?.revision ?? job.revision;
+      const resultOperation = plan.operation || job.operation;
+      const audioTranscode = plan.mime?.startsWith('audio/')
+        && ['convert', 'extract-audio'].includes(resultOperation);
+      const nextHistory = appendResult(currentHistory, {
+        projectId: job.id,
+        createdAt: Date.now(),
+        operation: resultOperation,
+        forgeToolId: job.forgeToolId,
+        revision: resultRevision,
+        options: addAudioSnapshot?.options || mergeSnapshot?.options || job.options,
+        metadata: {
+          label: this.resultOperationLabel({ forgeToolId: job.forgeToolId, operation: resultOperation }),
+          mime: plan.mime,
+          format: resultFormat?.label || null,
+          codec: audioTranscode ? resultFormat?.encoders?.[0] || null : null,
+          bitrate: audioTranscode && !resultFormat?.lossless
+            ? Number(addAudioSnapshot?.options?.audioBitrate ?? mergeSnapshot?.options?.audioBitrate ?? job.options.audioBitrate) * 1000 || null
+            : null,
+          duration: Number.isFinite(plan.duration) && plan.duration > 0 ? plan.duration : null,
+          width: Number.isFinite(plan.width) && plan.width > 0 ? plan.width : null,
+          height: Number.isFinite(plan.height) && plan.height > 0 ? plan.height : null,
+        },
+        downloadName: plan.downloadName,
+        outputs: completedOutputs,
+      }, { projectId: job.id });
+      Object.assign(job, resultCompatibilityPatch(nextHistory));
       job.status = 'done';
       job.progress = 1;
       if (this.isAddAudioJob(job)) {
@@ -5365,7 +5674,7 @@ export class App {
         if (this.quickToolFor(job)) job.quickExportSignature = planToCommand(plan);
         job.dirtySinceOutput = false;
       }
-      if (this.quickToolFor(job) || this.isMergeJob(job) || this.isAddAudioJob(job)) job.previewMode = 'result';
+      job.previewMode = 'result';
 
       // The encoded bytes are useful only if the matching manifest commits.
       // Force a save even when a same-sized re-export has an identical cheap
@@ -5374,6 +5683,16 @@ export class App {
 
       const seconds = (performance.now() - startedAt) / 1000;
       this.appendLog(`Finished in ${formatDuration(seconds)} · ${formatBytes(job.outputSize)}`);
+      if (
+        job.id === this.selectedId
+        && typeof requestAnimationFrame === 'function'
+        && this.dom?.preview?.scrollIntoView
+      ) {
+        requestAnimationFrame(() => this.dom.preview.scrollIntoView({
+          behavior: globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+          block: 'start',
+        }));
+      }
     } catch (error) {
       job.status = error.cancelled ? 'cancelled' : 'failed';
       job.error = error.cancelled ? 'Cancelled' : error.message;
@@ -5385,6 +5704,15 @@ export class App {
       this.runningId = null;
       this.paintQueue();
       this.paintDetail();
+      if (
+        job.status === 'done'
+        && job.id === this.selectedId
+        && typeof requestAnimationFrame === 'function'
+      ) {
+        requestAnimationFrame(() => {
+          if (this.generatedResults?.jobId === job.id) this.generatedResults.control.focus();
+        });
+      }
     }
   }
 
@@ -5408,16 +5736,25 @@ export class App {
    * Downloads
    * ------------------------------------------------------------------ */
 
-  async downloadJob(job) {
-    if (!job.outputs?.length) return;
-    if (job.outputs.length === 1) {
-      downloadFile(job.downloadName, job.outputs[0].blob);
+  async downloadResult(job, resultId = null) {
+    if (!job) return;
+    const history = this.resultHistoryFor(job);
+    const result = resultId
+      ? history.resultHistory.find((candidate) => candidate.id === String(resultId))
+      : selectedResult(history);
+    if (!result?.outputs?.length) return;
+    if (result.outputs.length === 1) {
+      downloadFile(result.downloadName || result.outputs[0].name, result.outputs[0].blob);
       return;
     }
-    // Frame extraction produces a directory's worth of images, and handing
-    // someone forty separate download prompts is not a feature.
-    const zip = await createZip(job.outputs.map((output) => ({ name: output.name, blob: output.blob })));
-    downloadFile(job.downloadName, zip);
+    const entries = result.outputs.map((output) => ({ name: output.name, blob: output.blob }));
+    downloadFile(result.downloadName || 'media-forge.zip', await createZip(entries));
+  }
+
+  async downloadJob(job) {
+    const history = this.resultHistoryFor(job);
+    const latest = history.resultHistory.at(-1);
+    if (latest) await this.downloadResult(job, latest.id);
   }
 
   async downloadAll() {
@@ -5466,6 +5803,7 @@ export class App {
       this.releaseMergeSequence();
       this.releaseAudioMixPreview();
       this.releaseAudioMixTimeline();
+      this.releaseGeneratedResults();
       this.clearPickerIntent();
     });
     on(document, 'visibilitychange', () => {

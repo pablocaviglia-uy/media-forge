@@ -30,7 +30,9 @@ storage; that can be disabled or cleared at any time in **Configuración**.
 - Drag and drop files, or a whole folder
 - A queue that converts one file after another, with progress and an estimate
 - Cancel a conversion that is taking longer than it is worth
-- Preview the source, and download the result — or all of them, as a zip
+- A result-first workspace with local audio/video playback and image previews
+- Keep generated versions in each project; select, download or remove any one;
+  multi-file generations are bundled when needed
 - Recover projects, source files, options and completed results after a reload
 - Turn local project saving off, reconnect a missing source, or clear every
   saved copy from **Configuración**
@@ -156,6 +158,7 @@ src/
     merge.js          Ordered multi-file project state and immutable snapshots
     probe.js          ffprobe JSON, the log as a fallback, and progress
     quick-tools.js    Focused-tool contracts, safe limits and UI summaries
+    results.js        Generated-result history and compatibility projection
     zip.js            A store-only ZIP writer, for "download all"
 
   worker/
@@ -166,7 +169,9 @@ src/
     prefs.js          Small synchronous preferences in localStorage
     projects.js       Project manifests and media blobs in IndexedDB
 
-  ui/                 DOM helpers, focused editors, formatting, downloads
+  ui/
+    generated-results.js  Local player, active result and generation history
+    ...                   DOM helpers, focused editors, formatting, downloads
 ```
 
 A conversion goes: file dropped → copied to the local project store and probed
@@ -174,7 +179,8 @@ with `ffprobe` → the inspector builds `options` → `commands.js` turns those 
 a plan of one or more invocations → the worker writes the input into FFmpeg's
 in-memory filesystem and runs each step → progress arrives on FFmpeg's
 `-progress` pipe → the outputs are transferred back as bytes, turned into a
-`Blob`, and saved with the project. See
+`Blob`, appended as a new result generation, saved with the project, and
+rendered locally as the active result. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the details.
 
 ### Why the queue converts one file at a time
@@ -191,8 +197,10 @@ Media processing makes no network requests and the app has no backend to talk to
 With project saving enabled, source files, options and results are copied into
 same-origin IndexedDB so work can survive a reload. They remain on the device
 and are available only to this origin, but they still occupy disk space and the
-browser or user can delete them. Turning saving off stops future autosaves; the
-explicit **Borrar todos los proyectos locales** action removes previous copies.
+browser or user can delete them. Each saved generation adds its output blobs to
+that usage. Players and previews use temporary local Blob URLs; media is never
+sent elsewhere. Turning saving off stops future autosaves; the explicit
+**Borrar todos los proyectos locales** action removes previous copies.
 
 There is no `innerHTML` path that user data can reach, and file names — the only
 text that comes from outside — are set as `textContent`.
@@ -257,10 +265,11 @@ Worth knowing before you file an issue:
   reached, so a two-pass job reports each pass as half the work whether or not
   it takes half the time.
 - **Local storage is finite and browser-managed.** Saving a 500 MB source uses
-  roughly another 500 MB of disk before any result is retained. MediaForge
-  checks the reported quota and surfaces storage failures, but the browser may
-  evict best-effort data. **Configuración** can request persistent storage; the browser
-  decides whether to grant it.
+  roughly another 500 MB of disk before any result is retained, and every saved
+  generation consumes more. MediaForge checks the reported quota and surfaces
+  storage failures, but the browser may evict best-effort data.
+  **Configuración** can request persistent storage; the browser decides whether
+  to grant it.
 - **Private browsing is temporary.** A private window may reject local project
   storage or discard it when the private session ends. The converter remains
   usable for the current tab when saving cannot be opened.

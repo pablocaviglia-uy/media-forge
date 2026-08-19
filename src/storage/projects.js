@@ -9,6 +9,13 @@
  */
 
 import { mergeProjectInfo } from '../media/merge.js';
+import {
+  flattenResultOutputs,
+  hydrateResultHistory,
+  normalizeResultHistory,
+  resultCompatibilityPatch,
+  resultHistoryManifest,
+} from '../media/results.js';
 import { createPersistentId } from './ids.js';
 
 export const PROJECT_DB_NAME = 'media-forge-projects';
@@ -288,6 +295,9 @@ function outputDescriptor({ output, index, projectId, registry, blobs }) {
     schemaVersion: PROJECT_SCHEMA_VERSION,
     projectId,
     position: index,
+    resultId: asString(output?.resultId) || null,
+    resultPosition: finiteInteger(output?.resultPosition, 0),
+    resultOutputPosition: finiteInteger(output?.position, index),
     blobId,
     name: asString(output?.name, `output-${index + 1}`),
     size: Number(blob?.size ?? output?.size ?? 0) || 0,
@@ -396,7 +406,8 @@ export function serializeWorkspace(
         }));
       }
 
-      const projectOutputs = Array.from(job.outputs || []).map((output, index) => outputDescriptor({
+      const resultState = normalizeResultHistory(job, { projectId: id, now });
+      const projectOutputs = flattenResultOutputs(resultState).map((output, index) => outputDescriptor({
         output, index, projectId: id, registry, blobs,
       }));
       assets.push(...projectAssets);
@@ -427,6 +438,8 @@ export function serializeWorkspace(
         addAudioTouchedOptions: copyData(job.addAudioTouchedOptions || {}, `project(${id}).addAudioTouchedOptions`),
         selectedClipId: job.selectedClipId ? String(job.selectedClipId) : null,
         downloadName: job.downloadName ? String(job.downloadName) : null,
+        resultHistory: resultHistoryManifest(resultState),
+        selectedResultId: resultState.selectedResultId,
         assetIds: projectAssets.map((asset) => asset.id),
         outputIds: projectOutputs.map((output) => output.id),
       };
@@ -555,7 +568,16 @@ function hydrateOutputs(records, blobMap, registry, issues) {
       continue;
     }
     registry.remember(blob, record.blobId, `output:${record.id}`);
-    const output = { id: record.id, name: record.name, blob };
+    const output = {
+      id: record.id,
+      projectId: record.projectId,
+      resultId: record.resultId || null,
+      position: finiteInteger(record.resultOutputPosition, finiteInteger(record.position, 0)),
+      name: record.name,
+      size: Number(record.size || blob.size || 0),
+      type: record.type || blob.type || '',
+      blob,
+    };
     rememberPersistenceRef(output, { recordId: record.id, blobId: record.blobId });
     hydrated.push(output);
   }
@@ -580,8 +602,10 @@ function restoredStatus(project, projectAssets, outputs, issues) {
   return 'ready';
 }
 
-function commonJob(project, projectAssets, hydratedOutputs, issues) {
-  const outputSize = hydratedOutputs.reduce((sum, output) => sum + Number(output.blob.size || 0), 0);
+function commonJob(project, projectAssets, resultState, issues) {
+  const compatibility = resultCompatibilityPatch(resultState);
+  const hydratedOutputs = compatibility.outputs || [];
+  const outputSize = compatibility.outputSize;
   const missing = projectAssets.some((asset) => asset.needsRelink);
   const status = restoredStatus(project, projectAssets, hydratedOutputs, issues);
   return {
@@ -601,9 +625,11 @@ function commonJob(project, projectAssets, hydratedOutputs, issues) {
     progress: status === 'done' ? 1 : 0,
     speed: null,
     remaining: null,
+    resultHistory: resultState.resultHistory,
+    selectedResultId: resultState.selectedResultId,
     outputs: hydratedOutputs.length ? hydratedOutputs : null,
     outputSize,
-    downloadName: project.downloadName || null,
+    downloadName: compatibility.downloadName || project.downloadName || null,
     error: missing
       ? 'Faltan uno o más archivos locales. Volvé a vincularlos para continuar.'
       : (status === 'failed' ? 'La tarea anterior falló y puede volver a intentarse.' : null),
@@ -718,7 +744,72 @@ export function hydrateWorkspace(
     }
     const outputRecords = expectedOutputIds.map((id) => outputRecordMap.get(id)).filter(Boolean);
     const projectOutputs = hydrateOutputs(outputRecords, blobMap, registry, issues);
-    const common = commonJob(project, projectAssets, projectOutputs, issues);
+    let resultState;
+    try {
+      resultState = hydrateResultHistory({
+        projectId: project.id,
+        resultHistory: project.resultHistory,
+        selectedResultId: project.selectedResultId,
+        outputs: projectOutputs,
+        legacy: {
+          createdAt: project.updatedAt || project.createdAt,
+          operation: project.operation,
+          forgeToolId: project.forgeToolId,
+          revision: project.exportedRevision ?? project.revision,
+          options: project.options,
+          downloadName: project.downloadName,
+        },
+      }, {
+        onIssue(resultIssue) {
+          if (resultIssue?.code === 'incomplete-result') {
+            issues.push(makeIssue(
+              'incomplete-result',
+              `El resultado ${resultIssue.resultId || '(sin identificador)'} está incompleto y no se restauró.`,
+              {
+                projectId: project.id,
+                resultId: resultIssue.resultId,
+                expectedOutputCount: resultIssue.expectedOutputCount,
+                availableOutputCount: resultIssue.availableOutputCount,
+                missingOutputIds: [...resultIssue.missingOutputIds],
+              },
+            ));
+          } else if (resultIssue?.code === 'unsupported-result-schema') {
+            issues.push(makeIssue(
+              'unsupported-schema',
+              `El historial del proyecto ${project.id} fue creado por una versión más nueva.`,
+              {
+                store: 'resultHistory',
+                projectId: project.id,
+                resultId: resultIssue.resultId,
+                schemaVersion: resultIssue.schemaVersion,
+                supportedSchemaVersion: resultIssue.supportedSchemaVersion,
+              },
+            ));
+          }
+        },
+      });
+    } catch (error) {
+      // Result manifests are nested user data. One corrupt history must not
+      // prevent unrelated projects from loading; `invalid-record` also invokes
+      // App's existing protected/read-only policy so the raw records are not
+      // overwritten by a later autosave.
+      issues.push(makeIssue(
+        'invalid-record',
+        `Se ignoró el historial de resultados dañado del proyecto ${project.id}.`,
+        {
+          store: 'resultHistory',
+          projectId: project.id,
+          causeCode: error?.code || null,
+        },
+      ));
+      resultState = hydrateResultHistory({
+        projectId: project.id,
+        resultHistory: [],
+        selectedResultId: null,
+        outputs: [],
+      });
+    }
+    const common = commonJob(project, projectAssets, resultState, issues);
 
     if (project.kind === 'merge') {
       const clips = projectAssets.filter((asset) => asset.role === 'clip');
@@ -1308,6 +1399,8 @@ function metadataOnlyGraph(nextGraph, previousGraph) {
       ...project,
       status: 'ready',
       outputIds: retained.map((output) => output.id),
+      resultHistory: Array.isArray(previous?.resultHistory) ? previous.resultHistory : null,
+      selectedResultId: previous?.selectedResultId || null,
       exportedRevision: previous?.exportedRevision ?? null,
       quickExportSignature: previous?.quickExportSignature ?? null,
       downloadName: previous?.downloadName ?? project.downloadName,
