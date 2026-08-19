@@ -23,6 +23,7 @@ const AVAILABLE_ENTRY_POINTS = new Set([
   'video-converter',
   'audio-converter',
   'video-trim',
+  'video-crop',
   'audio-trim',
   'video-rotate',
   'video-flip',

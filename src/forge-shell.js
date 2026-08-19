@@ -61,6 +61,13 @@ if (document.documentElement.dataset.interface === 'forge') {
       options: { resolution: '720' },
       single: true,
     },
+    'video-crop': {
+      operation: 'convert',
+      accept: 'video/*',
+      format: 'mp4-h264',
+      options: { cropAspect: 'free' },
+      single: true,
+    },
   };
 
   const state = {

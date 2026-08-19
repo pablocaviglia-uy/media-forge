@@ -34,8 +34,8 @@ the conversion engine.
   contract.
 - **Gate B approved:** Forge OS is the selected visual direction.
 - **Gate C ready for review:** the interactive vertical now includes the new
-  shell, intent search, workspace launcher, seven honest catalogue entry
-  points and four focused Quick Tools: trim, rotate, flip and resize video.
+  shell, intent search, workspace launcher, eight honest catalogue entry
+  points and five focused Quick Tools: trim, crop, rotate, flip and resize video.
   Each one has a local-first preview, purpose-built controls, source/result
   review and recoverable processing states.
 

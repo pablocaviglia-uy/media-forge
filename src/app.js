@@ -20,6 +20,7 @@ import {
 import { prefs, resolveTheme } from './storage/prefs.js';
 import { createEngine, isolationStatus } from './ffmpeg/client.js';
 import { createScrubber } from './ui/scrubber.js';
+import { createCropper } from './ui/cropper.js';
 import { supportsFormat } from './ffmpeg/capabilities.js';
 import { buildPlan, planToCommand, operationsFor, operationById, DEFAULT_OPTIONS } from './media/commands.js';
 import {
@@ -30,15 +31,19 @@ import {
 } from './media/formats.js';
 import { createZip } from './media/zip.js';
 import {
+  CROP_ASPECT_PRESETS,
+  cropRectForAspect,
   defaultResizeResolution,
   describeFocusedQuickTransformation,
   describeTrimRange,
   focusedQuickTool,
+  fullCropRect,
   normalizeFocusedQuickOptions,
   quickVideoFormat,
   supportsFocusedQuickTool,
   trimRange,
   trimOptionsForRun,
+  visibleVideoDimensions,
 } from './media/quick-tools.js';
 
 /**
@@ -86,6 +91,7 @@ export class App {
     this.quickSourcePreview = null;
     this.quickOutputPreview = null;
     this.scrubber = null;
+    this.cropper = null;
 
     this.dom = {
       app: $('#app'),
@@ -439,6 +445,12 @@ export class App {
     job.options.trimStart = null;
     job.options.trimEnd = null;
     job.options.fps = 'source';
+    job.options.cropAspect = 'free';
+    job.options.cropX = null;
+    job.options.cropY = null;
+    job.options.cropWidth = null;
+    job.options.cropHeight = null;
+    job.cropPreviewUnavailable = false;
 
     if (tool.id === 'video-rotate') {
       job.options.rotate = tool.defaultOptions.rotate;
@@ -455,6 +467,11 @@ export class App {
       if (!job.options.resolution) {
         job.validationError = 'Este video ya está en el tamaño mínimo disponible.';
       }
+    } else if (tool.id === 'video-crop') {
+      job.options.rotate = 0;
+      job.options.flip = 'none';
+      job.options.resolution = 'source';
+      Object.assign(job.options, fullCropRect(job.info));
     }
 
     job.quickToolInitialised = tool.id;
@@ -481,6 +498,7 @@ export class App {
       this.releaseQuickSourcePreview();
       this.releaseQuickOutputPreview();
       this.releaseScrubber();
+      this.releaseCropper();
       return;
     }
 
@@ -492,6 +510,7 @@ export class App {
     // Selecting a different file means the timeline belongs to a file that is
     // no longer on screen, and its `<video>` is still holding the old one open.
     if (this.scrubber && this.scrubber.jobId !== job.id) this.releaseScrubber();
+    if (this.cropper && (this.cropper.jobId !== job.id || quickTool?.focus !== 'crop')) this.releaseCropper();
     if (this.quickSourcePreview && this.quickSourcePreview.jobId !== job.id) this.releaseQuickSourcePreview();
     if (this.quickOutputPreview && this.quickOutputPreview.jobId !== job.id) this.releaseQuickOutputPreview();
 
@@ -507,6 +526,7 @@ export class App {
     } else {
       this.releaseQuickSourcePreview();
       this.releaseQuickOutputPreview();
+      this.releaseCropper();
       this.renderPreview(job);
     }
     this.renderControls(job);
@@ -663,6 +683,14 @@ export class App {
     if (metadataRotation === 90 || metadataRotation === 270) [width, height] = [height, width];
     const source = { width, height };
 
+    if (job.forgeToolId === 'video-crop') {
+      const crop = cropRectForAspect(job.info, 'free', options);
+      if (crop) {
+        width = crop.cropWidth;
+        height = crop.cropHeight;
+      }
+    }
+
     const requestedRotation = ((Number(options.rotate) || 0) % 360 + 360) % 360;
     if (requestedRotation === 90 || requestedRotation === 270) [width, height] = [height, width];
 
@@ -787,6 +815,69 @@ export class App {
     this.scrubber = null;
   }
 
+  cropperRect(job) {
+    const rect = cropRectForAspect(job.info, 'free', job.options) || fullCropRect(job.info);
+    return rect ? {
+      x: rect.cropX,
+      y: rect.cropY,
+      width: rect.cropWidth,
+      height: rect.cropHeight,
+    } : null;
+  }
+
+  cropperFor(job) {
+    const dimensions = visibleVideoDimensions(job.info);
+    const rect = this.cropperRect(job);
+    if (!dimensions || !rect) {
+      return el('p', { class: 'preview-note', text: 'No pudimos medir el cuadro de este video.' });
+    }
+
+    const preset = CROP_ASPECT_PRESETS.find((item) => item.id === job.options.cropAspect);
+    if (this.cropper?.jobId === job.id) {
+      this.cropper.control.setRect(rect);
+      this.cropper.control.setAspectRatio(preset?.ratio || null);
+      this.cropper.control.setDisabled(job.status === 'running' || job.status === 'queued');
+      return this.cropper.control.node;
+    }
+
+    this.releaseCropper();
+    const control = createCropper({
+      file: job.file,
+      dimensions,
+      initialRect: rect,
+      aspectRatio: preset?.ratio || null,
+      onChange: (next) => {
+        Object.assign(job.options, {
+          cropX: next.x,
+          cropY: next.y,
+          cropWidth: next.width,
+          cropHeight: next.height,
+        });
+        job.previewMode = 'source';
+        if (!job.cropPreviewUnavailable) job.validationError = null;
+        if (job.status === 'done') job.dirtySinceOutput = true;
+        this.scheduleCommandPreview();
+        this.paintQueue();
+        this.updateQuickCropSummary(job);
+      },
+      onPreviewError: () => {
+        job.cropPreviewUnavailable = true;
+        job.validationError = 'Este navegador no puede mostrar este formato. Convertí el video a MP4 y después volvé a recortarlo.';
+        this.scheduleCommandPreview();
+        this.paintQueue();
+        this.updateQuickCropSummary(job);
+      },
+    });
+    this.cropper = { jobId: job.id, control };
+    control.setDisabled(job.status === 'running' || job.status === 'queued');
+    return control.node;
+  }
+
+  releaseCropper() {
+    this.cropper?.control.destroy();
+    this.cropper = null;
+  }
+
   /**
    * The preview plays the *source*, using the browser's own decoder rather
    * than FFmpeg. For an MKV or an AVI the browser will decline, and that is
@@ -834,13 +925,15 @@ export class App {
         return 'Elegí si querés voltear el video en horizontal o en vertical.';
       case 'resize':
         return 'Elegí un tamaño que reduzca realmente este video.';
+      case 'crop':
+        return 'Reducí o mové el marco para definir un encuadre distinto del original.';
       default:
         return 'Revisá los ajustes antes de crear el resultado.';
     }
   }
 
   quickJobRunnable(job, tool = this.quickToolFor(job)) {
-    if (!tool || !job?.info) return false;
+    if (!tool || !job?.info || job.validationError || job.cropPreviewUnavailable) return false;
     if (tool.focus === 'trim') return Boolean(trimOptionsForRun(job.info, job.options));
     return Boolean(normalizeFocusedQuickOptions(tool.id, job.options, job.info));
   }
@@ -886,6 +979,12 @@ export class App {
       return {
         title: 'Procesamiento cancelado',
         detail: `Tus ajustes siguen intactos y podés volver a intentarlo.${previous}`,
+      };
+    }
+    if (job.status === 'ready' && tool?.focus === 'crop' && !this.quickJobRunnable(job, tool)) {
+      return {
+        title: 'Definí el encuadre',
+        detail: 'Mové los bordes sobre el video o elegí una relación de aspecto.',
       };
     }
     return { title: 'Listo para procesar', detail: 'El resultado se creará en este dispositivo.' };
@@ -1131,6 +1230,27 @@ export class App {
   }
 
   quickTransformChoiceConfig(job, tool) {
+    if (tool.id === 'video-crop') {
+      const notes = {
+        free: 'Mové cada borde',
+        '1:1': 'Cuadrado',
+        '16:9': 'Panorámico',
+        '9:16': 'Vertical',
+        '4:5': 'Social',
+      };
+      return {
+        key: 'cropAspect',
+        title: 'Relación de aspecto',
+        description: 'Elegí un formato o dejalo libre para ajustar cada borde.',
+        columns: 3,
+        items: CROP_ASPECT_PRESETS.map((preset) => ({
+          value: preset.id,
+          label: preset.label,
+          meta: notes[preset.id],
+        })),
+        onSelect: (value) => this.setCropAspect(job, value),
+      };
+    }
     if (tool.id === 'video-rotate') {
       return {
         key: 'rotate',
@@ -1213,7 +1333,10 @@ export class App {
         el('strong', { text: item.label }),
         el('small', { text: item.meta }),
       ]);
-      button.addEventListener('click', () => this.setJobOption(job, config.key, item.value));
+      button.addEventListener('click', () => {
+        if (config.onSelect) config.onSelect(item.value);
+        else this.setJobOption(job, config.key, item.value);
+      });
       button.addEventListener('keydown', (event) => {
         if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
         const buttons = Array.from(grid.querySelectorAll('[role="radio"]'));
@@ -1239,12 +1362,18 @@ export class App {
     return el('div', { class: 'quick-dimension-summary' }, [
       el('div', {}, [
         el('span', { text: 'Original' }),
-        el('strong', { text: `${dimensions.source.width}×${dimensions.source.height}` }),
+        el('strong', {
+          text: `${dimensions.source.width}×${dimensions.source.height}`,
+          dataset: { quickDimension: 'source' },
+        }),
       ]),
       el('span', { class: 'quick-dimension-arrow', text: '→', attrs: { 'aria-hidden': 'true' } }),
       el('div', {}, [
         el('span', { text: 'Resultado estimado' }),
-        el('output', { text: `${dimensions.output.width}×${dimensions.output.height}` }),
+        el('output', {
+          text: `${dimensions.output.width}×${dimensions.output.height}`,
+          dataset: { quickDimension: 'output' },
+        }),
       ]),
     ]);
   }
@@ -1290,10 +1419,17 @@ export class App {
       previewContent.append(this.quickProcessingCard(job));
     } else if (showingResult) {
       this.pauseQuickSourcePreview();
+      this.cropper?.control.setDisabled(true);
       previewContent.append(this.quickOutputPreviewFor(job));
     } else {
       this.pauseQuickOutputPreview();
-      previewContent.append(this.quickSourcePreviewFor(job, tool));
+      if (tool.focus === 'crop') {
+        this.releaseQuickSourcePreview();
+        previewContent.append(this.cropperFor(job));
+      } else {
+        this.releaseCropper();
+        previewContent.append(this.quickSourcePreviewFor(job, tool));
+      }
     }
 
     const canvas = el('section', { class: 'quick-canvas' }, [
@@ -1362,6 +1498,27 @@ export class App {
     }
     this.renderQuickFooter(job, tool);
 
+    this.renderDetailActions(job, tool);
+  }
+
+  updateQuickCropSummary(job) {
+    const tool = this.quickToolFor(job);
+    if (!job?.info || this.selectedId !== job.id || tool?.focus !== 'crop') return;
+    const dimensions = this.quickTransformDimensions(job);
+    if (dimensions) {
+      const source = this.dom.controls.querySelector('[data-quick-dimension="source"]');
+      const output = this.dom.controls.querySelector('[data-quick-dimension="output"]');
+      if (source) source.textContent = `${dimensions.source.width}×${dimensions.source.height}`;
+      if (output) output.textContent = `${dimensions.output.width}×${dimensions.output.height}`;
+    }
+    const resultTab = this.dom.controls.querySelector('[data-action="preview-result"]');
+    if (resultTab) {
+      const resultAvailable = Boolean(job.outputs?.length);
+      resultTab.textContent = resultAvailable && (job.dirtySinceOutput || job.status !== 'done')
+        ? 'Resultado anterior'
+        : 'Resultado';
+    }
+    this.updateQuickProgress(job);
     this.renderDetailActions(job, tool);
   }
 
@@ -1529,13 +1686,33 @@ export class App {
     return el('span', { class: 'control-switch' }, [input, el('span', { text: label })]);
   }
 
+  setCropAspect(job, value) {
+    const rect = cropRectForAspect(job.info, value, job.options);
+    if (!rect) return;
+    if (this.dom.controls.contains(document.activeElement)) {
+      job.pendingQuickFocus = { key: 'cropAspect', value: String(value) };
+    }
+    job.options.cropAspect = value;
+    Object.assign(job.options, rect);
+    job.previewMode = 'source';
+    if (!job.cropPreviewUnavailable) job.validationError = null;
+    if (job.status === 'done') job.dirtySinceOutput = true;
+
+    const preset = CROP_ASPECT_PRESETS.find((item) => item.id === value);
+    this.cropper?.control.setAspectRatio(preset?.ratio || null);
+    this.cropper?.control.setRect(this.cropperRect(job));
+    this.scheduleCommandPreview();
+    this.paintQueue();
+    if (this.selectedId === job.id) this.paintDetail();
+  }
+
   setJobOption(job, key, value) {
     if (this.dom.controls.contains(document.activeElement)) {
       job.pendingQuickFocus = { key, value: String(value) };
     }
     job.options[key] = value;
     job.previewMode = 'source';
-    job.validationError = null;
+    if (!job.cropPreviewUnavailable) job.validationError = null;
     if (job.status === 'done') job.dirtySinceOutput = true;
     if (key === 'format') prefs.set('preset', value);
     this.scheduleCommandPreview();
@@ -1793,6 +1970,12 @@ export class App {
     const tool = this.quickToolFor(job);
     if (!tool) return true;
     if (!job.info) return false;
+    if (tool.focus === 'crop' && job.cropPreviewUnavailable) {
+      job.validationError = 'Este navegador no puede mostrar este formato. Convertí el video a MP4 y después volvé a recortarlo.';
+      if (notify) this.toast(job.validationError, { kind: 'error', duration: 6500 });
+      this.paintDetail();
+      return false;
+    }
 
     const normalised = tool.focus === 'trim'
       ? trimOptionsForRun(job.info, job.options)
@@ -1808,9 +1991,20 @@ export class App {
     // tools deliberately own only their primary transformation, so unrelated
     // settings from a previous generic conversion cannot leak into the result.
     Object.assign(job.options, normalised);
+    if (tool.focus !== 'crop') {
+      job.options.cropAspect = 'free';
+      job.options.cropX = null;
+      job.options.cropY = null;
+      job.options.cropWidth = null;
+      job.options.cropHeight = null;
+    }
     if (tool.focus === 'rotate') job.options.flip = 'none';
     if (tool.focus === 'flip') job.options.rotate = 0;
     if (tool.focus === 'resize') {
+      job.options.rotate = 0;
+      job.options.flip = 'none';
+    }
+    if (tool.focus === 'crop') {
       job.options.rotate = 0;
       job.options.flip = 'none';
     }
@@ -1997,6 +2191,7 @@ export class App {
       this.releaseQuickOutputPreview();
       this.releasePreview();
       this.releaseScrubber();
+      this.releaseCropper();
     });
     on(window, 'pageshow', (event) => {
       if (!event.persisted) return;

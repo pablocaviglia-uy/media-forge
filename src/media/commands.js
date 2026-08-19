@@ -26,6 +26,7 @@ import {
   remuxContainerById,
 } from './formats.js';
 import { formatTimestamp } from '../ui/dom.js';
+import { normalizeCropRect } from './quick-tools.js';
 
 /**
  * @typedef {object} Plan
@@ -146,6 +147,13 @@ export const DEFAULT_OPTIONS = {
   trimEnd: null,
   rotate: 0, // degrees clockwise: 0, 90, 180, 270
   flip: 'none', // none | horizontal | vertical
+  // Visible-frame pixels. FFmpeg auto-applies the file's orientation before
+  // filters, so these coordinates match the cropper even for phone videos.
+  cropAspect: 'free',
+  cropX: null,
+  cropY: null,
+  cropWidth: null,
+  cropHeight: null,
   evenDimensions: false,
   gifFps: 12,
   gifWidth: 480,
@@ -233,14 +241,17 @@ function rotationFilters(options) {
 /**
  * The video filter chain, in the order that costs least and surprises least:
  * drop frames first so nothing downstream works on frames that get thrown
- * away, then rotate, then scale — so a chosen height describes the picture
- * the user will actually see, not the one before it was turned on its side.
+ * away, then crop the auto-oriented picture, then rotate, then scale — so both
+ * the crop coordinates and a chosen height describe the picture the user
+ * actually sees, not its stored orientation.
  * Optional padding stays last so it repairs the dimensions produced by every
  * earlier geometric transformation without changing their proportions.
  */
-function videoFilters(options, { height = null, fps = null } = {}) {
+function videoFilters(options, { height = null, fps = null, info = null } = {}) {
   const filters = [];
   if (fps) filters.push(`fps=${fps}`);
+  const crop = normalizeCropRect(info, options);
+  if (crop) filters.push(`crop=${crop.cropWidth}:${crop.cropHeight}:${crop.cropX}:${crop.cropY}`);
   filters.push(...rotationFilters(options));
   const scale = scaleFilter(height);
   if (scale) filters.push(scale);
@@ -313,6 +324,7 @@ function buildConvert(source, options, names) {
   const filters = videoFilters(options, {
     height: resolutionHeight(options.resolution),
     fps: frameRate(options.fps),
+    info: source.info,
   });
 
   const args = [
@@ -500,7 +512,11 @@ function buildCompress(source, options, names) {
   const totalKbps = (targetBytes * 8 * overhead) / duration / 1000;
   const videoKbps = Math.max(64, Math.round(totalKbps - audioKbps));
 
-  const filters = videoFilters(options, { height: resolutionHeight(options.resolution), fps: frameRate(options.fps) });
+  const filters = videoFilters(options, {
+    height: resolutionHeight(options.resolution),
+    fps: frameRate(options.fps),
+    info: source.info,
+  });
   const shared = [
     ...seekArguments(options, duration),
     '-i', names.input,
@@ -540,7 +556,7 @@ function buildFrames(source, options, names) {
   const format = formatById(options.imageFormat) || formatById('png');
   const duration = outputDuration(source.info, options);
   const interval = Math.max(0.02, Number(options.frameInterval) || 1);
-  const filters = videoFilters(options, { height: resolutionHeight(options.resolution) });
+  const filters = videoFilters(options, { height: resolutionHeight(options.resolution), info: source.info });
 
   const args = [
     ...seekArguments(options, duration),
@@ -564,7 +580,7 @@ function buildFrames(source, options, names) {
 function buildThumbnail(source, options, names) {
   const format = formatById(options.imageFormat) || formatById('png');
   const at = Math.max(0, Number(options.at) || 0);
-  const filters = videoFilters(options, { height: resolutionHeight(options.resolution) });
+  const filters = videoFilters(options, { height: resolutionHeight(options.resolution), info: source.info });
   const output = `output.${format.extension}`;
 
   return {

@@ -2,10 +2,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  CROP_ASPECT_PRESETS,
+  cropRectForAspect,
   defaultResizeResolution,
   describeFocusedQuickTransformation,
   describeTrimRange,
   focusedQuickTool,
+  fullCropRect,
+  normalizeCropAspect,
+  normalizeCropRect,
   normalizeFlip,
   normalizeFocusedQuickOptions,
   normalizeResolution,
@@ -14,6 +19,7 @@ import {
   trimRange,
   trimOptionsForRun,
   quickVideoFormat,
+  visibleVideoDimensions,
 } from '../src/media/quick-tools.js';
 
 test('focused video tools expose their Spanish execution contracts', () => {
@@ -49,12 +55,26 @@ test('focused video tools expose their Spanish execution contracts', () => {
     focus: 'resize',
     defaultOptions: { resolution: '720' },
   });
+  assert.deepEqual(focusedQuickTool('video-crop'), {
+    id: 'video-crop',
+    title: 'Recortar encuadre',
+    operation: 'convert',
+    accept: 'video/*',
+    focus: 'crop',
+    defaultOptions: {
+      cropAspect: 'free',
+      cropX: null,
+      cropY: null,
+      cropWidth: null,
+      cropHeight: null,
+    },
+  });
   assert.equal(focusedQuickTool('audio-trim'), null);
   assert.equal(focusedQuickTool('missing-tool'), null);
 });
 
 test('every focused tool requires a probed video track', () => {
-  for (const toolId of ['video-trim', 'video-rotate', 'video-flip', 'video-resize']) {
+  for (const toolId of ['video-trim', 'video-rotate', 'video-flip', 'video-resize', 'video-crop']) {
     assert.equal(supportsFocusedQuickTool(toolId, { hasVideo: true }), true);
     assert.equal(supportsFocusedQuickTool(toolId, { hasVideo: false }), false);
     assert.equal(supportsFocusedQuickTool(toolId, null), false);
@@ -122,8 +142,154 @@ test('resize uses visible dimensions after orientation metadata', () => {
   assert.equal(normalizeResolution('1440', rotated(0)), null);
 });
 
+test('crop exposes a small stable set of aspect presets', () => {
+  assert.deepEqual(CROP_ASPECT_PRESETS.map(({ id, label }) => ({ id, label })), [
+    { id: 'free', label: 'Libre' },
+    { id: '1:1', label: '1:1' },
+    { id: '16:9', label: '16:9' },
+    { id: '9:16', label: '9:16' },
+    { id: '4:5', label: '4:5' },
+  ]);
+  assert.equal(normalizeCropAspect(undefined), 'free');
+  assert.equal(normalizeCropAspect('9:16'), '9:16');
+  assert.equal(normalizeCropAspect('3:2'), null);
+});
+
+test('crop geometry uses the auto-oriented dimensions people see', () => {
+  const video = (rotation = 0) => ({
+    hasVideo: true,
+    video: { width: 1920, height: 1080, rotation },
+  });
+  assert.deepEqual(visibleVideoDimensions(video()), { width: 1920, height: 1080 });
+  assert.deepEqual(visibleVideoDimensions(video(90)), { width: 1080, height: 1920 });
+  assert.deepEqual(visibleVideoDimensions(video(-90)), { width: 1080, height: 1920 });
+  assert.deepEqual(fullCropRect(video(270)), {
+    cropX: 0,
+    cropY: 0,
+    cropWidth: 1080,
+    cropHeight: 1920,
+  });
+  assert.equal(visibleVideoDimensions({ video: { width: null, height: 1080 } }), null);
+  assert.equal(fullCropRect(null), null);
+});
+
+test('aspect helpers return the largest safe even rectangles centred in the frame', () => {
+  const info = { hasVideo: true, video: { width: 1920, height: 1080 } };
+  assert.deepEqual(cropRectForAspect(info, 'free'), fullCropRect(info));
+  assert.deepEqual(cropRectForAspect(info, '1:1'), {
+    cropX: 420,
+    cropY: 0,
+    cropWidth: 1080,
+    cropHeight: 1080,
+  });
+  assert.deepEqual(cropRectForAspect(info, '16:9'), fullCropRect(info));
+  assert.deepEqual(cropRectForAspect(info, '9:16'), {
+    cropX: 656,
+    cropY: 0,
+    cropWidth: 608,
+    cropHeight: 1080,
+  });
+  assert.deepEqual(cropRectForAspect(info, '4:5'), {
+    cropX: 528,
+    cropY: 0,
+    cropWidth: 864,
+    cropHeight: 1080,
+  });
+  assert.deepEqual(cropRectForAspect(info, 2), {
+    cropX: 0,
+    cropY: 60,
+    cropWidth: 1920,
+    cropHeight: 960,
+  });
+  assert.equal(cropRectForAspect(info, 'not-a-ratio'), null);
+});
+
+test('changing crop ratio preserves the current centre as far as the frame allows', () => {
+  const info = { hasVideo: true, video: { width: 1920, height: 1080 } };
+  assert.deepEqual(cropRectForAspect(info, '1:1', {
+    cropX: 1200,
+    cropY: 100,
+    cropWidth: 600,
+    cropHeight: 600,
+  }), {
+    cropX: 840,
+    cropY: 0,
+    cropWidth: 1080,
+    cropHeight: 1080,
+  });
+  assert.deepEqual(cropRectForAspect(info, 'free', {
+    cropX: 101,
+    cropY: 51,
+    cropWidth: 799,
+    cropHeight: 601,
+  }), {
+    cropX: 100,
+    cropY: 50,
+    cropWidth: 798,
+    cropHeight: 600,
+  });
+});
+
+test('crop normalisation clamps, rounds and rejects full-frame no-ops', () => {
+  const info = { hasVideo: true, video: { width: 1920, height: 1080 } };
+  assert.equal(normalizeCropRect(info, {}), null);
+  assert.equal(normalizeCropRect(info, fullCropRect(info)), null);
+  assert.deepEqual(normalizeCropRect(info, { cropAspect: '1:1' }), {
+    cropX: 420,
+    cropY: 0,
+    cropWidth: 1080,
+    cropHeight: 1080,
+  });
+  assert.deepEqual(normalizeCropRect(info, {
+    cropX: 101,
+    cropY: -5,
+    cropWidth: 999,
+    cropHeight: 2000,
+  }), {
+    cropX: 100,
+    cropY: 0,
+    cropWidth: 998,
+    cropHeight: 1080,
+  });
+  assert.deepEqual(normalizeCropRect(info, { x: 10, y: 20, width: 400, height: 300 }), {
+    cropX: 10,
+    cropY: 20,
+    cropWidth: 400,
+    cropHeight: 300,
+  });
+  assert.deepEqual(normalizeCropRect(info, { cropX: 1919, cropY: 1079 }), {
+    cropX: 1918,
+    cropY: 1078,
+    cropWidth: 2,
+    cropHeight: 2,
+  });
+  assert.equal(normalizeCropRect(info, { cropWidth: 0, cropHeight: 200 }), null);
+  assert.equal(normalizeCropRect(info, { cropAspect: '3:2' }), null);
+  assert.equal(normalizeCropRect(null, { cropWidth: 400, cropHeight: 300 }), null);
+});
+
+test('an odd full frame stays a no-op instead of losing its last row and column', () => {
+  const info = { hasVideo: true, video: { width: 1919, height: 1079 } };
+  assert.equal(normalizeCropRect(info, fullCropRect(info)), null);
+  assert.deepEqual(normalizeCropRect(info, { cropX: 2, cropY: 2 }), {
+    cropX: 2,
+    cropY: 2,
+    cropWidth: 1916,
+    cropHeight: 1076,
+  });
+});
+
 test('focused options contain only the transformation owned by that tool', () => {
-  const stale = { rotate: 180, flip: 'vertical', resolution: '1080', quality: 'high' };
+  const stale = {
+    rotate: 180,
+    flip: 'vertical',
+    resolution: '1080',
+    quality: 'high',
+    cropX: 100,
+    cropY: 50,
+    cropWidth: 800,
+    cropHeight: 600,
+  };
   assert.deepEqual(normalizeFocusedQuickOptions('video-rotate', stale), {
     rotate: 180,
     evenDimensions: true,
@@ -144,6 +310,20 @@ test('focused options contain only the transformation owned by that tool', () =>
     trimEnd: null,
     evenDimensions: true,
   });
+  assert.deepEqual(normalizeFocusedQuickOptions('video-crop', stale, {
+    hasVideo: true,
+    video: { width: 1920, height: 1080 },
+  }), {
+    cropX: 100,
+    cropY: 50,
+    cropWidth: 800,
+    cropHeight: 600,
+    evenDimensions: true,
+  });
+  assert.equal(normalizeFocusedQuickOptions('video-crop', {}, {
+    hasVideo: true,
+    video: { width: 1920, height: 1080 },
+  }), null);
   assert.equal(normalizeFocusedQuickOptions('missing-tool', stale), null);
 });
 
@@ -164,6 +344,22 @@ test('focused transformations have concise Spanish summaries', () => {
   assert.equal(
     describeFocusedQuickTransformation('video-trim', { trimStart: 2, trimEnd: 8 }, { duration: 10 }),
     'Recorte: 00:00:02.000 → 00:00:08.000 · 0:06',
+  );
+  assert.equal(
+    describeFocusedQuickTransformation('video-crop', {
+      cropX: 420,
+      cropY: 0,
+      cropWidth: 1080,
+      cropHeight: 1080,
+    }, { hasVideo: true, video: { width: 1920, height: 1080 } }),
+    'Encuadre: 1080 × 1080 px · x 420, y 0',
+  );
+  assert.equal(
+    describeFocusedQuickTransformation('video-crop', {}, {
+      hasVideo: true,
+      video: { width: 1920, height: 1080 },
+    }),
+    null,
   );
   assert.equal(describeFocusedQuickTransformation('missing-tool', {}), null);
 });

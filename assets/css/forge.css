@@ -1661,6 +1661,172 @@ html[data-interface="forge"] .quick-transform-play:hover:not(:disabled) {
   transform: translateX(-50%);
 }
 
+/* Quick crop ----------------------------------------------------- */
+
+html[data-interface="forge"] .quick-crop-stage {
+  --crop-line: color-mix(in srgb, var(--accent) 82%, white);
+  min-height: clamp(360px, 54vh, 620px);
+}
+
+html[data-interface="forge"] .quick-crop-frame {
+  position: relative;
+  display: inline-block;
+  width: fit-content;
+  height: fit-content;
+  max-width: min(92%, 920px);
+  max-height: min(54vh, 560px);
+  overflow: hidden;
+  line-height: 0;
+  background: #040605;
+  border: 1px solid rgb(255 255 255 / 0.12);
+  border-radius: 8px;
+  box-shadow: 0 24px 64px -28px rgb(0 0 0 / 0.95);
+}
+
+html[data-interface="forge"] .quick-crop-media {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: min(54vh, 560px);
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+html[data-interface="forge"] .quick-crop-selection {
+  position: absolute;
+  min-width: 2px;
+  min-height: 2px;
+  cursor: move;
+  border: 2px solid var(--crop-line);
+  border-radius: 3px;
+  box-shadow:
+    0 0 0 1px rgb(8 13 12 / 0.66),
+    0 0 0 100vmax rgb(3 7 6 / 0.68);
+  outline: none;
+  touch-action: none;
+}
+
+html[data-interface="forge"] .quick-crop-selection::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(to right,
+      transparent calc(33.333% - 0.5px),
+      rgb(255 255 255 / 0.35) calc(33.333% - 0.5px) calc(33.333% + 0.5px),
+      transparent calc(33.333% + 0.5px) calc(66.666% - 0.5px),
+      rgb(255 255 255 / 0.35) calc(66.666% - 0.5px) calc(66.666% + 0.5px),
+      transparent calc(66.666% + 0.5px)),
+    linear-gradient(to bottom,
+      transparent calc(33.333% - 0.5px),
+      rgb(255 255 255 / 0.35) calc(33.333% - 0.5px) calc(33.333% + 0.5px),
+      transparent calc(33.333% + 0.5px) calc(66.666% - 0.5px),
+      rgb(255 255 255 / 0.35) calc(66.666% - 0.5px) calc(66.666% + 0.5px),
+      transparent calc(66.666% + 0.5px));
+  opacity: 0.7;
+}
+
+html[data-interface="forge"] .quick-crop-selection:focus-visible {
+  box-shadow:
+    0 0 0 2px #07100e,
+    0 0 0 5px color-mix(in srgb, var(--accent) 62%, white),
+    0 0 0 100vmax rgb(3 7 6 / 0.68);
+}
+
+html[data-interface="forge"] .quick-crop-handle {
+  position: absolute;
+  z-index: 2;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 50%;
+  touch-action: none;
+}
+
+html[data-interface="forge"] .quick-crop-handle::after {
+  content: "";
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  background: #f4fffb;
+  border: 2px solid #15211e;
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px var(--crop-line);
+}
+
+html[data-interface="forge"] .quick-crop-handle:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -5px;
+}
+
+html[data-interface="forge"] .quick-crop-handle-nw {
+  top: 0;
+  left: 0;
+  cursor: nwse-resize;
+}
+
+html[data-interface="forge"] .quick-crop-handle-ne {
+  top: 0;
+  right: 0;
+  cursor: nesw-resize;
+}
+
+html[data-interface="forge"] .quick-crop-handle-sw {
+  bottom: 0;
+  left: 0;
+  cursor: nesw-resize;
+}
+
+html[data-interface="forge"] .quick-crop-handle-se {
+  right: 0;
+  bottom: 0;
+  cursor: nwse-resize;
+}
+
+html[data-interface="forge"] .quick-crop-handle-nw::after {
+  top: 3px;
+  left: 3px;
+}
+
+html[data-interface="forge"] .quick-crop-handle-ne::after {
+  top: 3px;
+  right: 3px;
+}
+
+html[data-interface="forge"] .quick-crop-handle-sw::after {
+  bottom: 3px;
+  left: 3px;
+}
+
+html[data-interface="forge"] .quick-crop-handle-se::after {
+  right: 3px;
+  bottom: 3px;
+}
+
+html[data-interface="forge"] .quick-crop-badge {
+  position: absolute;
+  top: clamp(0.75rem, 2vw, 1.15rem);
+  right: clamp(0.75rem, 2vw, 1.15rem);
+  z-index: 3;
+  min-height: 28px;
+  padding: 0.35rem 0.65rem;
+  color: #d6e2de;
+  font-family: var(--mono-font);
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1.3;
+  background: rgb(9 14 13 / 0.82);
+  border: 1px solid rgb(255 255 255 / 0.14);
+  border-radius: 999px;
+  box-shadow: 0 8px 24px -14px rgb(0 0 0 / 0.95);
+  backdrop-filter: blur(12px) saturate(120%);
+  pointer-events: none;
+}
+
 html[data-interface="forge"] .quick-choice-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
@@ -2056,6 +2222,15 @@ html[data-interface="forge"] .quick-dimension-summary > svg {
     max-height: min(56dvh, 480px);
   }
 
+  html[data-interface="forge"] .quick-crop-stage {
+    min-height: clamp(280px, 70vw, 480px);
+  }
+
+  html[data-interface="forge"] .quick-crop-frame {
+    max-width: 96%;
+    max-height: min(58dvh, 500px);
+  }
+
   html[data-interface="forge"] .quick-transform-stage[data-sideways="true"] .quick-transform-media,
   html[data-interface="forge"] .quick-transform-stage[data-sideways]:not([data-sideways="false"]) .quick-transform-media {
     max-width: min(58%, 440px);
@@ -2216,6 +2391,16 @@ html[data-interface="forge"] .quick-dimension-summary > svg {
     max-width: calc(100% - 1.2rem);
   }
 
+  html[data-interface="forge"] .quick-crop-stage {
+    min-height: clamp(240px, 82vw, 390px);
+    padding: 0.75rem;
+  }
+
+  html[data-interface="forge"] .quick-crop-badge {
+    top: 0.45rem;
+    right: 0.45rem;
+  }
+
   html[data-interface="forge"] .quick-choice-grid[data-columns="3"],
   html[data-interface="forge"] .quick-choice-grid[data-columns="4"] {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2249,6 +2434,11 @@ html[data-interface="forge"] .quick-dimension-summary > svg {
   html[data-interface="forge"] details.quick-advanced > summary,
   html[data-interface="forge"] .quick-choice {
     min-height: 44px;
+  }
+
+  html[data-interface="forge"] .quick-crop-handle {
+    width: 44px;
+    height: 44px;
   }
 }
 

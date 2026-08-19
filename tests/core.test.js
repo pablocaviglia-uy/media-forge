@@ -351,6 +351,69 @@ describe('every operation runs', { skip: VENDORED ? false : 'core not vendored' 
 });
 
 /**
+ * Crop gets a fresh core so this regression check does not perturb the long
+ * shared invocation sequence above. The vendored build has a known lifetime
+ * trap whose exact call count moves slightly; inserting one more encode into
+ * that sequence can make a later, unrelated repackaging assertion inherit the
+ * poisoned instance.
+ */
+describe('crop on an isolated core', { skip: VENDORED ? false : 'core not vendored' }, () => {
+  test('produces the requested safe 128×96 rectangle', async () => {
+    const fresh = await loadCore();
+    let freshLines = [];
+    fresh.setLogger(({ message }) => freshLines.push(message));
+
+    const runFresh = (...args) => {
+      freshLines = [];
+      fresh.reset();
+      const code = fresh.exec(...args);
+      return { code, text: freshLines.join('\n') };
+    };
+
+    const made = runFresh(
+      '-f', 'lavfi', '-i', 'testsrc2=size=192x144:rate=15:duration=1',
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+      '-an', '-y', 'input.mp4'
+    );
+    assert.equal(made.code, 0, `could not make the isolated crop input:\n${made.text.split('\n').slice(-8).join('\n')}`);
+
+    const cropSource = source('crop.mp4', {
+      hasVideo: true,
+      hasAudio: false,
+      duration: 1,
+      video: { codec: 'h264', width: 192, height: 144, fps: 15 },
+    });
+    const plan = buildPlan(cropSource, 'convert', {
+      format: 'mp4-h264',
+      cropX: 32,
+      cropY: 24,
+      cropWidth: 128,
+      cropHeight: 96,
+      speed: 'ultrafast',
+    });
+    for (const step of plan.steps) {
+      const result = runFresh(...step.args);
+      assert.equal(
+        result.code,
+        0,
+        `isolated crop failed:\n  ffmpeg ${step.args.join(' ')}\n${result.text.split('\n').slice(-8).join('\n')}`
+      );
+    }
+
+    fresh.reset();
+    fresh.ffprobe(
+      '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams',
+      '-o', 'crop-report.json', plan.outputs[0]
+    );
+    const report = new TextDecoder().decode(fresh.FS.readFile('crop-report.json'));
+    const info = parseProbeJson(report);
+    assert.ok(info?.hasVideo, 'could not probe the isolated crop output');
+    assert.equal(info.video.width, 128);
+    assert.equal(info.video.height, 96);
+  });
+});
+
+/**
  * Repackaging, which is the one operation whose whole claim is about what it
  * does NOT do.
  *

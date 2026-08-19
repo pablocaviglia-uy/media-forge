@@ -12,6 +12,7 @@ const EXPECTED_AVAILABLE = [
   'audio-converter',
   'audio-trim',
   'video-converter',
+  'video-crop',
   'video-flip',
   'video-resize',
   'video-rotate',
@@ -76,7 +77,7 @@ test('only honest entry points backed by the current convert command are availab
     .sort();
 
   assert.deepEqual(available, EXPECTED_AVAILABLE);
-  assert.equal(TOOL_CATALOG.filter((tool) => tool.availability === 'planned').length, 48);
+  assert.equal(TOOL_CATALOG.filter((tool) => tool.availability === 'planned').length, 47);
 });
 
 test('lookup and listing helpers return canonical entries', () => {

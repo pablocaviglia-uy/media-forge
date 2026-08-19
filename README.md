@@ -16,7 +16,7 @@ Your files are never uploaded, because there is nowhere to upload them to.
 - Video to MP4, WebM, MKV, MOV or an animated GIF
 - Audio to MP3, M4A, Opus, OGG, WAV or FLAC
 - Resolution, frame rate and quality, with the source never enlarged
-- Trim to a time range, rotate, flip, or drop the sound
+- Trim to a time range, crop the frame, rotate, flip, resize, or drop the sound
 - Extract the audio from a video, or the video's frames as images
 - Compress to a target file size, in two passes
 - A poster frame from any point in the clip

@@ -16,9 +16,9 @@
  * the single exception called out at IMMUTABLE.
  */
 
-// v5 expands the focused workspace from trimming to the three geometric video
-// tools. A new cache keeps their controller, styles and command state atomic.
-const CACHE_VERSION = 'v5';
+// v6 adds the interactive cropper and its command state. A fresh cache keeps
+// the new controller, styles and worker-facing options atomic offline.
+const CACHE_VERSION = 'v6';
 const CACHE_NAME = `media-forge-${CACHE_VERSION}`;
 
 /**
@@ -62,6 +62,7 @@ const PRECACHE = [
   './src/ui/dom.js',
   './src/ui/filmstrip.js',
   './src/ui/scrubber.js',
+  './src/ui/cropper.js',
 
   /*
    * The FFmpeg core, minus the part of it that matters most.

@@ -248,18 +248,63 @@ test('leaving the resolution alone adds no filter at all', () => {
  * The filter chain
  * ------------------------------------------------------------------ */
 
-test('frames are dropped first, then the picture is turned, then it is scaled', () => {
-  const chain = chainOf({ fps: '24', rotate: 90, resolution: '480' });
+test('frames are dropped first, then the picture is cropped, turned and scaled', () => {
+  const chain = chainOf({
+    fps: '24',
+    cropX: 100,
+    cropY: 50,
+    cropWidth: 1200,
+    cropHeight: 800,
+    rotate: 90,
+    resolution: '480',
+  });
 
   // Positions rather than a split on commas, because the scale filter contains
   // commas of its own inside min(iw,854).
-  assert.ok(chain.indexOf('fps=24') < chain.indexOf('transpose='), `rotation before the frame drop: ${chain}`);
+  assert.ok(chain.indexOf('fps=24') < chain.indexOf('crop='), `crop before the frame drop: ${chain}`);
+  assert.ok(chain.indexOf('crop=') < chain.indexOf('transpose='), `rotation before the crop: ${chain}`);
   assert.ok(chain.indexOf('transpose=') < chain.indexOf('scale='), `scaled before rotating: ${chain}`);
   assert.ok(chain.startsWith('fps=24,'), chain);
   // Dropping frames first means nothing downstream works on frames that are
   // about to be thrown away; scaling last means the chosen height describes the
   // picture the user ends up looking at, not the one before it was turned.
   assert.ok(chain.includes("scale='min(iw,854)':'min(ih,480)'"), chain);
+});
+
+test('crop coordinates are clamped and snapped to safe even pixels', () => {
+  assert.equal(
+    chainOf({ cropX: 101, cropY: 51, cropWidth: 9999, cropHeight: 601 }),
+    'crop=1820:600:100:50',
+  );
+  assert.equal(
+    chainOf({ x: 10, y: 20, width: 400, height: 300 }),
+    'crop=400:300:10:20',
+  );
+});
+
+test('full-frame and invalid crops add no filter', () => {
+  for (const options of [
+    {},
+    { cropX: 0, cropY: 0, cropWidth: 1920, cropHeight: 1080 },
+    { cropWidth: 0, cropHeight: 300 },
+    { cropAspect: 'not-a-preset' },
+  ]) {
+    const args = body(buildPlan(VIDEO, 'convert', options));
+    assert.equal(args.includes('-vf'), false, JSON.stringify(options));
+  }
+});
+
+test('crop bounds follow the visible frame after orientation metadata', () => {
+  const rotated = source('portrait.mp4', {
+    ...VIDEO.info,
+    video: { ...VIDEO.info.video, rotation: 90 },
+  });
+  assert.equal(chainOf({
+    cropX: 100,
+    cropY: 200,
+    cropWidth: 800,
+    cropHeight: 1200,
+  }, 'convert', rotated), 'crop=800:1200:100:200');
 });
 
 test('focused transformations can repair odd output dimensions at the end', () => {
