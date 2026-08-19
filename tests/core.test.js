@@ -26,7 +26,7 @@ import { spawnSync } from 'node:child_process';
 
 import { isFatal } from '../src/ffmpeg/failures.js';
 
-import { buildPlan } from '../src/media/commands.js';
+import { buildPlan, buildJoinVideosPlan } from '../src/media/commands.js';
 import { parseProbeJson, parseProbe } from '../src/media/probe.js';
 import { parseEncoders, parseMuxers, missingFor } from '../src/ffmpeg/capabilities.js';
 import { VIDEO_FORMATS, AUDIO_FORMATS, IMAGE_FORMATS, remuxTargets } from '../src/media/formats.js';
@@ -410,6 +410,99 @@ describe('crop on an isolated core', { skip: VENDORED ? false : 'core not vendor
     assert.ok(info?.hasVideo, 'could not probe the isolated crop output');
     assert.equal(info.video.width, 128);
     assert.equal(info.video.height, 96);
+  });
+});
+
+/**
+ * Multi-input work gets its own core for the same reason crop does: adding
+ * several synthesis, probe and encode calls to the shared instance moves the
+ * vendored core's known lifetime trap and makes a later test inherit it.
+ */
+describe('video joining on an isolated core', { skip: VENDORED ? false : 'core not vendored' }, () => {
+  test('normalises heterogeneous clips and fills a missing audio track with silence', async () => {
+    const fresh = await loadCore();
+    let freshLines = [];
+    fresh.setLogger(({ message }) => freshLines.push(message));
+
+    const runFresh = (...args) => {
+      freshLines = [];
+      fresh.reset();
+      const code = fresh.exec(...args);
+      return { code, text: freshLines.join('\n') };
+    };
+    const probeFresh = (name, reportName) => {
+      freshLines = [];
+      fresh.reset();
+      fresh.ffprobe(
+        '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams',
+        '-o', reportName, name
+      );
+      const report = new TextDecoder().decode(fresh.FS.readFile(reportName));
+      fresh.FS.unlink(reportName);
+      return parseProbeJson(report);
+    };
+
+    const firstMade = runFresh(
+      '-f', 'lavfi', '-i', 'testsrc2=size=160x90:rate=24:duration=1',
+      '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=44100:duration=1',
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac', '-ac', '1', '-b:a', '64k', '-shortest',
+      '-y', 'input-000.mp4'
+    );
+    assert.equal(firstMade.code, 0, `could not make the first join input:\n${firstMade.text.split('\n').slice(-8).join('\n')}`);
+
+    const secondMade = runFresh(
+      '-f', 'lavfi', '-i', 'testsrc2=size=90x160:rate=15:duration=1',
+      '-c:v', 'libvpx', '-deadline', 'realtime', '-cpu-used', '8', '-pix_fmt', 'yuv420p',
+      '-an', '-y', 'input-001.webm'
+    );
+    assert.equal(secondMade.code, 0, `could not make the second join input:\n${secondMade.text.split('\n').slice(-8).join('\n')}`);
+
+    const firstInfo = probeFresh('input-000.mp4', 'join-first.json');
+    const secondInfo = probeFresh('input-001.webm', 'join-second.json');
+    assert.equal(firstInfo.video.codec, 'h264');
+    assert.equal(firstInfo.audio.sampleRate, 44_100);
+    assert.equal(firstInfo.audio.channels, 1);
+    assert.equal(secondInfo.video.codec, 'vp8');
+    assert.equal(secondInfo.hasAudio, false);
+
+    const plan = buildJoinVideosPlan([
+      source('first.mp4', firstInfo),
+      source('second.webm', secondInfo),
+    ], {
+      fps: '30',
+      speed: 'ultrafast',
+      audioBitrate: 96,
+    });
+
+    for (const step of plan.steps) {
+      const result = runFresh(...step.args);
+      assert.equal(
+        result.code,
+        0,
+        `isolated video join failed:\n  ffmpeg ${step.args.join(' ')}\n${result.text.split('\n').slice(-12).join('\n')}`
+      );
+    }
+
+    const output = probeFresh(plan.outputs[0], 'join-output.json');
+    assert.ok(output?.hasVideo, 'could not probe the joined output video');
+    assert.equal(output.video.codec, 'h264');
+    assert.equal(output.video.width, 160);
+    assert.equal(output.video.height, 90);
+    assert.equal(output.video.fps, 30);
+    assert.equal(output.video.rotation, null);
+    assert.ok(output.hasAudio, 'the audio stream disappeared when the second clip was silent');
+    assert.equal(output.audio.codec, 'aac');
+    assert.equal(output.audio.sampleRate, 48_000);
+    assert.equal(output.audio.channels, 2);
+    assert.ok(
+      Math.abs(output.duration - plan.duration) <= (1 / plan.fps) + 0.03,
+      `joined duration ${output.duration} differs from planned ${plan.duration}`
+    );
+    assert.ok(
+      output.audio.duration >= plan.duration - 0.03,
+      `audio ended at ${output.audio.duration}; the silent segment was not filled to ${plan.duration}`
+    );
   });
 });
 

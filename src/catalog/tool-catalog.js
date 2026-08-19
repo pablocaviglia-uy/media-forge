@@ -14,14 +14,14 @@ const ROUTE_ROOTS = Object.freeze({
 });
 
 /**
- * These are the public entry points the current `convert` command can fulfil
- * honestly. This is intentionally not a one-to-one mapping to the eight
- * legacy OPERATIONS: several of those (remux, GIF, frames, raw, etc.) remain
- * differentiators outside the 55-route parity catalogue.
+ * These are the public entry points the current local engine can fulfil
+ * honestly. They are product routes, not a one-to-one mapping to command
+ * builders: focused tools and multi-file projects share the same engine.
  */
 const AVAILABLE_ENTRY_POINTS = new Set([
   'video-converter',
   'audio-converter',
+  'video-merge',
   'video-trim',
   'video-crop',
   'audio-trim',

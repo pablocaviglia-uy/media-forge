@@ -38,6 +38,12 @@ if (document.documentElement.dataset.interface === 'forge') {
   const PRESETS = {
     'video-converter': { operation: 'convert', accept: 'video/*', format: 'mp4-h264' },
     'audio-converter': { operation: 'extract-audio', accept: 'audio/*,video/*' },
+    'video-merge': {
+      operation: 'join-videos',
+      accept: 'video/*',
+      format: 'mp4-h264',
+      group: true,
+    },
     'video-trim': { operation: 'convert', accept: 'video/*', format: 'mp4-h264', single: true },
     'audio-trim': { operation: 'extract-audio', accept: 'audio/*,video/*', single: true },
     'video-rotate': {
@@ -77,11 +83,9 @@ if (document.documentElement.dataset.interface === 'forge') {
   };
 
   let pendingToolId = null;
-  let pickerOpen = false;
 
   function resetPickerIntent() {
     pendingToolId = null;
-    pickerOpen = false;
     fileInput.accept = 'video/*,audio/*';
     fileInput.multiple = true;
     const selectedTool = toolsById.get(app.selected?.forgeToolId);
@@ -248,7 +252,6 @@ if (document.documentElement.dataset.interface === 'forge') {
     fileInput.multiple = !preset.single;
     activeToolLabel.textContent = tool.name;
     closeLauncher();
-    pickerOpen = true;
     fileInput.click();
   }
 
@@ -269,8 +272,19 @@ if (document.documentElement.dataset.interface === 'forge') {
   const addFiles = app.addFiles.bind(app);
   app.addFiles = (files) => {
     const toolId = pendingToolId;
+    const preset = PRESETS[toolId];
+    if (toolId && preset?.group) {
+      app.addMergeProject(files, toolId);
+      resetPickerIntent();
+      app.paintQueue();
+      app.paintDetail();
+      return;
+    }
     const known = new Set(app.jobs.map((job) => job.id));
-    addFiles(files);
+    // An explicit launcher choice wins over the currently selected workspace.
+    // Otherwise choosing "Convertir video" while a merge project is open
+    // would append the file to that sequence before this wrapper can tag it.
+    addFiles(files, { forceNewJobs: Boolean(toolId) });
     const added = app.jobs.filter((job) => !known.has(job.id));
     if (toolId) {
       for (const job of added) applyPreset(job, toolId);
@@ -282,12 +296,6 @@ if (document.documentElement.dataset.interface === 'forge') {
   };
 
   fileInput.addEventListener('cancel', resetPickerIntent);
-  window.addEventListener('focus', () => {
-    if (!pickerOpen) return;
-    setTimeout(() => {
-      if (pickerOpen && !(fileInput.files?.length)) resetPickerIntent();
-    }, 0);
-  });
 
   const renderDetail = app.renderDetail.bind(app);
   app.renderDetail = () => {

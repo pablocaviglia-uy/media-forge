@@ -19,7 +19,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { OPERATIONS, buildPlan, planToCommand, splitArguments, operationsFor } from '../src/media/commands.js';
+import {
+  OPERATIONS,
+  buildPlan,
+  buildJoinVideosPlan,
+  planToCommand,
+  splitArguments,
+  operationsFor,
+} from '../src/media/commands.js';
 import { AUDIO_FORMATS, AUDIO_ENCODERS, RESOLUTIONS, FLAC_COMPRESSION, crfFor, audioFidelity, remuxTargets } from '../src/media/formats.js';
 import { formatTimestamp } from '../src/ui/dom.js';
 
@@ -71,6 +78,22 @@ const REMUXABLE = source('holiday.mkv', {
   formats: ['matroska', 'webm'],
   video: { codec: 'h264', width: 1920, height: 1080, fps: 30 },
   audio: { codec: 'aac', channels: 2, sampleRate: 48_000 },
+});
+
+const PORTRAIT_SILENT = source('phone.webm', {
+  hasVideo: true,
+  hasAudio: false,
+  duration: 60,
+  formats: ['matroska', 'webm'],
+  video: { codec: 'vp8', width: 1080, height: 1920, fps: 15 },
+});
+
+const LANDSCAPE_SILENT = source('camera.mov', {
+  hasVideo: true,
+  hasAudio: false,
+  duration: 30,
+  formats: ['mov', 'mp4'],
+  video: { codec: 'h264', width: 1280, height: 720, fps: 24 },
 });
 
 /* ------------------------------------------------------------------ *
@@ -148,6 +171,119 @@ test('the core works on fixed names while the download keeps the one the user kn
 
 test('an operation nobody offers is refused by name', () => {
   assert.throws(() => buildPlan(VIDEO, 'transcode-to-betamax', {}), /no "transcode-to-betamax" operation/);
+});
+
+/* ------------------------------------------------------------------ *
+ * Joining videos
+ * ------------------------------------------------------------------ */
+
+test('joining videos is a specialised ordered plan, not a single-file operation', () => {
+  assert.equal(OPERATIONS.some((operation) => operation.id === 'join-videos'), false);
+
+  const plan = buildJoinVideosPlan([VIDEO, PORTRAIT_SILENT], { audioBitrate: 128 });
+  const args = body(plan);
+
+  assert.equal(plan.operation, 'join-videos');
+  assert.deepEqual(plan.inputNames, ['input-000.mp4', 'input-001.webm']);
+  assert.deepEqual(args.slice(0, 4), ['-i', 'input-000.mp4', '-i', 'input-001.webm']);
+  assert.deepEqual(plan.outputs, ['output.mp4']);
+  assert.equal(plan.mime, 'video/mp4');
+  assert.equal(plan.downloadName, 'holiday-joined.mp4');
+  assert.equal(plan.duration, 180);
+  assert.equal(plan.width, 1920);
+  assert.equal(plan.height, 1080);
+  assert.equal(plan.fps, 30);
+  assert.equal(valueAfter(args, '-c:v'), 'libx264');
+  assert.equal(valueAfter(args, '-c:a'), 'aac');
+  assert.equal(valueAfter(args, '-b:a'), '128k');
+  assert.equal(valueAfter(args, '-movflags'), '+faststart');
+});
+
+test('the join graph normalises video, real audio and a missing audio track', () => {
+  const args = body(buildJoinVideosPlan([VIDEO, PORTRAIT_SILENT]));
+  const graph = valueAfter(args, '-filter_complex');
+
+  assert.match(graph, /\[0:v:0\].*setpts=PTS-STARTPTS.*fps=30/);
+  assert.match(graph, /scale=trunc\(iw\*sar\/2\)\*2:ih,setsar=1/);
+  assert.match(graph, /format=yuv420p\[v0\]/);
+  assert.match(graph, /\[0:a:0\]aresample=48000/);
+  assert.match(graph, /channel_layouts=stereo/);
+  assert.match(graph, /asetpts=PTS-STARTPTS,apad,atrim=duration=120\[a0\]/);
+  assert.match(graph, /anullsrc=r=48000:cl=stereo,atrim=duration=60,asetpts=PTS-STARTPTS\[a1\]/);
+  assert.match(graph, /\[v0\]\[a0\]\[v1\]\[a1\]concat=n=2:v=1:a=1\[v\]\[a\]$/);
+  assert.deepEqual(args.filter((argument) => argument === '-map').length, 2);
+});
+
+test('contain letterboxes without enlarging while cover fills and crops centrally', () => {
+  const contain = valueAfter(body(buildJoinVideosPlan([VIDEO, PORTRAIT_SILENT])), '-filter_complex');
+  assert.match(contain, /scale='min\(iw,1920\)':'min\(ih,1080\)'/);
+  assert.match(contain, /force_original_aspect_ratio=decrease:force_divisible_by=2,pad=1920:1080:\(ow-iw\)\/2:\(oh-ih\)\/2:black/);
+  assert.doesNotMatch(contain, /force_original_aspect_ratio=increase/);
+
+  const coverPlan = buildJoinVideosPlan([VIDEO, PORTRAIT_SILENT], { mergeFit: 'cover' });
+  const cover = valueAfter(body(coverPlan), '-filter_complex');
+  assert.equal(coverPlan.fit, 'cover');
+  assert.match(cover, /scale=1920:1080:force_original_aspect_ratio=increase:force_divisible_by=2/);
+  assert.match(cover, /crop=1920:1080:\(iw-ow\)\/2:\(ih-oh\)\/2/);
+  assert.doesNotMatch(cover, /pad=1920:1080/);
+});
+
+test('the first visible frame defines an even canvas after orientation and resolution', () => {
+  const rotated = source('portrait.mp4', {
+    hasVideo: true,
+    hasAudio: false,
+    duration: 10,
+    video: {
+      codec: 'h264', width: 1920, height: 1080, fps: 24,
+      rotation: 90, displayAspect: '16:9',
+    },
+  });
+  const plan = buildJoinVideosPlan([rotated, LANDSCAPE_SILENT], { resolution: '720', fps: '60' });
+
+  assert.equal(plan.width, 404);
+  assert.equal(plan.height, 720);
+  assert.equal(plan.fps, 60);
+  assert.match(valueAfter(body(plan), '-filter_complex'), /pad=404:720/);
+});
+
+test('an anamorphic first clip becomes a square-pixel canvas at its display aspect', () => {
+  const anamorphic = source('anamorphic.mp4', {
+    hasVideo: true,
+    hasAudio: false,
+    duration: 10,
+    video: { codec: 'h264', width: 144, height: 108, fps: 25, displayAspect: '16:9' },
+  });
+  const plan = buildJoinVideosPlan([anamorphic, LANDSCAPE_SILENT]);
+
+  assert.equal(plan.width, 192);
+  assert.equal(plan.height, 108);
+  assert.equal(plan.fps, 25);
+});
+
+test('all-silent and muted joins do not manufacture an audio stream', () => {
+  for (const plan of [
+    buildJoinVideosPlan([LANDSCAPE_SILENT, PORTRAIT_SILENT]),
+    buildJoinVideosPlan([VIDEO, PORTRAIT_SILENT], { mute: true }),
+  ]) {
+    const args = body(plan);
+    const graph = valueAfter(args, '-filter_complex');
+    assert.match(graph, /concat=n=2:v=1:a=0\[v\]$/);
+    assert.doesNotMatch(graph, /anullsrc|\[a\]/);
+    assert.ok(args.includes('-an'));
+    assert.equal(args.includes('-c:a'), false);
+  }
+});
+
+test('a join refuses incomplete projects before it reaches FFmpeg', () => {
+  assert.throws(() => buildJoinVideosPlan([VIDEO]), /at least two videos/);
+  assert.throws(
+    () => buildJoinVideosPlan([VIDEO, source('song.mp3', { hasVideo: false, hasAudio: true, duration: 3 })]),
+    /song\.mp3 has no video track/
+  );
+  assert.throws(
+    () => buildJoinVideosPlan([VIDEO, source('stream.mkv', { hasVideo: true, duration: null })]),
+    /does not report a usable duration/
+  );
 });
 
 /* ------------------------------------------------------------------ *

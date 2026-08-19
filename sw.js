@@ -16,9 +16,9 @@
  * the single exception called out at IMMUTABLE.
  */
 
-// v6 adds the interactive cropper and its command state. A fresh cache keeps
-// the new controller, styles and worker-facing options atomic offline.
-const CACHE_VERSION = 'v6';
+// v7 adds the multi-file merge project, its sequence controller and the
+// worker protocol that writes every ordered input atomically offline.
+const CACHE_VERSION = 'v7';
 const CACHE_NAME = `media-forge-${CACHE_VERSION}`;
 
 /**
@@ -56,6 +56,7 @@ const PRECACHE = [
   './src/media/formats.js',
   './src/media/probe.js',
   './src/media/quick-tools.js',
+  './src/media/merge.js',
   './src/media/timeline.js',
   './src/media/zip.js',
   './src/storage/prefs.js',
@@ -63,6 +64,7 @@ const PRECACHE = [
   './src/ui/filmstrip.js',
   './src/ui/scrubber.js',
   './src/ui/cropper.js',
+  './src/ui/merge-sequence.js',
 
   /*
    * The FFmpeg core, minus the part of it that matters most.

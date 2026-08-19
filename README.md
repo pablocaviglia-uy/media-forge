@@ -17,6 +17,7 @@ Your files are never uploaded, because there is nowhere to upload them to.
 - Audio to MP3, M4A, Opus, OGG, WAV or FLAC
 - Resolution, frame rate and quality, with the source never enlarged
 - Trim to a time range, crop the frame, rotate, flip, resize, or drop the sound
+- Join an ordered sequence of videos, even when their sizes, frame rates or audio tracks differ
 - Extract the audio from a video, or the video's frames as images
 - Compress to a target file size, in two passes
 - A poster frame from any point in the clip
@@ -145,6 +146,7 @@ src/
   media/
     formats.js        The output formats, and what each needs from the core
     commands.js       {source, operation, options} -> exact ffmpeg arguments
+    merge.js          Ordered multi-file project state and immutable snapshots
     probe.js          ffprobe JSON, the log as a fallback, and progress
     zip.js            A store-only ZIP writer, for "download all"
 
@@ -154,7 +156,7 @@ src/
   storage/
     prefs.js          Preferences in localStorage
 
-  ui/                 DOM helpers, formatting, downloads
+  ui/                 DOM helpers, focused editors, formatting, downloads
 ```
 
 A conversion goes: file dropped → probed with `ffprobe` → the inspector builds
@@ -199,6 +201,9 @@ Worth knowing before you file an issue:
   the output and the codec's working memory are all in it at once. The app
   refuses anything over 500 MB and warns above 150 MB, and even that is
   optimistic on a phone.
+- **Joining has a lower aggregate limit.** Every source and the completed output
+  coexist in FFmpeg's in-memory filesystem, so one merge project is capped at
+  350 MB across all of its clips and at 24 clips.
 - **WebM output is VP8, not VP9.** `libvpx-vp9` is compiled into the core and
   listed by `-encoders`, but on a freshly instantiated core it traps with
   "memory access out of bounds" before the first frame. It is not simply

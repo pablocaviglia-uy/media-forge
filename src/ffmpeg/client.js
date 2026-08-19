@@ -155,8 +155,15 @@ export function createEngine() {
      * Run a plan built by `media/commands.js`.
      * @returns {Running}
      */
-    start(plan, file, handlers = {}) {
-      const started = load().then(() => request({ type: 'run', plan, file }, handlers));
+    start(plan, fileOrFiles, handlers = {}) {
+      // Single-file jobs keep their existing call shape; project operations
+      // pass an ordered array whose positions correspond exactly to the
+      // plan's `inputNames`. Files are cloned into the worker as Blob handles,
+      // not read on the main thread, so this does not duplicate their bytes.
+      const files = Array.isArray(fileOrFiles)
+        ? [...fileOrFiles]
+        : (fileOrFiles ? [fileOrFiles] : []);
+      const started = load().then(() => request({ type: 'run', plan, files }, handlers));
 
       return {
         finished: started.then(({ promise }) => promise),

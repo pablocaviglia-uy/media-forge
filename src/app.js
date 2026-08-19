@@ -21,8 +21,16 @@ import { prefs, resolveTheme } from './storage/prefs.js';
 import { createEngine, isolationStatus } from './ffmpeg/client.js';
 import { createScrubber } from './ui/scrubber.js';
 import { createCropper } from './ui/cropper.js';
+import { createMergeSequence } from './ui/merge-sequence.js';
 import { supportsFormat } from './ffmpeg/capabilities.js';
-import { buildPlan, planToCommand, operationsFor, operationById, DEFAULT_OPTIONS } from './media/commands.js';
+import {
+  buildJoinVideosPlan,
+  buildPlan,
+  planToCommand,
+  operationsFor,
+  operationById,
+  DEFAULT_OPTIONS,
+} from './media/commands.js';
 import {
   VIDEO_FORMATS, AUDIO_FORMATS, IMAGE_FORMATS,
   RESOLUTIONS, FRAME_RATES, QUALITIES, AUDIO_BITRATES, SPEED_PRESETS,
@@ -45,6 +53,23 @@ import {
   trimOptionsForRun,
   visibleVideoDimensions,
 } from './media/quick-tools.js';
+import {
+  MERGE_OPERATION,
+  MERGE_MAX_CLIPS,
+  MERGE_SAFE_BYTES,
+  MERGE_TOOL_ID,
+  createMergeClip,
+  createMergeEditState,
+  createMergeSnapshot,
+  markMergeEdited,
+  markMergeExported,
+  mergeHasUnexportedChanges,
+  mergeProjectInfo,
+  mergeTotalBytes,
+  mergeTotalDuration,
+  reorderMergeClips,
+  validateMergeClips,
+} from './media/merge.js';
 
 /**
  * Where the app refuses rather than letting FFmpeg run out of heap.
@@ -92,6 +117,9 @@ export class App {
     this.quickOutputPreview = null;
     this.scrubber = null;
     this.cropper = null;
+    this.mergeSourcePreview = null;
+    this.mergeSequence = null;
+    this.mergePickerJobId = null;
 
     this.dom = {
       app: $('#app'),
@@ -229,7 +257,18 @@ export class App {
     return files;
   }
 
-  addFiles(files) {
+  addFiles(files, { forceNewJobs = false } = {}) {
+    if (forceNewJobs) this.mergePickerJobId = null;
+    const mergeTarget = !forceNewJobs && (
+      this.jobs.find((job) => job.id === this.mergePickerJobId)
+      || (this.isMergeJob(this.selected) ? this.selected : null)
+    );
+    if (mergeTarget) {
+      this.mergePickerJobId = null;
+      this.appendMergeFiles(mergeTarget, files);
+      return;
+    }
+
     const accepted = [];
     const refused = [];
 
@@ -277,6 +316,160 @@ export class App {
     // useful for the generic converter, but must not rotate or resize a file
     // merely because it has just finished probing.
     if (prefs.get('autoStart')) this.enqueue(() => this.runQueue({ skipFocused: true }));
+  }
+
+  isMergeJob(job) {
+    return Boolean(job && Array.isArray(job.clips) && job.operation === MERGE_OPERATION);
+  }
+
+  mergeFilesWithinLimits(files, job = null) {
+    const accepted = [];
+    let count = job?.clips?.length || 0;
+    let bytes = job ? mergeTotalBytes(job.clips) : 0;
+    let refusedCount = 0;
+    let refusedBytes = 0;
+
+    for (const file of Array.from(files || [])) {
+      if (!file?.size) continue;
+      if (count >= MERGE_MAX_CLIPS) {
+        refusedCount += 1;
+        continue;
+      }
+      if (bytes + file.size > MERGE_SAFE_BYTES) {
+        refusedBytes += 1;
+        continue;
+      }
+      accepted.push(file);
+      count += 1;
+      bytes += file.size;
+    }
+
+    if (refusedCount) {
+      this.toast(`Podés unir hasta ${MERGE_MAX_CLIPS} videos por proyecto. Los demás no se agregaron.`, {
+        kind: 'error', duration: 7500,
+      });
+    }
+    if (refusedBytes) {
+      this.toast(`El proyecto puede usar hasta ${formatBytes(MERGE_SAFE_BYTES)} en total. Los archivos que superaban ese límite no se agregaron.`, {
+        kind: 'error', duration: 8500,
+      });
+    }
+    return accepted;
+  }
+
+  addMergeProject(files, toolId = MERGE_TOOL_ID) {
+    const clips = this.mergeFilesWithinLimits(files)
+      .map((file) => createMergeClip(file));
+    if (!clips.length) return null;
+
+    const editState = createMergeEditState();
+    const job = {
+      id: String(nextJobId++),
+      kind: 'video-merge',
+      forgeToolId: toolId,
+      clips,
+      selectedClipId: clips[0].id,
+      file: clips[0].file,
+      name: 'Videos unidos',
+      size: mergeTotalBytes(clips),
+      info: mergeProjectInfo(clips),
+      status: 'probing',
+      operation: MERGE_OPERATION,
+      options: {
+        ...DEFAULT_OPTIONS,
+        format: 'mp4-h264',
+        resolution: 'source',
+        fps: 'source',
+        quality: 'balanced',
+        speed: 'veryfast',
+        mute: false,
+        mergeFit: 'contain',
+      },
+      progress: 0,
+      speed: null,
+      remaining: null,
+      outputs: null,
+      error: null,
+      validationError: null,
+      log: [],
+      previewMode: 'source',
+      ...editState,
+    };
+    this.jobs.push(job);
+    this.selectedId = job.id;
+    this.syncMergeProject(job);
+    this.paintQueue();
+    this.paintDetail();
+    this.enqueue(() => this.probeMergeClips(job, clips));
+    return job;
+  }
+
+  appendMergeFiles(job, files) {
+    if (!this.isMergeJob(job) || ['queued', 'running'].includes(job.status)) {
+      if (this.isMergeJob(job)) this.toast('Esperá a que termine la unión antes de agregar más videos.');
+      return [];
+    }
+    const added = this.mergeFilesWithinLimits(files, job)
+      .map((file) => createMergeClip(file));
+    if (!added.length) return [];
+
+    job.clips.push(...added);
+    job.selectedClipId = added[0].id;
+    Object.assign(job, markMergeEdited(job));
+    job.previewMode = 'source';
+    this.syncMergeProject(job);
+    this.paintQueue();
+    this.paintDetail();
+    this.enqueue(() => this.probeMergeClips(job, added));
+    return added;
+  }
+
+  syncMergeProject(job) {
+    if (!this.isMergeJob(job)) return;
+    job.size = mergeTotalBytes(job.clips);
+    job.info = mergeProjectInfo(job.clips);
+    job.file = job.clips[0]?.file || null;
+    job.name = job.clips.length === 1 ? 'Unir 1 video' : `Unir ${job.clips.length} videos`;
+    job.dirtySinceOutput = mergeHasUnexportedChanges(job);
+    const validation = validateMergeClips(job.clips);
+    job.validationError = validation.error;
+
+    if (!['queued', 'running'].includes(job.status)) {
+      const waiting = job.clips.some((clip) => clip.status === 'pending' || clip.status === 'probing');
+      job.status = waiting
+        ? 'probing'
+        : (job.outputs?.length && (job.dirtySinceOutput || job.status === 'done') ? 'done' : 'ready');
+    }
+  }
+
+  async probeMergeClips(job, clips) {
+    if (!this.jobs.includes(job)) return;
+    for (const clip of clips) {
+      if (!this.jobs.includes(job) || !job.clips.includes(clip)) continue;
+      clip.status = 'probing';
+      this.syncMergeProject(job);
+      this.paintQueue();
+      if (job.id === this.selectedId) this.paintDetail();
+      try {
+        clip.info = await this.engine.probe(clip.file);
+        if (!clip.info?.hasVideo) {
+          clip.status = 'failed';
+          clip.error = 'El archivo no contiene una pista de video.';
+        } else if (!Number.isFinite(clip.info.duration) || clip.info.duration <= 0) {
+          clip.status = 'failed';
+          clip.error = 'No pudimos determinar una duración utilizable.';
+        } else {
+          clip.status = 'ready';
+          clip.error = null;
+        }
+      } catch (error) {
+        clip.status = 'failed';
+        clip.error = error.message;
+      }
+      this.syncMergeProject(job);
+      this.paintQueue();
+      if (job.id === this.selectedId) this.paintDetail();
+    }
   }
 
   /** Serialise everything that uses the worker; it can only do one thing. */
@@ -347,6 +540,11 @@ export class App {
 
     const index = this.jobs.indexOf(job);
     if (index < 0) return;
+    if (this.isMergeJob(job)) {
+      if (this.mergePickerJobId === job.id) this.mergePickerJobId = null;
+      if (this.mergeSourcePreview?.jobId === job.id) this.releaseMergeSourcePreview();
+      if (this.mergeSequence?.jobId === job.id) this.releaseMergeSequence();
+    }
     this.jobs.splice(index, 1);
     if (this.selectedId === job.id) this.selectedId = this.jobs[Math.min(index, this.jobs.length - 1)]?.id || null;
     this.paintQueue();
@@ -402,7 +600,7 @@ export class App {
       list.append(row);
     }
 
-    const done = this.jobs.filter((job) => job.status === 'done');
+    const done = this.jobs.filter((job) => this.jobIsSettledDone(job));
     this.dom.queueCount.textContent = this.jobs.length
       ? `${this.jobs.length} file${this.jobs.length === 1 ? '' : 's'}`
       : 'Nothing queued';
@@ -417,6 +615,26 @@ export class App {
   }
 
   describeJob(job) {
+    if (this.isMergeJob(job)) {
+      if (job.status === 'failed') return job.error ? truncateName(job.error, 44) : 'Falló la unión';
+      if (job.status === 'running') {
+        const percent = Math.round(job.progress * 100);
+        const left = job.remaining !== null ? ` · ${formatDuration(job.remaining)} restantes` : '';
+        return `${percent}%${left}`;
+      }
+      if (job.status === 'probing') {
+        const ready = job.clips.filter((clip) => clip.status === 'ready').length;
+        return `Analizando ${ready}/${job.clips.length}`;
+      }
+      const bits = [`${job.clips.length} ${job.clips.length === 1 ? 'clip' : 'clips'}`];
+      const duration = mergeTotalDuration(job.clips);
+      if (duration) bits.push(formatDuration(duration));
+      bits.push(formatBytes(job.size));
+      if (job.validationError) bits.push('Revisar');
+      else if (job.dirtySinceOutput) bits.push('Cambios pendientes');
+      else if (job.status === 'done') bits.push(STATUS_LABELS.done);
+      return bits.join(' · ');
+    }
     if (job.status === 'failed') return job.error ? truncateName(job.error, 44) : 'Failed';
     if (job.status === 'running') {
       const percent = Math.round(job.progress * 100);
@@ -433,6 +651,11 @@ export class App {
     if (info.video) bits.push(`${info.video.width}×${info.video.height}`);
     else if (info.audio) bits.push(`${(info.audio.sampleRate / 1000).toFixed(1)} kHz`);
     return bits.join(' · ');
+  }
+
+  jobIsSettledDone(job) {
+    if (job?.status !== 'done') return false;
+    return !this.isMergeJob(job) || (!job.dirtySinceOutput && !job.validationError);
   }
 
   /* ------------------------------------------------------------------ *
@@ -487,6 +710,7 @@ export class App {
 
   renderDetail() {
     const job = this.selected;
+    const mergeJob = this.isMergeJob(job);
     const quickTool = this.quickToolFor(job);
     this.dom.detail.hidden = !job;
     this.dom.empty.hidden = Boolean(job);
@@ -499,13 +723,21 @@ export class App {
       this.releaseQuickOutputPreview();
       this.releaseScrubber();
       this.releaseCropper();
+      this.releaseMergeSourcePreview();
+      this.releaseMergeSequence();
       return;
     }
 
-    this.dom.detail.dataset.workspace = quickTool ? 'quick-tool' : 'converter';
+    this.dom.detail.dataset.workspace = mergeJob ? 'video-merge' : (quickTool ? 'quick-tool' : 'converter');
     this.dom.detail.dataset.status = job.status === 'done' && job.dirtySinceOutput ? 'ready' : job.status;
-    if (quickTool) this.dom.detail.dataset.tool = quickTool.id;
+    if (mergeJob) this.dom.detail.dataset.tool = MERGE_TOOL_ID;
+    else if (quickTool) this.dom.detail.dataset.tool = quickTool.id;
     else delete this.dom.detail.dataset.tool;
+
+    if (!mergeJob) {
+      this.releaseMergeSourcePreview();
+      this.releaseMergeSequence();
+    }
 
     // Selecting a different file means the timeline belongs to a file that is
     // no longer on screen, and its `<video>` is still holding the old one open.
@@ -514,10 +746,29 @@ export class App {
     if (this.quickSourcePreview && this.quickSourcePreview.jobId !== job.id) this.releaseQuickSourcePreview();
     if (this.quickOutputPreview && this.quickOutputPreview.jobId !== job.id) this.releaseQuickOutputPreview();
 
-    this.dom.detailName.textContent = quickTool?.title || job.name;
-    this.dom.detailFacts.textContent = quickTool
+    this.dom.detailName.textContent = mergeJob ? 'Unir videos' : (quickTool?.title || job.name);
+    this.dom.detailFacts.textContent = mergeJob
+      ? `${job.clips.length} ${job.clips.length === 1 ? 'clip' : 'clips'} · ${formatBytes(job.size)}${mergeTotalDuration(job.clips) ? ` · ${formatDuration(mergeTotalDuration(job.clips))}` : ''}`
+      : quickTool
       ? `${job.name} · ${this.describeSource(job)}`
       : this.describeSource(job);
+
+    if (mergeJob) {
+      this.releasePreview();
+      this.releaseQuickSourcePreview();
+      this.releaseCropper();
+      this.releaseScrubber();
+      this.dom.preview.replaceChildren();
+      delete this.dom.preview.dataset.job;
+      this.renderMergeControls(job);
+      this.renderCommand();
+      this.renderMergeFooter(job);
+      const advanced = prefs.get('advanced');
+      this.dom.commandBlock.hidden = !advanced || job.status === 'probing';
+      this.renderDetailActions(job, null);
+      this.restoreMergeFocus(job);
+      return;
+    }
 
     if (quickTool) {
       this.releasePreview();
@@ -566,6 +817,28 @@ export class App {
     const remove = this.dom.detail.querySelector('[data-action="remove-one"]');
     const running = job.status === 'running';
     const queued = job.status === 'queued';
+
+    if (this.isMergeJob(job)) {
+      const runnable = this.mergeJobRunnable(job);
+      start.hidden = running || queued || job.status === 'probing';
+      start.disabled = !runnable;
+      start.textContent = job.outputs?.length
+        ? (job.dirtySinceOutput ? 'Actualizar resultado' : 'Crear otra versión')
+        : 'Unir videos';
+      cancel.hidden = !running;
+      cancel.textContent = 'Cancelar';
+      download.hidden = !job.outputs?.length;
+      download.textContent = job.dirtySinceOutput || job.status !== 'done'
+        ? 'Descargar versión anterior'
+        : 'Descargar video';
+      remove.textContent = 'Quitar proyecto';
+      const downloadIsPrimary = Boolean(job.status === 'done' && !job.dirtySinceOutput && job.outputs?.length);
+      start.classList.toggle('primary-button', !downloadIsPrimary);
+      start.classList.toggle('text-button', downloadIsPrimary);
+      download.classList.toggle('primary-button', downloadIsPrimary);
+      download.classList.toggle('text-button', !downloadIsPrimary);
+      return;
+    }
 
     start.hidden = running || queued || job.status === 'probing' || !job.info;
     start.disabled = quickTool ? !this.quickJobRunnable(job, quickTool) : false;
@@ -909,6 +1182,387 @@ export class App {
       );
     });
     container.append(media);
+  }
+
+  releaseMergeSourcePreview() {
+    if (!this.mergeSourcePreview) return;
+    const { media, url } = this.mergeSourcePreview;
+    media?.pause();
+    media?.removeAttribute('src');
+    media?.load();
+    URL.revokeObjectURL(url);
+    this.mergeSourcePreview = null;
+  }
+
+  releaseMergeSequence() {
+    this.mergeSequence?.control.destroy();
+    this.mergeSequence = null;
+  }
+
+  mergeSourcePreviewFor(job, clip) {
+    if (!clip) {
+      return el('div', { class: 'merge-preview-placeholder' }, [
+        el('strong', { text: 'Agregá un video a la secuencia' }),
+        el('p', { text: 'Cada clip va a aparecer acá para que puedas revisarlo antes de unirlos.' }),
+      ]);
+    }
+    if (this.mergeSourcePreview?.jobId === job.id && this.mergeSourcePreview.clipId === clip.id) {
+      return this.mergeSourcePreview.node;
+    }
+
+    this.releaseMergeSourcePreview();
+    const url = URL.createObjectURL(clip.file);
+    const media = el('video', {
+      class: 'merge-preview-media',
+      src: url,
+      controls: true,
+      playsInline: true,
+      preload: 'metadata',
+      attrs: { 'aria-label': `Vista previa de ${clip.name}` },
+    });
+    const record = { jobId: job.id, clipId: clip.id, url, media, node: media };
+    media.addEventListener('error', () => {
+      const fallback = el('div', { class: 'merge-preview-placeholder' }, [
+        el('strong', { text: 'Vista previa no disponible' }),
+        el('p', { text: 'El navegador no puede reproducir este formato, pero FFmpeg puede unirlo si el análisis termina correctamente.' }),
+      ]);
+      media.replaceWith(fallback);
+      record.node = fallback;
+    }, { once: true });
+    this.mergeSourcePreview = record;
+    return media;
+  }
+
+  openMergePicker(job) {
+    if (!this.isMergeJob(job) || ['queued', 'running'].includes(job.status)) return;
+    this.mergePickerJobId = job.id;
+    this.dom.fileInput.accept = 'video/*';
+    this.dom.fileInput.multiple = true;
+    this.dom.fileInput.click();
+  }
+
+  markMergeJobEdited(job) {
+    Object.assign(job, markMergeEdited(job));
+    job.previewMode = 'source';
+    this.syncMergeProject(job);
+  }
+
+  setMergeOption(job, key, value) {
+    if (!this.isMergeJob(job) || ['queued', 'running'].includes(job.status)) return;
+    if (job.options[key] === value) return;
+    if (this.dom.controls.contains(document.activeElement)) {
+      job.pendingMergeFocus = { type: 'option', key };
+    }
+    job.options[key] = value;
+    this.markMergeJobEdited(job);
+    this.scheduleCommandPreview();
+    this.paintQueue();
+    if (job.id === this.selectedId) this.paintDetail();
+  }
+
+  selectMergeClip(job, clipId) {
+    if (!job.clips.some((clip) => clip.id === clipId)) return;
+    job.pendingMergeFocus = { type: 'clip', id: clipId };
+    job.selectedClipId = clipId;
+    job.previewMode = 'source';
+    if (job.id === this.selectedId) this.paintDetail();
+  }
+
+  moveMergeClip(job, clipId, targetIndex) {
+    if (['queued', 'running'].includes(job.status)) return;
+    const before = job.clips.map((clip) => clip.id).join('\n');
+    const next = reorderMergeClips(job.clips, clipId, targetIndex);
+    if (next.map((clip) => clip.id).join('\n') === before) return;
+    job.pendingMergeFocus = { type: 'handle', id: clipId };
+    job.clips = next;
+    this.markMergeJobEdited(job);
+    this.scheduleCommandPreview();
+    this.paintQueue();
+    if (job.id === this.selectedId) this.paintDetail();
+  }
+
+  removeMergeClip(job, clipId) {
+    if (['queued', 'running'].includes(job.status)) return;
+    const index = job.clips.findIndex((clip) => clip.id === clipId);
+    if (index < 0) return;
+    job.clips.splice(index, 1);
+    if (job.selectedClipId === clipId) {
+      job.selectedClipId = job.clips[Math.min(index, job.clips.length - 1)]?.id || null;
+    }
+    job.pendingMergeFocus = job.selectedClipId ? { type: 'clip', id: job.selectedClipId } : { type: 'add' };
+    this.markMergeJobEdited(job);
+    this.scheduleCommandPreview();
+    this.paintQueue();
+    if (job.id === this.selectedId) this.paintDetail();
+  }
+
+  mergeJobRunnable(job) {
+    if (!this.isMergeJob(job) || ['probing', 'queued', 'running'].includes(job.status)) return false;
+    return validateMergeClips(job.clips).ok;
+  }
+
+  restoreMergeFocus(job) {
+    if (job.pendingQuickTab) {
+      const action = job.pendingQuickTab === 'result' ? 'preview-result' : 'preview-source';
+      this.dom.controls.querySelector(`[data-action="${action}"]`)?.focus({ preventScroll: true });
+      delete job.pendingQuickTab;
+      return;
+    }
+
+    const pending = job.pendingMergeFocus;
+    if (!pending) return;
+    if (pending.type === 'option') {
+      this.dom.controls.querySelector(`[data-merge-option="${pending.key}"]`)?.focus({ preventScroll: true });
+    } else if (pending.type === 'handle') {
+      const handle = Array.from(this.dom.controls.querySelectorAll('[data-merge-handle]'))
+        .find((node) => node.dataset.clipId === pending.id);
+      handle?.focus({ preventScroll: true });
+    } else if (pending.type === 'clip') {
+      this.mergeSequence?.control.focusClip(pending.id);
+    } else if (pending.type === 'add') {
+      this.dom.controls.querySelector('[data-merge-action="add"]')?.focus({ preventScroll: true });
+    }
+    delete job.pendingMergeFocus;
+  }
+
+  validateMergeJob(job, { notify = true } = {}) {
+    if (!this.isMergeJob(job)) return true;
+    const validation = validateMergeClips(job.clips);
+    job.validationError = validation.error;
+    if (validation.ok) return true;
+    if (notify) this.toast(validation.error, { kind: 'error', duration: 6500 });
+    if (job.id === this.selectedId) this.paintDetail();
+    return false;
+  }
+
+  mergeStatusCopy(job) {
+    const validation = validateMergeClips(job.clips);
+    if (job.status === 'probing') {
+      const ready = job.clips.filter((clip) => clip.status === 'ready').length;
+      return {
+        title: 'Analizando los videos',
+        detail: `${ready} de ${job.clips.length} listos · leyendo pistas y duración sin subir archivos.`,
+      };
+    }
+    if (!validation.ok) return { title: 'Revisá la secuencia', detail: validation.error };
+    if (job.status === 'queued') return { title: 'En cola', detail: 'La unión empezará cuando el motor quede libre.' };
+    if (job.status === 'running') {
+      const remaining = job.remaining !== null ? ` · ${formatDuration(job.remaining)} restantes` : '';
+      return {
+        title: `Uniendo videos · ${Math.round(job.progress * 100)}%`,
+        detail: `Procesamiento local${remaining}`,
+      };
+    }
+    if (job.status === 'done' && !job.dirtySinceOutput) {
+      return { title: 'Video listo', detail: `${formatBytes(job.outputSize || 0)} · listo para revisar o descargar.` };
+    }
+    if (job.status === 'failed') {
+      const previous = job.outputs?.length ? ' El resultado anterior sigue disponible.' : '';
+      return { title: 'No pudimos unir los videos', detail: `${job.error || 'Intentá de nuevo.'}${previous}` };
+    }
+    if (job.status === 'cancelled') {
+      return { title: 'Unión cancelada', detail: 'La secuencia sigue intacta y podés volver a intentarlo.' };
+    }
+    if (job.dirtySinceOutput) {
+      return { title: 'Cambios sin procesar', detail: 'El resultado anterior sigue disponible mientras preparás una nueva versión.' };
+    }
+    const duration = validation.totalDuration ? formatDuration(validation.totalDuration) : 'duración pendiente';
+    return { title: 'Secuencia lista', detail: `${job.clips.length} clips · ${duration} · el original queda intacto.` };
+  }
+
+  mergeStatusCard(job) {
+    const copy = this.mergeStatusCopy(job);
+    const validation = validateMergeClips(job.clips);
+    const activeStatus = ['probing', 'queued', 'running', 'failed', 'cancelled'].includes(job.status);
+    const status = !validation.ok && job.status !== 'probing'
+      ? 'failed'
+      : (activeStatus ? job.status : (job.dirtySinceOutput ? 'ready' : job.status));
+    return el('div', {
+      class: 'merge-status-card',
+      dataset: { status },
+      attrs: { 'aria-live': 'polite' },
+    }, [
+      el('strong', { text: copy.title, dataset: { mergeProgressTitle: '' } }),
+      el('span', { text: copy.detail, dataset: { mergeProgressDetail: '' } }),
+      el('progress', {
+        max: 1,
+        value: job.progress || 0,
+        hidden: job.status !== 'running' && job.status !== 'queued',
+      }),
+    ]);
+  }
+
+  renderMergeControls(job) {
+    const container = this.dom.controls;
+    container.replaceChildren();
+    this.releaseMergeSequence();
+
+    const selectedClip = job.clips.find((clip) => clip.id === job.selectedClipId) || job.clips[0] || null;
+    if (selectedClip && selectedClip.id !== job.selectedClipId) job.selectedClipId = selectedClip.id;
+    const resultAvailable = Boolean(job.outputs?.length);
+    if (!resultAvailable && job.previewMode === 'result') job.previewMode = 'source';
+    const showingResult = resultAvailable && job.previewMode === 'result';
+    if (showingResult) this.releaseMergeSourcePreview();
+    else this.pauseQuickOutputPreview();
+
+    const panelId = `merge-preview-panel-${job.id}`;
+    const sourceTabId = `merge-preview-source-${job.id}`;
+    const resultTabId = `merge-preview-result-${job.id}`;
+    const sourceTab = el('button', {
+      id: sourceTabId,
+      type: 'button',
+      class: `quick-preview-tab${showingResult ? '' : ' is-active'}`,
+      text: 'Clip seleccionado',
+      tabIndex: showingResult ? -1 : 0,
+      dataset: { action: 'preview-source' },
+      attrs: { role: 'tab', 'aria-selected': String(!showingResult), 'aria-controls': panelId },
+    });
+    const resultTab = el('button', {
+      id: resultTabId,
+      type: 'button',
+      class: `quick-preview-tab${showingResult ? ' is-active' : ''}`,
+      text: resultAvailable && (job.dirtySinceOutput || job.status !== 'done') ? 'Resultado anterior' : 'Resultado',
+      disabled: !resultAvailable,
+      tabIndex: showingResult ? 0 : -1,
+      dataset: { action: 'preview-result' },
+      attrs: { role: 'tab', 'aria-selected': String(showingResult), 'aria-controls': panelId },
+    });
+    this.wireQuickTabs(job, sourceTab, resultTab);
+
+    const stage = el('div', {
+      id: panelId,
+      class: 'merge-preview-stage',
+      attrs: { role: 'tabpanel', 'aria-labelledby': showingResult ? resultTabId : sourceTabId },
+    });
+    if (showingResult) {
+      stage.append(this.quickOutputPreviewFor(job));
+    } else {
+      stage.append(this.mergeSourcePreviewFor(job, selectedClip));
+      if (selectedClip) {
+        stage.append(el('span', {
+          class: 'merge-preview-overlay',
+          text: `${job.clips.findIndex((clip) => clip.id === selectedClip.id) + 1}/${job.clips.length} · ${truncateName(selectedClip.name, 48)}`,
+        }));
+      }
+    }
+
+    const canvas = el('section', { class: 'merge-canvas' }, [
+      el('header', { class: 'merge-preview-head' }, [
+        el('div', { class: 'merge-preview-copy' }, [
+          el('strong', { text: showingResult ? 'Resultado unido' : (selectedClip?.name || 'Secuencia vacía') }),
+          el('span', {
+            text: showingResult
+              ? `${formatBytes(job.outputSize || 0)} · video procesado`
+              : (selectedClip?.info ? this.describeSource({ ...selectedClip, status: selectedClip.status }) : 'Preparando vista previa…'),
+          }),
+          el('small', { text: 'Local · los archivos no salen de este dispositivo' }),
+        ]),
+        el('div', { class: 'quick-preview-switch', attrs: { role: 'tablist', 'aria-label': 'Vista previa' } }, [sourceTab, resultTab]),
+      ]),
+      stage,
+    ]);
+
+    const locked = job.status === 'queued' || job.status === 'running';
+    const sequence = createMergeSequence({
+      clips: job.clips,
+      selectedClipId: job.selectedClipId,
+      disabled: locked,
+      onSelect: (id) => this.selectMergeClip(job, id),
+      onMove: (id, targetIndex) => this.moveMergeClip(job, id, targetIndex),
+      onRemove: (id) => this.removeMergeClip(job, id),
+      onAdd: () => this.openMergePicker(job),
+    });
+    this.mergeSequence = { jobId: job.id, control: sequence };
+
+    const selectedSection = el('section', { class: 'merge-inspector-section' }, [
+      el('h3', { text: 'Clip seleccionado' }),
+      el('strong', { text: selectedClip?.name || 'Sin clips' }),
+      el('p', {
+        text: selectedClip?.error
+          || (selectedClip?.info ? this.describeSource({ ...selectedClip, status: selectedClip.status }) : 'Elegí Agregar videos para completar la secuencia.'),
+      }),
+    ]);
+
+    const fitControl = this.selectControl([
+      { value: 'contain', label: 'Completo, con márgenes' },
+      { value: 'cover', label: 'Llenar y recortar' },
+    ], job.options.mergeFit, (value) => this.setMergeOption(job, 'mergeFit', value));
+    fitControl.dataset.mergeOption = 'mergeFit';
+    const qualityControl = this.selectControl(
+      this.quickQualityOptions(),
+      job.options.quality,
+      (value) => this.setMergeOption(job, 'quality', value)
+    );
+    qualityControl.dataset.mergeOption = 'quality';
+    const outputFields = [
+      this.field('Encuadre', fitControl, job.options.mergeFit === 'cover'
+        ? 'Llena todo el cuadro; puede recortar los bordes.'
+        : 'Muestra cada video completo y agrega márgenes si hace falta.'),
+      this.field('Calidad', qualityControl),
+    ];
+    if (job.info?.hasAudio) {
+      const muteControl = this.checkbox(job.options.mute, 'Quitar todo el audio', (value) => this.setMergeOption(job, 'mute', value));
+      muteControl.querySelector('input').dataset.mergeOption = 'mute';
+      outputFields.push(el('div', { class: 'control' }, [muteControl]));
+    }
+
+    let target = null;
+    if (validateMergeClips(job.clips).ok) {
+      try {
+        target = buildJoinVideosPlan(job.clips.map((clip) => ({ name: clip.name, info: clip.info })), job.options);
+      } catch {
+        target = null;
+      }
+    }
+    const outputSection = el('section', { class: 'merge-output-section' }, [
+      el('h3', { text: 'Resultado' }),
+      el('p', {
+        text: target
+          ? `MP4 H.264 · ${target.width}×${target.height} · ${target.fps} fps · ${formatDuration(target.duration)}`
+          : 'MP4 H.264 · el primer clip define el cuadro final.',
+      }),
+      ...outputFields,
+    ]);
+    for (const input of outputSection.querySelectorAll('input, select, button')) input.disabled = locked;
+
+    const inspector = el('aside', { class: 'merge-inspector', attrs: { 'aria-label': 'Ajustes para unir videos' } }, [
+      selectedSection,
+      outputSection,
+      el('section', { class: 'merge-inspector-section' }, [this.mergeStatusCard(job)]),
+    ]);
+
+    container.append(el('div', { class: 'merge-tool-layout' }, [canvas, inspector, sequence.node]));
+  }
+
+  updateMergeProgress(job) {
+    if (this.selectedId !== job.id || !this.isMergeJob(job)) return;
+    const card = this.dom.controls.querySelector('.merge-status-card');
+    if (card) {
+      const copy = this.mergeStatusCopy(job);
+      const activeStatus = ['probing', 'queued', 'running', 'failed', 'cancelled'].includes(job.status);
+      card.dataset.status = activeStatus ? job.status : (job.dirtySinceOutput ? 'ready' : job.status);
+      const title = card.querySelector('[data-merge-progress-title]');
+      const detail = card.querySelector('[data-merge-progress-detail]');
+      const progress = card.querySelector('progress');
+      if (title) title.textContent = copy.title;
+      if (detail) detail.textContent = copy.detail;
+      if (progress) {
+        progress.hidden = job.status !== 'running' && job.status !== 'queued';
+        progress.value = job.progress || 0;
+      }
+    }
+    this.renderMergeFooter(job);
+  }
+
+  renderMergeFooter(job) {
+    const summary = this.dom.quickFootSummary;
+    if (!this.isMergeJob(job)) return;
+    const copy = this.mergeStatusCopy(job);
+    summary.hidden = false;
+    summary.replaceChildren(
+      el('strong', { text: copy.title }),
+      el('span', { text: copy.detail })
+    );
   }
 
   /* ------------------------------------------------------------------ *
@@ -1946,6 +2600,26 @@ export class App {
   renderCommand() {
     const job = this.selected;
     if (!job || !job.info) return;
+    if (this.isMergeJob(job)) {
+      const validation = validateMergeClips(job.clips);
+      if (!validation.ok) {
+        this.dom.commandText.textContent = validation.error;
+        this.dom.commandText.dataset.invalid = 'true';
+        return;
+      }
+      try {
+        const plan = buildJoinVideosPlan(
+          job.clips.map((clip) => ({ name: clip.name, info: clip.info })),
+          job.options
+        );
+        this.dom.commandText.textContent = planToCommand(plan);
+        this.dom.commandText.dataset.invalid = 'false';
+      } catch (error) {
+        this.dom.commandText.textContent = error.message;
+        this.dom.commandText.dataset.invalid = 'true';
+      }
+      return;
+    }
     const quickTool = this.quickToolFor(job);
     if (quickTool && !this.quickJobRunnable(job, quickTool)) {
       this.dom.commandText.textContent = this.quickInvalidMessage(quickTool);
@@ -2039,7 +2713,10 @@ export class App {
     // tasks idempotent: if "Process queue" consumes a job before an individual
     // task for that same job gets its turn, the latter sees `done` and exits.
     if (!this.jobs.includes(job) || !job.info || !['ready', 'queued'].includes(job.status)) return;
-    if (!this.validateQuickJob(job, { notify: job.status !== 'queued' })) {
+    const valid = this.isMergeJob(job)
+      ? this.validateMergeJob(job, { notify: job.status !== 'queued' })
+      : this.validateQuickJob(job, { notify: job.status !== 'queued' });
+    if (!valid) {
       if (job.status === 'queued') job.status = 'ready';
       this.paintQueue();
       this.paintDetail();
@@ -2047,9 +2724,16 @@ export class App {
     }
 
     let plan;
+    let mergeSnapshot = null;
     try {
-      plan = buildPlan({ name: job.name, info: job.info }, job.operation, job.options);
+      if (this.isMergeJob(job)) {
+        mergeSnapshot = job.pendingMergeSnapshot || createMergeSnapshot(job);
+        plan = buildJoinVideosPlan(mergeSnapshot.source.inputs, mergeSnapshot.options);
+      } else {
+        plan = buildPlan({ name: job.name, info: job.info }, job.operation, job.options);
+      }
     } catch (error) {
+      delete job.pendingMergeSnapshot;
       job.status = 'failed';
       job.error = error.message;
       this.paintQueue();
@@ -2061,7 +2745,7 @@ export class App {
     job.progress = 0;
     job.error = null;
     job.log = [];
-    if (this.quickToolFor(job)) {
+    if (this.quickToolFor(job) || this.isMergeJob(job)) {
       job.previewMode = 'source';
       if (this.quickOutputPreview?.jobId === job.id) this.releaseQuickOutputPreview();
     }
@@ -2070,7 +2754,7 @@ export class App {
     this.paintQueue();
     this.paintDetail();
 
-    const running = this.engine.start(plan, job.file, {
+    const running = this.engine.start(plan, mergeSnapshot?.files || job.file, {
       onProgress: (message) => {
         job.progress = message.fraction;
         job.speed = message.speed;
@@ -2084,6 +2768,7 @@ export class App {
         job.remaining = message.fraction > 0.05 ? (elapsed * (1 - message.fraction)) / message.fraction : null;
         this.paintQueue();
         this.updateQuickProgress(job);
+        this.updateMergeProgress(job);
       },
       onStep: (message) => {
         this.appendLog(`— ${plan.steps[message.step].label} —`);
@@ -2105,8 +2790,12 @@ export class App {
       job.downloadName = plan.downloadName;
       job.status = 'done';
       job.progress = 1;
-      job.dirtySinceOutput = false;
-      if (this.quickToolFor(job)) job.previewMode = 'result';
+      if (this.isMergeJob(job)) {
+        Object.assign(job, markMergeExported(job, mergeSnapshot.revision));
+      } else {
+        job.dirtySinceOutput = false;
+      }
+      if (this.quickToolFor(job) || this.isMergeJob(job)) job.previewMode = 'result';
 
       const seconds = (performance.now() - startedAt) / 1000;
       this.appendLog(`Finished in ${formatDuration(seconds)} · ${formatBytes(job.outputSize)}`);
@@ -2115,6 +2804,7 @@ export class App {
       job.error = error.cancelled ? 'Cancelled' : error.message;
       if (!error.cancelled) this.appendLog(`Failed: ${error.message}`);
     } finally {
+      delete job.pendingMergeSnapshot;
       this.running = null;
       this.runningId = null;
       this.paintQueue();
@@ -2155,7 +2845,7 @@ export class App {
   }
 
   async downloadAll() {
-    const done = this.jobs.filter((job) => job.status === 'done' && job.outputs?.length);
+    const done = this.jobs.filter((job) => this.jobIsSettledDone(job) && job.outputs?.length);
     if (!done.length) return;
     if (done.length === 1 && done[0].outputs.length === 1) {
       await this.downloadJob(done[0]);
@@ -2192,6 +2882,8 @@ export class App {
       this.releasePreview();
       this.releaseScrubber();
       this.releaseCropper();
+      this.releaseMergeSourcePreview();
+      this.releaseMergeSequence();
     });
     on(window, 'pageshow', (event) => {
       if (!event.persisted) return;
@@ -2202,6 +2894,9 @@ export class App {
     on(this.dom.fileInput, 'change', () => {
       this.addFiles(Array.from(this.dom.fileInput.files || []));
       this.dom.fileInput.value = '';
+    });
+    on(this.dom.fileInput, 'cancel', () => {
+      this.mergePickerJobId = null;
     });
 
     // A conversion in flight is minutes of the user's processor time; losing it
@@ -2235,7 +2930,8 @@ export class App {
 
     switch (action) {
       case 'add-files':
-        this.dom.fileInput.click();
+        if (this.isMergeJob(job)) this.openMergePicker(job);
+        else this.dom.fileInput.click();
         return true;
       case 'load-sample':
         this.enqueue(() => this.makeSampleClip());
@@ -2257,7 +2953,9 @@ export class App {
         this.enqueue(() => this.runQueue());
         return true;
       case 'start-one':
-        if (job && !['probing', 'queued', 'running'].includes(job.status) && this.validateQuickJob(job)) {
+        if (job && !['probing', 'queued', 'running'].includes(job.status)) {
+          const valid = this.isMergeJob(job) ? this.validateMergeJob(job) : this.validateQuickJob(job);
+          if (!valid) return true;
           // Reset here rather than only inside `runJob`: the run is queued
           // behind whatever else is using the engine, and until it starts the
           // row would otherwise still show the previous result's full bar.
@@ -2265,6 +2963,7 @@ export class App {
           job.remaining = null;
           job.status = 'queued';
           job.previewMode = 'source';
+          if (this.isMergeJob(job)) job.pendingMergeSnapshot = createMergeSnapshot(job);
           this.releaseQuickOutputPreview();
           this.paintQueue();
           this.paintDetail();
@@ -2299,7 +2998,7 @@ export class App {
         if (job) this.removeJob(job);
         return true;
       case 'clear-done':
-        this.jobs = this.jobs.filter((item) => item.status !== 'done');
+        this.jobs = this.jobs.filter((item) => !this.jobIsSettledDone(item));
         if (!this.jobs.some((item) => item.id === this.selectedId)) this.selectedId = this.jobs[0]?.id || null;
         this.paintQueue();
         this.paintDetail();
@@ -2321,7 +3020,8 @@ export class App {
 
     if (meta && event.key.toLowerCase() === 'o') {
       event.preventDefault();
-      this.dom.fileInput.click();
+      if (this.isMergeJob(this.selected)) this.openMergePicker(this.selected);
+      else this.dom.fileInput.click();
       return;
     }
     if (meta && event.key === 'Enter') {

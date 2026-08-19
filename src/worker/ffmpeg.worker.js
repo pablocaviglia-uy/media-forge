@@ -18,7 +18,7 @@
  *
  *   in   load                    → out  ready {capabilities} | failed {error}
  *   in   probe {id, file}        → out  probed {id, info} | failed {id, error}
- *   in   run   {id, plan, file}  → out  progress {id, …} · log {id, …}
+ *   in   run   {id, plan, files} → out  progress {id, …} · log {id, …}
  *                                       · done {id, outputs} | failed {id, error}
  */
 
@@ -212,6 +212,39 @@ async function writeInput(name, file) {
   return bytes.length;
 }
 
+/**
+ * Pair an ordered plan with the File objects supplied by the caller.
+ *
+ * Accepting a single File here keeps the message protocol compatible with
+ * older clients, while every new client sends an array. Refusing a mismatch
+ * before writing anything is essential: silently dropping one source would
+ * still leave a syntactically valid FFmpeg command whose error points nowhere
+ * near the real problem.
+ */
+export function pairRunInputs(inputNames, fileOrFiles) {
+  if (!Array.isArray(inputNames)) throw new Error('The conversion plan has no inputNames array.');
+  const files = Array.isArray(fileOrFiles)
+    ? fileOrFiles
+    : (fileOrFiles ? [fileOrFiles] : []);
+
+  if (inputNames.length !== files.length) {
+    throw new Error(`The conversion plan expects ${inputNames.length} input file${inputNames.length === 1 ? '' : 's'}, but received ${files.length}.`);
+  }
+
+  const seen = new Set();
+  return inputNames.map((name, index) => {
+    if (typeof name !== 'string' || !name || seen.has(name)) {
+      throw new Error('Every conversion input needs a unique file name.');
+    }
+    const file = files[index];
+    if (!file || typeof file.arrayBuffer !== 'function') {
+      throw new Error(`Input ${index + 1} is not a readable file.`);
+    }
+    seen.add(name);
+    return { name, file };
+  });
+}
+
 function removeQuietly(name) {
   try {
     core.FS.unlink(name);
@@ -291,9 +324,9 @@ async function probe(id, file) {
  * @param {string} id
  * @param {{steps: Array<{args: string[]}>, inputNames: string[], outputs: string[],
  *   outputPrefix?: string, duration: number|null}} plan
- * @param {File|null} file
+ * @param {File|File[]|null} fileOrFiles
  */
-async function run(id, plan, file) {
+async function run(id, plan, fileOrFiles) {
   currentJob = { id, step: 0, steps: plan.steps.length, duration: plan.duration || 0 };
   progressReport = {};
   log = [];
@@ -301,7 +334,8 @@ async function run(id, plan, file) {
   try {
     // A plan with no inputs is not a mistake: FFmpeg can generate video out of
     // nothing with `lavfi`, which is how the sample clip is made.
-    if (plan.inputNames.length && file) await writeInput(plan.inputNames[0], file);
+    const inputs = pairRunInputs(plan.inputNames, fileOrFiles);
+    for (const { name, file } of inputs) await writeInput(name, file);
 
     for (const [index, step] of plan.steps.entries()) {
       currentJob.step = index;
@@ -402,7 +436,9 @@ self.addEventListener('message', async (event) => {
         await probe(message.id, message.file);
         break;
       case 'run':
-        await run(message.id, message.plan, message.file);
+        // `file` is the legacy single-input field. New clients always send
+        // `files`, including an empty array for a source-free lavfi plan.
+        await run(message.id, message.plan, Array.isArray(message.files) ? message.files : message.file);
         break;
       default:
         send({ type: 'failed', id: message.id, error: `Unknown message "${message.type}".` });

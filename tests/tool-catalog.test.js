@@ -14,6 +14,7 @@ const EXPECTED_AVAILABLE = [
   'video-converter',
   'video-crop',
   'video-flip',
+  'video-merge',
   'video-resize',
   'video-rotate',
   'video-trim',
@@ -70,14 +71,14 @@ test('localized routes are unique within each locale', () => {
   }
 });
 
-test('only honest entry points backed by the current convert command are available', () => {
+test('only honest entry points backed by the current local engine are available', () => {
   const available = TOOL_CATALOG
     .filter((tool) => tool.availability === 'available')
     .map((tool) => tool.id)
     .sort();
 
   assert.deepEqual(available, EXPECTED_AVAILABLE);
-  assert.equal(TOOL_CATALOG.filter((tool) => tool.availability === 'planned').length, 47);
+  assert.equal(TOOL_CATALOG.filter((tool) => tool.availability === 'planned').length, 46);
 });
 
 test('lookup and listing helpers return canonical entries', () => {

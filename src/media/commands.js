@@ -155,6 +155,7 @@ export const DEFAULT_OPTIONS = {
   cropWidth: null,
   cropHeight: null,
   evenDimensions: false,
+  mergeFit: 'contain', // contain | cover
   gifFps: 12,
   gifWidth: 480,
   dither: true,
@@ -689,6 +690,168 @@ function buildRaw(source, options, names) {
   };
 }
 
+/* ------------------------------------------------------------------ *
+ * Multi-file builders
+ * ------------------------------------------------------------------ */
+
+/** A stable decimal for filter arguments, without floating-point tails. */
+const filterNumber = (value) => String(Number(Number(value).toFixed(6)));
+
+const evenFloor = (value) => Math.max(2, Math.floor(Number(value) / 2) * 2);
+
+/**
+ * The first clip defines the canvas. This is predictable when clips have
+ * different orientations, and means reordering the project also reorders the
+ * one decision that has to win. Display aspect is used when it is available so
+ * anamorphic sources become square-pixel output without looking stretched.
+ */
+function joinCanvas(info, options) {
+  const video = info?.video;
+  const storedWidth = Number(video?.width);
+  const storedHeight = Number(video?.height);
+  if (!(storedWidth > 0) || !(storedHeight > 0)) {
+    throw new Error('Joining videos needs the dimensions of the first clip.');
+  }
+
+  const rotation = ((Number(video.rotation) || 0) % 360 + 360) % 360;
+  const quarterTurn = rotation === 90 || rotation === 270;
+  const visibleWidth = quarterTurn ? storedHeight : storedWidth;
+  const visibleHeight = quarterTurn ? storedWidth : storedHeight;
+
+  const display = /^(\d+):(\d+)$/.exec(String(video.displayAspect || ''));
+  let ratio = visibleWidth / visibleHeight;
+  if (display && Number(display[1]) > 0 && Number(display[2]) > 0) {
+    ratio = Number(display[1]) / Number(display[2]);
+    if (quarterTurn) ratio = 1 / ratio;
+  }
+
+  const requestedHeight = resolutionHeight(options.resolution);
+  const height = evenFloor(requestedHeight ? Math.min(visibleHeight, requestedHeight) : visibleHeight);
+  const width = evenFloor(height * ratio);
+  return { width, height };
+}
+
+function joinFrameRate(first, options) {
+  const requested = frameRate(options.fps);
+  const sourceRate = Number(first?.info?.video?.fps);
+  const chosen = requested || (Number.isFinite(sourceRate) && sourceRate > 0 ? sourceRate : 30);
+  // The UI tops out at 60 fps. Keeping the pure builder bounded as well avoids
+  // an accidental or hand-written option turning one browser job into 1000 fps.
+  return Math.min(60, Math.max(1, chosen));
+}
+
+/**
+ * Build one normalising concat-filter invocation for two or more video files.
+ *
+ * This deliberately re-encodes instead of using the concat demuxer with
+ * `-c copy`. Matching codec names do not prove matching stream parameters or
+ * timestamps, and a heterogeneous copy can exit zero while producing corrupt
+ * media. Normalising every segment gives one dependable MP4 across dimensions,
+ * frame rates, orientation metadata, sample rates and missing audio tracks.
+ *
+ * Kept out of `OPERATIONS`: that catalogue drives the single-file inspector,
+ * while this builder consumes an ordered project of files.
+ *
+ * @param {Array<{name: string, info: object}>} sources ordered input clips
+ * @param {object} options
+ * @returns {Plan}
+ */
+export function buildJoinVideosPlan(sources, options = {}) {
+  if (!Array.isArray(sources) || sources.length < 2) {
+    throw new Error('Choose at least two videos to join.');
+  }
+
+  for (const source of sources) {
+    if (!source?.info?.hasVideo) throw new Error(`${source?.name || 'One input'} has no video track.`);
+    if (!Number.isFinite(source.info.duration) || source.info.duration <= 0) {
+      throw new Error(`${source.name || 'One input'} does not report a usable duration.`);
+    }
+  }
+
+  const merged = { ...DEFAULT_OPTIONS, ...options };
+  const canvas = joinCanvas(sources[0].info, merged);
+  const fps = joinFrameRate(sources[0], merged);
+  const fit = merged.mergeFit === 'cover' ? 'cover' : 'contain';
+  const keepsAudio = merged.mute !== true && sources.some((source) => source.info.hasAudio);
+  const inputNames = sources.map((source, index) => (
+    `input-${String(index).padStart(3, '0')}.${extensionOf(source.name)}`
+  ));
+  const durations = sources.map((source) => Number(source.info.duration));
+  const alignedDurations = durations.map((duration) => Math.ceil((duration * fps) - 1e-9) / fps);
+
+  const inputs = inputNames.flatMap((name) => ['-i', name]);
+  const filters = [];
+  const concatInputs = [];
+
+  for (let index = 0; index < sources.length; index += 1) {
+    const duration = filterNumber(durations[index]);
+    const aligned = filterNumber(alignedDurations[index]);
+    const videoLabel = `v${index}`;
+    const audioLabel = `a${index}`;
+
+    const fitFilters = fit === 'cover'
+      ? `scale=${canvas.width}:${canvas.height}:force_original_aspect_ratio=increase:force_divisible_by=2,` +
+        `crop=${canvas.width}:${canvas.height}:(iw-ow)/2:(ih-oh)/2`
+      : `scale='min(iw,${canvas.width})':'min(ih,${canvas.height})':` +
+        `force_original_aspect_ratio=decrease:force_divisible_by=2,` +
+        `pad=${canvas.width}:${canvas.height}:(ow-iw)/2:(oh-ih)/2:black`;
+
+    filters.push(
+      `[${index}:v:0]trim=duration=${duration},setpts=PTS-STARTPTS,` +
+      `fps=${filterNumber(fps)},tpad=stop_mode=clone:stop_duration=${aligned},` +
+      `trim=duration=${aligned},setpts=PTS-STARTPTS,` +
+      `scale=trunc(iw*sar/2)*2:ih,setsar=1,${fitFilters},setsar=1,format=yuv420p[${videoLabel}]`
+    );
+    concatInputs.push(`[${videoLabel}]`);
+
+    if (!keepsAudio) continue;
+    if (sources[index].info.hasAudio) {
+      filters.push(
+        `[${index}:a:0]aresample=48000,` +
+        `aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,` +
+        `asetpts=PTS-STARTPTS,apad,atrim=duration=${aligned}[${audioLabel}]`
+      );
+    } else {
+      filters.push(
+        `anullsrc=r=48000:cl=stereo,atrim=duration=${aligned},` +
+        `asetpts=PTS-STARTPTS[${audioLabel}]`
+      );
+    }
+    concatInputs.push(`[${audioLabel}]`);
+  }
+
+  filters.push(`${concatInputs.join('')}concat=n=${sources.length}:v=1:a=${keepsAudio ? 1 : 0}[v]${keepsAudio ? '[a]' : ''}`);
+
+  const args = [
+    ...inputs,
+    '-filter_complex', filters.join(';'),
+    '-map', '[v]',
+    ...(keepsAudio ? ['-map', '[a]'] : []),
+    '-map_metadata', '-1',
+    '-metadata:s:v:0', 'rotate=0',
+    '-c:v', 'libx264',
+    ...videoQualityArguments('libx264', merged),
+    ...(keepsAudio ? audioArguments('m4a', merged) : ['-an']),
+    '-movflags', '+faststart',
+    '-y', 'output.mp4',
+  ];
+
+  const plan = {
+    steps: [{ args, label: `Joining ${sources.length} videos` }],
+    inputNames,
+    outputs: ['output.mp4'],
+    mime: 'video/mp4',
+    downloadName: `${stemOf(sources[0].name)}-joined.mp4`,
+    duration: durations.reduce((total, duration) => total + duration, 0),
+    width: canvas.width,
+    height: canvas.height,
+    fps,
+    fit,
+  };
+
+  return finalisePlan('join-videos', plan);
+}
+
 const BUILDERS = {
   convert: buildConvert,
   remux: buildRemux,
@@ -699,6 +862,20 @@ const BUILDERS = {
   thumbnail: buildThumbnail,
   raw: buildRaw,
 };
+
+function finalisePlan(operation, plan) {
+  return {
+    operation,
+    ...plan,
+    // Prepended to every invocation rather than set once, because FFmpeg's
+    // verbosity is a process global and this core keeps one process alive for
+    // the whole session: a `-v quiet` from an earlier probe, or a debug level
+    // left over from anything else, would otherwise decide how much this job
+    // prints. At debug level the status line changes shape and progress stops
+    // being readable, so the level is stated every time.
+    steps: plan.steps.map((step) => ({ ...step, args: ['-hide_banner', '-loglevel', 'info', '-stats', ...step.args] })),
+  };
+}
 
 /**
  * Build the plan for one job.
@@ -718,17 +895,7 @@ export function buildPlan(source, operation, options = {}) {
 
   const plan = build(source, merged, names);
 
-  return {
-    operation,
-    ...plan,
-    // Prepended to every invocation rather than set once, because FFmpeg's
-    // verbosity is a process global and this core keeps one process alive for
-    // the whole session: a `-v quiet` from an earlier probe, or a debug level
-    // left over from anything else, would otherwise decide how much this job
-    // prints. At debug level the status line changes shape and progress stops
-    // being readable, so the level is stated every time.
-    steps: plan.steps.map((step) => ({ ...step, args: ['-hide_banner', '-loglevel', 'info', '-stats', ...step.args] })),
-  };
+  return finalisePlan(operation, plan);
 }
 
 /** The plan as one line, for the command preview and for copying. */
