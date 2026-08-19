@@ -11,6 +11,7 @@ import {
 const EXPECTED_AVAILABLE = [
   'audio-converter',
   'audio-trim',
+  'video-add-audio',
   'video-converter',
   'video-crop',
   'video-flip',
@@ -81,7 +82,7 @@ test('only honest entry points backed by the current local engine are available'
     .sort();
 
   assert.deepEqual(available, EXPECTED_AVAILABLE);
-  assert.equal(TOOL_CATALOG.filter((tool) => tool.availability === 'planned').length, 43);
+  assert.equal(TOOL_CATALOG.filter((tool) => tool.availability === 'planned').length, 42);
 });
 
 test('lookup and listing helpers return canonical entries', () => {

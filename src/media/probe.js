@@ -330,6 +330,36 @@ function num(value) {
   return Number.isFinite(number) ? number : null;
 }
 
+const positiveDuration = (value) => {
+  const duration = Number(value);
+  return Number.isFinite(duration) && duration > 0 ? duration : null;
+};
+
+/**
+ * Duration of one selected track, without letting a longer sibling stream
+ * redefine it through the container duration.
+ *
+ * A container fallback is safe when this is the only playable track. When a
+ * file has both video and audio, accepting their shared container duration
+ * for an unknown stream would make (for example) six seconds of audio turn a
+ * three-second video into a six-second output.
+ */
+export function trackDuration(info, kind) {
+  if (kind !== 'video' && kind !== 'audio') return null;
+  const stream = info?.[kind];
+  if (!stream) return null;
+
+  const duration = positiveDuration(stream.duration);
+  if (duration !== null) return duration;
+
+  const otherKind = kind === 'video' ? 'audio' : 'video';
+  if (info?.[otherKind] || info?.[`has${otherKind[0].toUpperCase()}${otherKind.slice(1)}`] === true) return null;
+  return positiveDuration(info?.duration);
+}
+
+export const videoTrackDuration = (info) => trackDuration(info, 'video');
+export const audioTrackDuration = (info) => trackDuration(info, 'audio');
+
 /** Frame rates arrive as the exact rational FFmpeg holds: `30/1`, `30000/1001`, `0/0`. */
 function ratio(value) {
   const match = /^(\d+)\/(\d+)$/.exec(String(value || ''));
@@ -377,6 +407,16 @@ export function parseProbeJson(json) {
 
   for (const raw of data.streams) {
     const kind = String(raw.codec_type || '').toLowerCase();
+    const rawStartTime = num(raw.start_time);
+    const taggedEndTime = parseClock(raw.tags?.DURATION ?? raw.tags?.duration);
+    // In Matroska this tag is normally the stream's end timestamp, despite
+    // being named DURATION. Subtract its timeline origin when one is known;
+    // retain the raw positive value as a compatibility fallback for muxers
+    // that write an actual duration into the same tag.
+    const taggedSpan = taggedEndTime === null
+      ? null
+      : taggedEndTime - (rawStartTime ?? info.startTime ?? 0);
+    const taggedDuration = positiveDuration(taggedSpan) ?? positiveDuration(taggedEndTime);
     const stream = {
       index: num(raw.index) ?? 0,
       input: 0,
@@ -386,11 +426,15 @@ export function parseProbeJson(json) {
       language: raw.tags?.language && raw.tags.language !== 'und' ? raw.tags.language : null,
       default: raw.disposition?.default === 1,
       bitrate: num(raw.bit_rate),
-      duration: num(raw.duration),
+      // Matroska/WebM commonly leaves `stream.duration` empty and writes the
+      // same value as a `DURATION=HH:MM:SS.nnn` tag. Keeping it on the normal
+      // duration field means every caller gets the precise track length and
+      // never has to fall back to a possibly longer sibling stream.
+      duration: num(raw.duration) ?? taggedDuration,
       // Per-stream origins are needed to preserve an intentional A/V delay
       // when filters rebase PTS. The container start alone cannot describe a
       // video beginning at 5s and its audio beginning at 6s.
-      startTime: num(raw.start_time),
+      startTime: rawStartTime,
     };
 
     if (kind === 'video') {

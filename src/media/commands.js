@@ -35,6 +35,13 @@ import {
   normalizeVolumeGain,
   playableMediaDuration,
 } from './quick-tools.js';
+import {
+  ADD_AUDIO_OPERATION,
+  addAudioOriginalPlacement,
+  addAudioPlacement,
+  normalizeAddAudioOptions,
+} from './add-audio.js';
+import { audioTrackDuration, videoTrackDuration } from './probe.js';
 
 /**
  * @typedef {object} Plan
@@ -905,6 +912,139 @@ function joinFrameRate(first, options) {
   // The UI tops out at 60 fps. Keeping the pure builder bounded as well avoids
   // an accidental or hand-written option turning one browser job into 1000 fps.
   return Math.min(60, Math.max(1, chosen));
+}
+
+const normalAudioFilters = () => (
+  'aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo'
+);
+
+const delayedAudioFilter = (delay) => (
+  delay > 0 ? `,adelay=${Math.round(delay * 1000)}:all=1` : ''
+);
+
+const limitedAudioFilter = (enabled) => (
+  enabled ? ',alimiter=limit=0.95:level=false:latency=true' : ''
+);
+
+/**
+ * Build the two-input "Agregar audio a video" invocation.
+ *
+ * The primary video's track duration is authoritative. The added track may be
+ * mixed with or replace original audio, and may play once or repeat, but it
+ * never lengthens or shortens the picture-owned output timeline.
+ *
+ * @param {{video:{name:string,size?:number,info:object}, audio:{name:string,size?:number,info:object}}} source
+ * @param {object} options
+ * @returns {Plan}
+ */
+export function buildAddAudioPlan(source, options = {}) {
+  const video = source?.video;
+  const audio = source?.audio;
+  if (!video?.name || video?.info?.hasVideo !== true) {
+    throw new Error('Choose a primary file with a video track.');
+  }
+  if (!audio?.name || audio?.info?.hasAudio !== true) {
+    throw new Error('Choose a second file with an audio track.');
+  }
+
+  const normalized = normalizeAddAudioOptions(video.info, options);
+  if (!normalized) throw new Error('The add-audio options are invalid.');
+
+  const duration = videoTrackDuration(video.info);
+  if (duration === null) throw new Error('The primary video does not report a usable track duration.');
+  if (audioTrackDuration(audio.info) === null) throw new Error('The added audio does not report a usable track duration.');
+
+  const placement = addAudioPlacement(video.info, audio.info, normalized);
+  if (!placement) throw new Error('The added audio does not overlap the video timeline.');
+
+  const inputNames = [
+    `input-video.${extensionOf(video.name)}`,
+    `input-audio.${extensionOf(audio.name)}`,
+  ];
+  const inputs = [
+    '-i', inputNames[0],
+    ...(normalized.audioFit === 'loop' ? ['-stream_loop', '-1'] : []),
+    '-i', inputNames[1],
+  ];
+  const outputDuration = filterNumber(placement.outputDuration);
+  const filters = [
+    `[0:v:0]trim=duration=${outputDuration},setpts=PTS-STARTPTS,` +
+    'pad=ceil(iw/2)*2:ceil(ih/2)*2,format=yuv420p[v]',
+  ];
+
+  const addedTrim = [
+    placement.trimStart > 0 ? `start=${filterNumber(placement.trimStart)}` : null,
+    `duration=${filterNumber(placement.audibleDuration)}`,
+  ].filter(Boolean).join(':');
+  const addedChain = [
+    `[1:a:0]atrim=${addedTrim}`,
+    normalAudioFilters(),
+    `volume=${filterNumber(normalized.addedGain)}`,
+    'asetpts=PTS-STARTPTS',
+  ].join(',') + delayedAudioFilter(placement.delay) +
+    `,apad,atrim=duration=${outputDuration}`;
+
+  const originalPlacement = addAudioOriginalPlacement(video.info);
+  const mixesOriginal = normalized.mixMode === 'mix'
+    && video.info.hasAudio === true
+    && originalPlacement?.overlaps === true;
+  if (normalized.addedGain === 0 && (!mixesOriginal || normalized.originalGain === 0)) {
+    throw new Error('The selected tracks would produce silent output.');
+  }
+
+  if (mixesOriginal) {
+    const originalTrim = originalPlacement.trimStart > 0
+      ? `atrim=start=${filterNumber(originalPlacement.trimStart)},`
+      : '';
+    filters.push(
+      `[0:a:0]${originalTrim}${normalAudioFilters()},` +
+      `volume=${filterNumber(normalized.originalGain)},asetpts=PTS-STARTPTS` +
+      delayedAudioFilter(originalPlacement.delay) +
+      `,apad,atrim=duration=${outputDuration}[original]`
+    );
+    filters.push(`${addedChain}[added]`);
+    filters.push(
+      `[original][added]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0` +
+      limitedAudioFilter(normalized.limiter) +
+      `,atrim=duration=${outputDuration},asetpts=PTS-STARTPTS[a]`
+    );
+  } else {
+    filters.push(
+      `${addedChain}${limitedAudioFilter(normalized.limiter)},` +
+      `atrim=duration=${outputDuration},asetpts=PTS-STARTPTS[a]`
+    );
+  }
+
+  const args = [
+    ...inputs,
+    '-filter_complex', filters.join(';'),
+    '-map', '[v]',
+    '-map', '[a]',
+    '-map_metadata', '-1',
+    '-metadata:s:v:0', 'rotate=0',
+    '-c:v', 'libx264',
+    ...videoQualityArguments('libx264', normalized),
+    '-c:a', 'aac',
+    '-b:a', `${normalized.audioBitrate}k`,
+    '-ar', '48000',
+    '-ac', '2',
+    '-t', outputDuration,
+    '-movflags', '+faststart',
+    '-y', 'output.mp4',
+  ];
+
+  return finalisePlan(ADD_AUDIO_OPERATION, {
+    steps: [{ args, label: 'Adding audio to video' }],
+    inputNames,
+    outputs: ['output.mp4'],
+    mime: 'video/mp4',
+    downloadName: `${stemOf(video.name)}-con-audio.mp4`,
+    duration: placement.outputDuration,
+    mixMode: mixesOriginal ? 'mix' : 'replace',
+    audioFit: normalized.audioFit,
+    placement,
+    options: normalized,
+  });
 }
 
 /**

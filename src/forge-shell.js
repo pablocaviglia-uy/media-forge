@@ -44,6 +44,13 @@ if (document.documentElement.dataset.interface === 'forge') {
       format: 'mp4-h264',
       group: true,
     },
+    'video-add-audio': {
+      operation: 'add-audio-to-video',
+      accept: 'video/*',
+      format: 'mp4-h264',
+      project: 'add-audio',
+      single: true,
+    },
     'video-trim': { operation: 'convert', accept: 'video/*', format: 'mp4-h264', single: true },
     'audio-trim': { operation: 'extract-audio', accept: 'audio/*,video/*', single: true },
     'video-rotate': {
@@ -267,6 +274,7 @@ if (document.documentElement.dataset.interface === 'forge') {
       return;
     }
 
+    app.clearPickerIntent?.();
     pendingToolId = tool.id;
     if (preset.advanced) prefs.set('advanced', true);
     fileInput.accept = preset.accept;
@@ -296,6 +304,14 @@ if (document.documentElement.dataset.interface === 'forge') {
     const preset = PRESETS[toolId];
     if (toolId && preset?.group) {
       app.addMergeProject(files, toolId);
+      resetPickerIntent();
+      app.paintQueue();
+      app.paintDetail();
+      return;
+    }
+    if (toolId && preset?.project === 'add-audio') {
+      if (files.length > 1) app.toast('Agregar audio usa un video principal; tomamos únicamente el primer archivo.');
+      app.addAudioProject(files[0], toolId);
       resetPickerIntent();
       app.paintQueue();
       app.paintDetail();

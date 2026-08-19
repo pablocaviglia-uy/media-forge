@@ -16,8 +16,8 @@
  * the single exception called out at IMMUTABLE.
  */
 
-// v8 adds the focused volume, playback-speed and bounded-loop experiences.
-const CACHE_VERSION = 'v8';
+// v9 adds the two-source audio-over-video Studio workspace.
+const CACHE_VERSION = 'v9';
 const CACHE_NAME = `media-forge-${CACHE_VERSION}`;
 
 /**
@@ -56,6 +56,7 @@ const PRECACHE = [
   './src/media/probe.js',
   './src/media/quick-tools.js',
   './src/media/merge.js',
+  './src/media/add-audio.js',
   './src/media/timeline.js',
   './src/media/zip.js',
   './src/storage/prefs.js',
@@ -64,6 +65,7 @@ const PRECACHE = [
   './src/ui/scrubber.js',
   './src/ui/cropper.js',
   './src/ui/merge-sequence.js',
+  './src/ui/audio-mix-timeline.js',
 
   /*
    * The FFmpeg core, minus the part of it that matters most.

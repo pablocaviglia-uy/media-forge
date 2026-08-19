@@ -26,7 +26,7 @@ import { spawnSync } from 'node:child_process';
 
 import { isFatal } from '../src/ffmpeg/failures.js';
 
-import { buildPlan, buildJoinVideosPlan } from '../src/media/commands.js';
+import { buildPlan, buildJoinVideosPlan, buildAddAudioPlan } from '../src/media/commands.js';
 import { parseProbeJson, parseProbe } from '../src/media/probe.js';
 import { parseEncoders, parseMuxers, missingFor } from '../src/ffmpeg/capabilities.js';
 import { VIDEO_FORMATS, AUDIO_FORMATS, IMAGE_FORMATS, remuxTargets } from '../src/media/formats.js';
@@ -612,6 +612,124 @@ describe('video joining on an isolated core', { skip: VENDORED ? false : 'core n
       output.audio.duration >= plan.duration - 0.03,
       `audio ended at ${output.audio.duration}; the silent segment was not filled to ${plan.duration}`
     );
+  });
+});
+
+/** Two-input audio editing gets a fresh core for the same lifetime reason. */
+describe('adding audio on an isolated core', { skip: VENDORED ? false : 'core not vendored' }, () => {
+  test('mixes a delayed short track and can loop it through a replacement', async () => {
+    const fresh = await loadCore();
+    let freshLines = [];
+    fresh.setLogger(({ message }) => freshLines.push(message));
+
+    const runFresh = (...args) => {
+      freshLines = [];
+      fresh.reset();
+      const code = fresh.exec(...args);
+      return { code, text: freshLines.join('\n') };
+    };
+    const probeFresh = (name, reportName) => {
+      freshLines = [];
+      fresh.reset();
+      fresh.ffprobe(
+        '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams',
+        '-o', reportName, name
+      );
+      const report = new TextDecoder().decode(fresh.FS.readFile(reportName));
+      fresh.FS.unlink(reportName);
+      return parseProbeJson(report);
+    };
+    const runFreshPlan = (plan) => {
+      for (const step of plan.steps) {
+        const result = runFresh(...step.args);
+        assert.equal(
+          result.code,
+          0,
+          `isolated add-audio failed:\n  ffmpeg ${step.args.join(' ')}\n${result.text.split('\n').slice(-12).join('\n')}`
+        );
+      }
+    };
+
+    const videoMade = runFresh(
+      '-f', 'lavfi', '-i', 'testsrc2=size=160x90:rate=15:duration=3',
+      '-f', 'lavfi', '-i', 'sine=frequency=110:sample_rate=44100:duration=3',
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac', '-ac', '1', '-b:a', '64k', '-shortest',
+      '-y', 'input-video.mp4'
+    );
+    assert.equal(videoMade.code, 0, `could not make add-audio video:\n${videoMade.text.split('\n').slice(-8).join('\n')}`);
+
+    const audioMade = runFresh(
+      '-f', 'lavfi', '-i', 'sine=frequency=880:sample_rate=32000:duration=0.75',
+      '-c:a', 'libmp3lame', '-b:a', '64k', '-y', 'input-audio.mp3'
+    );
+    assert.equal(audioMade.code, 0, `could not make added MP3:\n${audioMade.text.split('\n').slice(-8).join('\n')}`);
+
+    const videoInfo = probeFresh('input-video.mp4', 'add-audio-video.json');
+    const audioInfo = probeFresh('input-audio.mp3', 'add-audio-track.json');
+    const addSource = {
+      video: source('phone.mp4', videoInfo),
+      audio: source('music.mp3', audioInfo),
+    };
+
+    const mixed = buildAddAudioPlan(addSource, {
+      mixMode: 'mix',
+      originalGain: 0.25,
+      addedGain: 1,
+      audioOffset: 1,
+      speed: 'ultrafast',
+      audioBitrate: 64,
+    });
+    runFreshPlan(mixed);
+    const mixedInfo = probeFresh(mixed.outputs[0], 'add-audio-mix-output.json');
+    assert.equal(mixedInfo.video.codec, 'h264');
+    assert.equal(mixedInfo.audio.codec, 'aac');
+    assert.equal(mixedInfo.audio.sampleRate, 48_000);
+    assert.equal(mixedInfo.audio.channels, 2);
+    assert.ok(Math.abs(mixedInfo.duration - 3) < 0.06, `mixed output duration was ${mixedInfo.duration}`);
+
+    const windowRms = (start, name) => {
+      const decoded = runFresh(
+        '-i', mixed.outputs[0], '-ss', String(start), '-t', '0.2',
+        '-map', '0:a:0', '-ac', '1', '-c:a', 'pcm_s16le', '-f', 's16le', '-y', name
+      );
+      assert.equal(decoded.code, 0, `could not inspect mixed audio at ${start}s`);
+      const pcm = fresh.FS.readFile(name);
+      const samples = new Int16Array(pcm.buffer, pcm.byteOffset, Math.floor(pcm.byteLength / 2));
+      const energy = samples.reduce((sum, sample) => sum + (sample * sample), 0);
+      return Math.sqrt(energy / samples.length);
+    };
+    const beforeAdded = windowRms(0.2, 'mix-before.pcm');
+    const duringAdded = windowRms(1.1, 'mix-during.pcm');
+    const afterAdded = windowRms(2.1, 'mix-after.pcm');
+    assert.ok(duringAdded > beforeAdded * 1.7, 'the delayed added track was not audible during its window');
+    assert.ok(
+      Math.abs(afterAdded - beforeAdded) / beforeAdded < 0.1,
+      'the short added track did not return to silence after playing once'
+    );
+
+    const looped = buildAddAudioPlan(addSource, {
+      mixMode: 'replace',
+      audioFit: 'loop',
+      speed: 'ultrafast',
+      audioBitrate: 64,
+    });
+    runFreshPlan(looped);
+    const loopedInfo = probeFresh(looped.outputs[0], 'add-audio-loop-output.json');
+    assert.ok(Math.abs(loopedInfo.duration - 3) < 0.06, `loop output duration was ${loopedInfo.duration}`);
+    assert.ok(loopedInfo.audio.duration >= 2.95, `looped audio ended at ${loopedInfo.audio.duration}`);
+
+    // The source track ends before 0.8s. Audible samples near 2.3s prove the
+    // repeated replacement is not merely an AAC stream padded with silence.
+    const lateAudio = runFresh(
+      '-ss', '2.2', '-t', '0.2', '-i', looped.outputs[0],
+      '-map', '0:a:0', '-c:a', 'pcm_s16le', '-f', 's16le', '-y', 'late-loop.pcm'
+    );
+    assert.equal(lateAudio.code, 0, `could not inspect late loop audio:\n${lateAudio.text.split('\n').slice(-8).join('\n')}`);
+    const pcm = fresh.FS.readFile('late-loop.pcm');
+    const samples = new Int16Array(pcm.buffer, pcm.byteOffset, Math.floor(pcm.byteLength / 2));
+    const peak = samples.reduce((maximum, sample) => Math.max(maximum, Math.abs(sample)), 0);
+    assert.ok(peak > 100, `late loop audio was silent (PCM peak ${peak})`);
   });
 });
 

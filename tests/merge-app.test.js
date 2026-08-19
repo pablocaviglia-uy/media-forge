@@ -41,7 +41,8 @@ function appWithoutDom(engine = {}) {
     runningId: null,
     stopRequested: false,
     chain: Promise.resolve(),
-    mergePickerJobId: null,
+    pickerIntent: null,
+    nextPickerToken: 1,
     mergeSourcePreview: null,
     mergeSequence: null,
     quickOutputPreview: null,
@@ -223,13 +224,13 @@ test('an explicit new-tool intent cannot append to a selected merge project', as
   const app = appWithoutDom({ async probe() { return mediaInfo(); } });
   const merge = app.addMergeProject([file('one.mp4'), file('two.mp4')]);
   await app.chain;
-  app.mergePickerJobId = merge.id;
+  app.setPickerIntent({ kind: 'merge-append', projectId: merge.id });
 
   const conversion = file('convert-me.mp4');
   app.addFiles([conversion], { forceNewJobs: true });
   await app.chain;
 
-  assert.equal(app.mergePickerJobId, null);
+  assert.equal(app.pickerIntent, null);
   assert.equal(merge.clips.length, 2);
   assert.equal(app.jobs.length, 2);
   assert.equal(app.jobs[1].file, conversion);

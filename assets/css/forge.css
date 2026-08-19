@@ -3862,6 +3862,1103 @@ html[data-interface="forge"] .detail[data-workspace="video-merge"] .quick-foot-s
   }
 }
 
+/* ------------------------------------------------------------------ *
+ * Add audio to video
+ *
+ * A compact Studio mixer: the preview and inspector own the upper plane while
+ * the two source tracks stay readable across the full project width. The
+ * timeline controls placement only; it does not masquerade as a full editor.
+ * ------------------------------------------------------------------ */
+
+html[data-interface="forge"] .detail[data-workspace="video-add-audio"] {
+  gap: 1rem;
+  width: min(1400px, 100%);
+  min-height: 100%;
+  margin: 0 auto;
+  padding: clamp(0.9rem, 2vw, 1.6rem) clamp(0.8rem, 2.4vw, 2rem) 1.25rem;
+}
+
+html[data-interface="forge"] .detail[data-workspace="video-add-audio"] > #preview,
+html[data-interface="forge"] .detail[data-workspace="video-add-audio"] > .detail-head {
+  display: none;
+}
+
+html[data-interface="forge"] .detail[data-workspace="video-add-audio"] > .controls {
+  display: block;
+  min-width: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+html[data-interface="forge"] .audio-mix-layout {
+  display: grid;
+  grid-template-areas:
+    "canvas inspector"
+    "timeline timeline";
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 344px);
+  gap: clamp(0.8rem, 1.5vw, 1.15rem);
+  align-items: start;
+  min-width: 0;
+}
+
+html[data-interface="forge"] .audio-mix-canvas,
+html[data-interface="forge"] .audio-mix-inspector,
+html[data-interface="forge"] .audio-mix-timeline {
+  min-width: 0;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--bg-raised) 96%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+
+html[data-interface="forge"] .audio-mix-canvas {
+  grid-area: canvas;
+  display: flex;
+  flex-direction: column;
+  min-height: min(600px, calc(100dvh - var(--topbar-height) - var(--statusbar-height) - 15rem));
+}
+
+html[data-interface="forge"] .audio-mix-inspector {
+  grid-area: inspector;
+  display: flex;
+  flex-direction: column;
+}
+
+html[data-interface="forge"] .audio-mix-timeline {
+  grid-area: timeline;
+  display: flex;
+  flex-direction: column;
+}
+
+html[data-interface="forge"] .audio-mix-preview-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  min-height: 68px;
+  padding: 0.9rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+html[data-interface="forge"] .audio-mix-preview-copy {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+html[data-interface="forge"] .audio-mix-preview-copy > strong,
+html[data-interface="forge"] .audio-mix-preview-copy > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[data-interface="forge"] .audio-mix-preview-copy > strong {
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 680;
+}
+
+html[data-interface="forge"] .audio-mix-preview-copy > span,
+html[data-interface="forge"] .audio-mix-preview-copy > small {
+  color: var(--fg-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+html[data-interface="forge"] .audio-mix-preview-stage {
+  position: relative;
+  isolation: isolate;
+  display: grid;
+  flex: 1 1 auto;
+  place-items: center;
+  min-width: 0;
+  min-height: clamp(330px, 47vh, 540px);
+  padding: clamp(0.8rem, 2vw, 1.25rem);
+  overflow: hidden;
+  color: #d6e2de;
+  background:
+    linear-gradient(45deg, rgb(255 255 255 / 0.022) 25%, transparent 25%, transparent 75%, rgb(255 255 255 / 0.022) 75%),
+    linear-gradient(45deg, rgb(255 255 255 / 0.022) 25%, transparent 25%, transparent 75%, rgb(255 255 255 / 0.022) 75%),
+    radial-gradient(circle at 50% 43%, #222c29, #090c0b 74%);
+  background-position: 0 0, 12px 12px, 0 0;
+  background-size: 24px 24px, 24px 24px, auto;
+}
+
+html[data-interface="forge"] .audio-mix-preview-stage::before {
+  content: "";
+  position: absolute;
+  inset: clamp(0.65rem, 1.6vw, 1rem);
+  z-index: -1;
+  pointer-events: none;
+  border: 1px dashed rgb(255 255 255 / 0.1);
+  border-radius: 10px;
+}
+
+html[data-interface="forge"] .audio-mix-preview-composite,
+html[data-interface="forge"] .audio-mix-preview-stage .quick-result-preview {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+html[data-interface="forge"] .audio-mix-preview-media,
+html[data-interface="forge"] .audio-mix-preview-stage .quick-result-media {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: min(94%, 960px);
+  max-height: min(49vh, 510px);
+  object-fit: contain;
+  background: #030504;
+  border-radius: 9px;
+  box-shadow: 0 26px 68px -30px rgb(0 0 0 / 0.95);
+}
+
+html[data-interface="forge"] .audio-mix-preview-badge {
+  position: absolute;
+  top: 0.7rem;
+  right: 0.7rem;
+  min-height: 28px;
+  padding: 0.32rem 0.62rem;
+  color: #b8f1e8;
+  font-size: 9px;
+  font-weight: 720;
+  letter-spacing: 0.045em;
+  text-transform: uppercase;
+  background: rgb(9 14 13 / 0.8);
+  border: 1px solid rgb(101 210 194 / 0.28);
+  border-radius: 999px;
+  backdrop-filter: blur(10px);
+}
+
+html[data-interface="forge"] .audio-mix-preview-note {
+  position: absolute;
+  right: 0.7rem;
+  bottom: 0.7rem;
+  left: 0.7rem;
+  max-width: max-content;
+  margin: auto;
+  padding: 0.4rem 0.65rem;
+  color: #d6e2de;
+  font-size: 10px;
+  line-height: 1.4;
+  text-align: center;
+  background: rgb(9 14 13 / 0.82);
+  border: 1px solid rgb(255 255 255 / 0.14);
+  border-radius: 999px;
+  backdrop-filter: blur(10px);
+}
+
+html[data-interface="forge"] .audio-mix-preview-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.65rem;
+  width: min(34rem, 90%);
+  min-height: 220px;
+  padding: 1.5rem;
+  color: #a4afaa;
+  text-align: center;
+  border: 1px dashed rgb(255 255 255 / 0.16);
+  border-radius: 12px;
+}
+
+html[data-interface="forge"] .audio-mix-preview-placeholder strong {
+  color: #edf2ef;
+  font-size: 14px;
+}
+
+html[data-interface="forge"] .audio-mix-preview-placeholder p {
+  max-width: 48ch;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+html[data-interface="forge"] .audio-mix-inspector-section,
+html[data-interface="forge"] .audio-mix-output-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-width: 0;
+  padding: 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+html[data-interface="forge"] .audio-mix-inspector > section:last-child {
+  border-bottom: 0;
+}
+
+html[data-interface="forge"] .audio-mix-inspector h3,
+html[data-interface="forge"] .audio-mix-output-section h3 {
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 720;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+}
+
+html[data-interface="forge"] .audio-mix-inspector p,
+html[data-interface="forge"] .audio-mix-output-section p {
+  color: var(--fg-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+html[data-interface="forge"] .audio-mix-section-head,
+html[data-interface="forge"] .audio-mix-section-head > div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+html[data-interface="forge"] .audio-mix-inspector .audio-mix-source-grid {
+  grid-template-columns: minmax(0, 1fr);
+  padding: 0;
+  border-bottom: 0;
+}
+
+html[data-interface="forge"] .audio-mix-inspector .audio-mix-source-card {
+  display: flex;
+  align-items: stretch;
+  flex-direction: column;
+  gap: 0.6rem;
+  min-height: 0;
+  padding: 0.7rem;
+}
+
+html[data-interface="forge"] .audio-mix-source-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+html[data-interface="forge"] .audio-mix-source-head > div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+html[data-interface="forge"] .audio-mix-source-head strong {
+  overflow: hidden;
+  color: var(--fg);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[data-interface="forge"] .audio-mix-source-state {
+  flex: 0 0 auto;
+  min-height: 24px;
+  padding: 0.25rem 0.48rem;
+  color: var(--ok);
+  font-size: 9px;
+  font-weight: 720;
+  text-transform: uppercase;
+  background: var(--ok-soft);
+  border-radius: 999px;
+}
+
+html[data-interface="forge"] .audio-mix-source-card[data-status="probing"] .audio-mix-source-state {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+html[data-interface="forge"] .audio-mix-source-card[data-status="failed"] .audio-mix-source-state {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+html[data-interface="forge"] .audio-mix-inspector .audio-mix-source-actions {
+  justify-content: flex-start;
+}
+
+html[data-interface="forge"] .audio-mix-source-empty {
+  display: flex;
+  align-items: center;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.25rem;
+  min-height: 112px;
+  padding: 0.8rem;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 48%, var(--bg-sunken));
+  border: 1px dashed color-mix(in srgb, var(--accent) 38%, var(--border));
+  border-radius: 10px;
+}
+
+html[data-interface="forge"] .audio-mix-source-empty:hover:not(:disabled) {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+html[data-interface="forge"] .audio-mix-source-empty .audio-mix-source-icon {
+  color: var(--accent);
+  font-size: 22px;
+  background: transparent;
+  border: 0;
+}
+
+html[data-interface="forge"] .audio-mix-source-empty small {
+  color: var(--fg-muted);
+  font-size: 10px;
+}
+
+html[data-interface="forge"] .audio-mix-settings {
+  gap: 0.9rem;
+}
+
+html[data-interface="forge"] .audio-mix-control-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+html[data-interface="forge"] .audio-mix-control-block + .audio-mix-control-block,
+html[data-interface="forge"] .audio-mix-control-block + .quick-effect-control,
+html[data-interface="forge"] .quick-effect-control + .audio-mix-control-block {
+  padding-top: 0.85rem;
+  border-top: 1px solid var(--border);
+}
+
+html[data-interface="forge"] .audio-mix-offset-exact {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.55rem;
+  align-items: center;
+}
+
+html[data-interface="forge"] .audio-mix-offset-exact .control-input {
+  min-width: 0;
+  font-family: var(--mono-font);
+}
+
+html[data-interface="forge"] .audio-mix-offset-exact .text-button {
+  min-height: var(--forge-control-height);
+  white-space: nowrap;
+}
+
+html[data-interface="forge"] .audio-mix-output-section .control,
+html[data-interface="forge"] .audio-mix-output-section .control-input,
+html[data-interface="forge"] .audio-mix-output-section select {
+  min-width: 0;
+  max-width: 100%;
+}
+
+html[data-interface="forge"] .audio-mix-output-note {
+  padding: 0.6rem 0.65rem;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+}
+
+html[data-interface="forge"] .audio-mix-status-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-height: 64px;
+  padding: 0.8rem 0.85rem 0.8rem 2.85rem;
+  color: var(--fg-muted);
+  font-size: 11px;
+  line-height: 1.45;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 11px;
+}
+
+html[data-interface="forge"] .audio-mix-status-card::before {
+  content: "";
+  position: absolute;
+  top: 1rem;
+  left: 0.9rem;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--border-strong);
+  border-radius: 50%;
+}
+
+html[data-interface="forge"] .audio-mix-status-card strong {
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 680;
+}
+
+html[data-interface="forge"] .audio-mix-status-card progress {
+  width: 100%;
+  height: 5px;
+  margin-top: 0.35rem;
+  accent-color: var(--accent);
+}
+
+html[data-interface="forge"] .audio-mix-status-card[data-status="probing"]::before,
+html[data-interface="forge"] .audio-mix-status-card[data-status="queued"]::before,
+html[data-interface="forge"] .audio-mix-status-card[data-status="running"]::before {
+  border-color: color-mix(in srgb, var(--accent) 26%, var(--border));
+  border-top-color: var(--accent);
+  animation: quick-tool-spin 760ms linear infinite;
+}
+
+html[data-interface="forge"] .audio-mix-status-card[data-status="done"] {
+  color: var(--ok);
+  background: var(--ok-soft);
+  border-color: color-mix(in srgb, var(--ok) 30%, var(--border));
+}
+
+html[data-interface="forge"] .audio-mix-status-card[data-status="done"]::before {
+  content: "✓";
+  display: grid;
+  place-items: center;
+  color: var(--ok);
+  font-size: 11px;
+  font-weight: 800;
+  border-color: var(--ok);
+}
+
+html[data-interface="forge"] .audio-mix-status-card[data-status="failed"] {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: color-mix(in srgb, var(--danger) 32%, var(--border));
+}
+
+html[data-interface="forge"] .audio-mix-status-card[data-status="failed"]::before {
+  content: "!";
+  display: grid;
+  place-items: center;
+  color: var(--danger);
+  font-size: 11px;
+  font-weight: 800;
+  border-color: var(--danger);
+}
+
+html[data-interface="forge"] .audio-mix-timeline-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.85rem;
+  min-height: 62px;
+  padding: 0.75rem 0.9rem;
+  border-bottom: 1px solid var(--border);
+}
+
+html[data-interface="forge"] .audio-mix-timeline-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+html[data-interface="forge"] .audio-mix-timeline-copy > strong {
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 720;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+}
+
+html[data-interface="forge"] .audio-mix-timeline-summary {
+  overflow: hidden;
+  color: var(--fg-muted);
+  font-family: var(--mono-font);
+  font-size: 10px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[data-interface="forge"] .audio-mix-fit-badge {
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 0.35rem 0.65rem;
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.4;
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+  border-radius: 999px;
+}
+
+html[data-interface="forge"] .audio-mix-source-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+  padding: 0.85rem;
+  border-bottom: 1px solid var(--border);
+}
+
+html[data-interface="forge"] .audio-mix-source-card {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  gap: 0.7rem;
+  align-items: center;
+  min-width: 0;
+  min-height: 78px;
+  padding: 0.7rem;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+html[data-interface="forge"] .audio-mix-source-card.is-empty {
+  background: color-mix(in srgb, var(--accent-soft) 42%, var(--bg-sunken));
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+  border-style: dashed;
+}
+
+html[data-interface="forge"] .audio-mix-source-card.has-error {
+  background: var(--danger-soft);
+  border-color: color-mix(in srgb, var(--danger) 32%, var(--border));
+}
+
+html[data-interface="forge"] .audio-mix-source-icon {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  color: var(--accent);
+  font-size: 16px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+html[data-interface="forge"] .audio-mix-source-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+  min-width: 0;
+}
+
+html[data-interface="forge"] .audio-mix-source-copy > span {
+  color: var(--fg-subtle);
+  font-size: 9px;
+  font-weight: 720;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+}
+
+html[data-interface="forge"] .audio-mix-source-copy > strong,
+html[data-interface="forge"] .audio-mix-source-copy > small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[data-interface="forge"] .audio-mix-source-copy > strong {
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 680;
+}
+
+html[data-interface="forge"] .audio-mix-source-copy > small {
+  color: var(--fg-muted);
+  font-size: 10px;
+}
+
+html[data-interface="forge"] .audio-mix-source-card.has-error .audio-mix-source-copy > small {
+  color: var(--danger);
+}
+
+html[data-interface="forge"] .audio-mix-source-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 0.35rem;
+  align-items: center;
+}
+
+html[data-interface="forge"] .audio-mix-source-action {
+  min-height: 38px;
+  padding-inline: 0.7rem;
+  white-space: nowrap;
+}
+
+html[data-interface="forge"] .audio-mix-source-remove:hover:not(:disabled) {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+html[data-interface="forge"] .audio-mix-timeline-body {
+  min-width: 0;
+  padding: 0.9rem;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--bg-sunken) 58%, transparent), transparent 74%),
+    var(--bg-raised);
+}
+
+html[data-interface="forge"] .audio-mix-tracks {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  min-width: 0;
+}
+
+html[data-interface="forge"] .audio-mix-track-row {
+  display: grid;
+  grid-template-columns: 4.6rem minmax(0, 1fr);
+  gap: 0.65rem;
+  align-items: center;
+  min-width: 0;
+}
+
+html[data-interface="forge"] .audio-mix-track-label {
+  color: var(--fg-muted);
+  font-size: 10px;
+  font-weight: 720;
+  letter-spacing: 0.05em;
+  text-align: right;
+  text-transform: uppercase;
+}
+
+html[data-interface="forge"] .audio-mix-track-lane {
+  position: relative;
+  isolation: isolate;
+  min-width: 0;
+  height: 54px;
+  overflow: hidden;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+html[data-interface="forge"] .audio-mix-track-grid {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    90deg,
+    transparent 0,
+    transparent calc(12.5% - 1px),
+    color-mix(in srgb, var(--border-strong) 52%, transparent) calc(12.5% - 1px),
+    color-mix(in srgb, var(--border-strong) 52%, transparent) 12.5%
+  );
+  opacity: 0.58;
+}
+
+html[data-interface="forge"] .audio-mix-clip {
+  position: absolute;
+  z-index: 1;
+  top: 5px;
+  bottom: 5px;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-width: 0;
+  min-height: 42px;
+  overflow: hidden;
+  color: var(--fg);
+  text-align: left;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  border-radius: 8px;
+}
+
+html[data-interface="forge"] .audio-mix-video-clip {
+  right: 5px;
+  left: 5px;
+  padding: 0 0.75rem;
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--accent-soft) 72%, var(--bg-raised)), var(--bg-raised));
+}
+
+html[data-interface="forge"] .audio-mix-video-clip::before {
+  content: "";
+  flex: 0 0 20px;
+  width: 20px;
+  height: 14px;
+  background:
+    linear-gradient(90deg, currentColor 0 2px, transparent 2px 6px, currentColor 6px 8px, transparent 8px 12px, currentColor 12px 14px, transparent 14px);
+  opacity: 0.32;
+}
+
+html[data-interface="forge"] .audio-mix-video-clip strong,
+html[data-interface="forge"] .audio-mix-audio-clip strong {
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 680;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[data-interface="forge"] .audio-mix-audio-clip {
+  --audio-mix-left: 0%;
+  --audio-mix-width: 30%;
+
+  left: var(--audio-mix-left);
+  width: max(var(--audio-mix-width), 44px);
+  max-width: 100%;
+  padding: 0 0.55rem;
+  color: var(--fg);
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--accent) 15%, var(--bg-raised)), var(--accent-soft));
+  box-shadow: 0 6px 18px -14px var(--accent);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+html[data-interface="forge"] .audio-mix-tracks[data-audio-mix-fit="loop"] .audio-mix-audio-clip {
+  background:
+    repeating-linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--accent) 15%, var(--bg-raised)) 0,
+      var(--accent-soft) calc(25% - 1px),
+      color-mix(in srgb, var(--accent) 56%, var(--border)) calc(25% - 1px),
+      color-mix(in srgb, var(--accent) 56%, var(--border)) 25%
+    );
+}
+
+html[data-interface="forge"] .audio-mix-audio-clip:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 62%, var(--border));
+  box-shadow: 0 10px 22px -16px var(--accent);
+}
+
+html[data-interface="forge"] .audio-mix-audio-clip:active:not(:disabled),
+html[data-interface="forge"] .audio-mix-timeline[data-dragging="true"] .audio-mix-audio-clip {
+  cursor: grabbing;
+  box-shadow: 0 12px 26px -17px var(--accent);
+}
+
+html[data-interface="forge"] .audio-mix-audio-clip:disabled {
+  cursor: default;
+  opacity: 0.56;
+}
+
+html[data-interface="forge"] .audio-mix-audio-clip[data-clipped-start="true"] {
+  border-left-color: var(--warn);
+  border-left-style: dashed;
+}
+
+html[data-interface="forge"] .audio-mix-audio-clip[data-clipped-end="true"] {
+  border-right-color: var(--warn);
+  border-right-style: dashed;
+}
+
+html[data-interface="forge"] .audio-mix-audio-clip[data-out-of-frame="before"] {
+  right: auto;
+  left: 0;
+  width: 44px;
+  border-color: var(--danger);
+}
+
+html[data-interface="forge"] .audio-mix-audio-clip[data-out-of-frame="after"] {
+  right: 0;
+  left: auto;
+  width: 44px;
+  border-color: var(--danger);
+}
+
+html[data-interface="forge"] .audio-mix-clip-grip {
+  flex: 0 0 auto;
+  color: color-mix(in srgb, var(--accent) 72%, var(--fg-muted));
+  font-size: 13px;
+  letter-spacing: -0.32em;
+  transform: rotate(90deg);
+}
+
+html[data-interface="forge"] .audio-mix-clip-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.05rem;
+  min-width: 0;
+}
+
+html[data-interface="forge"] .audio-mix-clip-copy small {
+  overflow: hidden;
+  color: var(--fg-muted);
+  font-family: var(--mono-font);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[data-interface="forge"] .audio-mix-loop-badge {
+  display: grid;
+  flex: 0 0 24px;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  margin-left: auto;
+  color: var(--accent);
+  font-size: 14px;
+  background: color-mix(in srgb, var(--bg-raised) 78%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
+  border-radius: 999px;
+}
+
+html[data-interface="forge"] .audio-mix-track-empty {
+  position: absolute;
+  inset: 5px;
+  min-height: 42px;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 680;
+  background: color-mix(in srgb, var(--accent-soft) 42%, transparent);
+  border: 1px dashed color-mix(in srgb, var(--accent) 38%, var(--border));
+  border-radius: 8px;
+}
+
+html[data-interface="forge"] .audio-mix-track-empty:hover:not(:disabled) {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+html[data-interface="forge"] .audio-mix-playhead {
+  --audio-mix-playhead: 0%;
+
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--audio-mix-playhead);
+  z-index: 4;
+  width: 1px;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--accent) 82%, white);
+  box-shadow: 0 0 0 1px rgb(8 15 13 / 0.22);
+}
+
+html[data-interface="forge"] .audio-mix-playhead::before {
+  content: "";
+  position: absolute;
+  top: -1px;
+  left: -4px;
+  width: 9px;
+  height: 7px;
+  background: var(--accent);
+  clip-path: polygon(0 0, 100% 0, 50% 100%);
+}
+
+html[data-interface="forge"] .audio-mix-ruler {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin: 0.4rem 0 0 5.25rem;
+  color: var(--fg-subtle);
+  font-family: var(--mono-font);
+  font-size: 9px;
+}
+
+html[data-interface="forge"] .audio-mix-timeline[data-disabled="true"] .audio-mix-source-grid,
+html[data-interface="forge"] .audio-mix-timeline[data-disabled="true"] .audio-mix-timeline-body {
+  opacity: 0.72;
+}
+
+html[data-interface="forge"] .detail[data-workspace="video-add-audio"] .detail-foot {
+  position: sticky;
+  bottom: 0;
+  z-index: 12;
+  min-height: 62px;
+  margin: 0 calc(clamp(0.8rem, 2.4vw, 2rem) * -1) -1.25rem;
+  padding: 0.7rem clamp(0.8rem, 2.4vw, 2rem) max(0.7rem, env(safe-area-inset-bottom));
+  background: color-mix(in srgb, var(--bg-raised) 94%, transparent);
+  border-top: 1px solid var(--border);
+  box-shadow: 0 -16px 34px -28px rgb(19 30 27 / 0.5);
+  backdrop-filter: blur(18px) saturate(120%);
+}
+
+@media (max-width: 1180px) {
+  html[data-interface="forge"] .audio-mix-layout {
+    grid-template-columns: minmax(0, 1fr) minmax(280px, 312px);
+  }
+
+  html[data-interface="forge"] .audio-mix-preview-stage {
+    min-height: clamp(300px, 44vh, 480px);
+  }
+}
+
+@media (max-width: 880px) {
+  html[data-interface="forge"] .audio-mix-layout {
+    grid-template-areas:
+      "canvas"
+      "timeline"
+      "inspector";
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  html[data-interface="forge"] .audio-mix-canvas {
+    min-height: auto;
+  }
+
+  html[data-interface="forge"] .audio-mix-inspector {
+    overflow: visible;
+  }
+}
+
+@media (max-width: 760px) {
+  html[data-interface="forge"] .detail[data-workspace="video-add-audio"] {
+    min-height: auto;
+    padding: 0.8rem 0.75rem 1rem;
+  }
+
+  html[data-interface="forge"] .audio-mix-source-card {
+    grid-template-columns: 42px minmax(0, 1fr);
+  }
+
+  html[data-interface="forge"] .audio-mix-preview-stage {
+    min-height: clamp(240px, 60vw, 420px);
+    padding: 0.7rem;
+  }
+
+  html[data-interface="forge"] .audio-mix-preview-stage::before {
+    inset: 0.5rem;
+  }
+
+  html[data-interface="forge"] .audio-mix-preview-media,
+  html[data-interface="forge"] .audio-mix-preview-stage .quick-result-media {
+    max-width: 96%;
+    max-height: min(48dvh, 420px);
+  }
+
+  html[data-interface="forge"] .audio-mix-source-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-end;
+  }
+
+  html[data-interface="forge"] .detail[data-workspace="video-add-audio"] .detail-foot {
+    margin: 0 -0.75rem -1rem;
+    padding-inline: 0.75rem;
+  }
+}
+
+@media (max-width: 560px) {
+  html[data-interface="forge"] .audio-mix-preview-head {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 0.7rem;
+  }
+
+  html[data-interface="forge"] .audio-mix-preview-stage {
+    min-height: clamp(220px, 68vw, 340px);
+  }
+
+  html[data-interface="forge"] .audio-mix-preview-note {
+    right: 0.5rem;
+    bottom: 0.5rem;
+    left: 0.5rem;
+    max-width: none;
+    border-radius: 9px;
+  }
+
+  html[data-interface="forge"] .audio-mix-timeline-head {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 0.55rem;
+  }
+
+  html[data-interface="forge"] .audio-mix-fit-badge {
+    align-self: flex-start;
+  }
+
+  html[data-interface="forge"] .audio-mix-source-grid {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 0.65rem;
+  }
+
+  html[data-interface="forge"] .audio-mix-source-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    justify-content: stretch;
+  }
+
+  html[data-interface="forge"] .audio-mix-source-action:only-child {
+    grid-column: 1 / -1;
+  }
+
+  html[data-interface="forge"] .audio-mix-source-action {
+    width: 100%;
+  }
+
+  html[data-interface="forge"] .audio-mix-timeline-body {
+    padding: 0.7rem 0.55rem;
+  }
+
+  html[data-interface="forge"] .audio-mix-inspector-section,
+  html[data-interface="forge"] .audio-mix-output-section {
+    padding: 0.85rem;
+  }
+
+  html[data-interface="forge"] .audio-mix-offset-exact {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  html[data-interface="forge"] .audio-mix-offset-exact .text-button {
+    width: 100%;
+  }
+
+  html[data-interface="forge"] .audio-mix-track-row {
+    grid-template-columns: 3.4rem minmax(0, 1fr);
+    gap: 0.45rem;
+  }
+
+  html[data-interface="forge"] .audio-mix-track-label {
+    font-size: 9px;
+  }
+
+  html[data-interface="forge"] .audio-mix-ruler {
+    margin-left: 3.85rem;
+  }
+
+  html[data-interface="forge"] .audio-mix-video-clip strong,
+  html[data-interface="forge"] .audio-mix-clip-copy strong {
+    font-size: 10px;
+  }
+
+  html[data-interface="forge"] .detail[data-workspace="video-add-audio"] .detail-foot {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.6rem;
+  }
+
+  html[data-interface="forge"] .detail[data-workspace="video-add-audio"] .quick-foot-summary {
+    grid-column: 1 / -1;
+  }
+
+  html[data-interface="forge"] .detail[data-workspace="video-add-audio"] .detail-foot .primary-button {
+    grid-column: 1 / -1;
+    min-height: 44px;
+    order: 1;
+    width: 100%;
+  }
+
+  html[data-interface="forge"] .detail[data-workspace="video-add-audio"] .detail-foot .text-button {
+    min-width: 0;
+    min-height: 44px;
+    order: 2;
+    width: 100%;
+    white-space: normal;
+  }
+}
+
+@media (pointer: coarse) {
+  html[data-interface="forge"] .audio-mix-source-action,
+  html[data-interface="forge"] .audio-mix-audio-clip,
+  html[data-interface="forge"] .audio-mix-track-empty {
+    min-height: 44px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-interface="forge"] .audio-mix-audio-clip,
+  html[data-interface="forge"] .audio-mix-playhead,
+  html[data-interface="forge"] .audio-mix-source-card {
+    scroll-behavior: auto;
+    transition: none;
+  }
+}
+
 @media (pointer: coarse) {
   html[data-interface="forge"] {
     --forge-control-height: 44px;

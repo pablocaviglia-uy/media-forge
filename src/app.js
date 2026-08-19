@@ -22,9 +22,11 @@ import { createEngine, isolationStatus } from './ffmpeg/client.js';
 import { createScrubber } from './ui/scrubber.js';
 import { createCropper } from './ui/cropper.js';
 import { createMergeSequence } from './ui/merge-sequence.js';
+import { createAudioMixTimeline } from './ui/audio-mix-timeline.js';
 import { supportsFormat } from './ffmpeg/capabilities.js';
 import {
   buildJoinVideosPlan,
+  buildAddAudioPlan,
   buildPlan,
   planToCommand,
   operationsFor,
@@ -82,6 +84,24 @@ import {
   reorderMergeClips,
   validateMergeClips,
 } from './media/merge.js';
+import {
+  ADD_AUDIO_OPERATION,
+  ADD_AUDIO_LIMITS,
+  ADD_AUDIO_TOOL_ID,
+  addAudioHasUnexportedChanges,
+  addAudioPreflight,
+  addAudioProjectSource,
+  addAudioTotalBytes,
+  addAudioVideoTimelineStart,
+  createAddAudioAsset,
+  createAddAudioEditState,
+  createAddAudioSnapshot,
+  markAddAudioEdited,
+  markAddAudioExported,
+  normalizeAddAudioOptions,
+  validateAddAudioProject,
+} from './media/add-audio.js';
+import { audioTrackDuration, videoTrackDuration } from './media/probe.js';
 
 /**
  * Where the app refuses rather than letting FFmpeg run out of heap.
@@ -131,7 +151,10 @@ export class App {
     this.cropper = null;
     this.mergeSourcePreview = null;
     this.mergeSequence = null;
-    this.mergePickerJobId = null;
+    this.audioMixPreview = null;
+    this.audioMixTimeline = null;
+    this.pickerIntent = null;
+    this.nextPickerToken = 1;
 
     this.dom = {
       app: $('#app'),
@@ -269,15 +292,38 @@ export class App {
     return files;
   }
 
+  setPickerIntent(intent) {
+    this.pickerIntent = {
+      ...intent,
+      token: this.nextPickerToken++,
+    };
+    return this.pickerIntent;
+  }
+
+  clearPickerIntent() {
+    this.pickerIntent = null;
+  }
+
+  consumePickerIntent() {
+    const intent = this.pickerIntent;
+    this.pickerIntent = null;
+    return intent;
+  }
+
   addFiles(files, { forceNewJobs = false } = {}) {
-    if (forceNewJobs) this.mergePickerJobId = null;
-    const mergeTarget = !forceNewJobs && (
-      this.jobs.find((job) => job.id === this.mergePickerJobId)
-      || (this.isMergeJob(this.selected) ? this.selected : null)
-    );
-    if (mergeTarget) {
-      this.mergePickerJobId = null;
-      this.appendMergeFiles(mergeTarget, files);
+    if (forceNewJobs) this.clearPickerIntent();
+    const pickerIntent = forceNewJobs ? null : this.consumePickerIntent();
+    if (pickerIntent?.kind === 'merge-append') {
+      const mergeTarget = this.jobs.find((job) => job.id === pickerIntent.projectId);
+      if (this.isMergeJob(mergeTarget)) this.appendMergeFiles(mergeTarget, files);
+      else this.toast('Ese proyecto ya no está disponible.', { kind: 'error' });
+      return;
+    }
+    if (pickerIntent?.kind === 'add-audio-asset') {
+      const project = this.jobs.find((job) => job.id === pickerIntent.projectId);
+      if (files.length > 1) this.toast('Este proyecto usa una sola fuente por pista; agregamos únicamente el primer archivo.');
+      if (this.isAddAudioJob(project)) this.replaceAddAudioAsset(project, pickerIntent.role, files[0]);
+      else this.toast('Ese proyecto ya no está disponible.', { kind: 'error' });
       return;
     }
 
@@ -332,6 +378,15 @@ export class App {
 
   isMergeJob(job) {
     return Boolean(job && Array.isArray(job.clips) && job.operation === MERGE_OPERATION);
+  }
+
+  isAddAudioJob(job) {
+    return Boolean(
+      job
+      && job.kind === 'video-add-audio'
+      && job.operation === ADD_AUDIO_OPERATION
+      && job.video?.role === 'video'
+    );
   }
 
   mergeFilesWithinLimits(files, job = null) {
@@ -484,6 +539,200 @@ export class App {
     }
   }
 
+  addAudioProject(videoFile, toolId = ADD_AUDIO_TOOL_ID) {
+    if (!videoFile?.size) return null;
+    const estimatedWorkingBytes = videoFile.size * 2;
+    if (
+      videoFile.size > ADD_AUDIO_LIMITS.maxInputBytes
+      || estimatedWorkingBytes > ADD_AUDIO_LIMITS.maxWorkingBytes
+    ) {
+      this.toast(
+        `Ese video necesita más de ${formatBytes(ADD_AUDIO_LIMITS.maxWorkingBytes)} de memoria de trabajo. Elegí uno más liviano.`,
+        { kind: 'error', duration: 8500 },
+      );
+      return null;
+    }
+
+    const video = createAddAudioAsset(videoFile, 'video');
+    const job = {
+      id: String(nextJobId++),
+      kind: 'video-add-audio',
+      forgeToolId: toolId,
+      operation: ADD_AUDIO_OPERATION,
+      video,
+      audio: null,
+      file: videoFile,
+      name: videoFile.name,
+      size: videoFile.size,
+      info: null,
+      status: 'probing',
+      options: {
+        ...DEFAULT_OPTIONS,
+        format: 'mp4-h264',
+        resolution: 'source',
+        fps: 'source',
+        quality: 'balanced',
+        speed: 'veryfast',
+        mute: false,
+      },
+      progress: 0,
+      speed: null,
+      remaining: null,
+      outputs: null,
+      error: null,
+      validationError: null,
+      log: [],
+      previewMode: 'source',
+      addAudioTouchedOptions: {},
+      ...createAddAudioEditState(),
+    };
+    this.jobs.push(job);
+    this.selectedId = job.id;
+    this.syncAddAudioProject(job);
+    this.paintQueue();
+    this.paintDetail();
+    this.enqueue(() => this.probeAddAudioAsset(job, video));
+    return job;
+  }
+
+  addAudioFilesWithinLimits(job, role, file) {
+    if (!file?.size) return false;
+    const candidate = {
+      ...job,
+      [role]: { file, size: file.size, info: null },
+    };
+    const preflight = addAudioPreflight(candidate, candidate.options);
+    const exceedsMemory = preflight.inputBytes > ADD_AUDIO_LIMITS.maxInputBytes
+      || preflight.estimatedWorkingBytes > ADD_AUDIO_LIMITS.maxWorkingBytes;
+    if (exceedsMemory || (!preflight.ok && preflight.code !== 'missing-files')) {
+      this.toast(
+        exceedsMemory
+          ? `Video, audio y resultado estimado superarían el límite seguro local de ${formatBytes(ADD_AUDIO_LIMITS.maxWorkingBytes)}.`
+          : preflight.message,
+        { kind: 'error', duration: 8500 },
+      );
+      return false;
+    }
+    return true;
+  }
+
+  replaceAddAudioAsset(job, role, file) {
+    if (!this.isAddAudioJob(job) || !['video', 'audio'].includes(role)) return null;
+    if (['queued', 'running'].includes(job.status)) {
+      this.toast('Esperá a que termine el procesamiento antes de reemplazar una fuente.');
+      return null;
+    }
+    if (!this.addAudioFilesWithinLimits(job, role, file)) return null;
+
+    const asset = createAddAudioAsset(file, role);
+    job[role] = asset;
+    if (role === 'video') {
+      job.file = file;
+      job.name = file.name;
+    }
+    Object.assign(job, markAddAudioEdited(job));
+    job.previewMode = 'source';
+    if (this.audioMixPreview?.jobId === job.id) this.releaseAudioMixPreview();
+    this.syncAddAudioProject(job);
+    this.paintQueue();
+    this.paintDetail();
+    this.enqueue(() => this.probeAddAudioAsset(job, asset));
+    return asset;
+  }
+
+  removeAddAudioTrack(job) {
+    if (!this.isAddAudioJob(job) || ['queued', 'running'].includes(job.status) || !job.audio) return;
+    job.audio = null;
+    Object.assign(job, markAddAudioEdited(job));
+    job.previewMode = 'source';
+    if (this.audioMixPreview?.jobId === job.id) this.releaseAudioMixPreview();
+    this.syncAddAudioProject(job);
+    this.scheduleCommandPreview();
+    this.paintQueue();
+    if (job.id === this.selectedId) this.paintDetail();
+  }
+
+  syncAddAudioProject(job) {
+    if (!this.isAddAudioJob(job)) return;
+    job.file = job.video?.file || null;
+    job.name = job.video?.name || 'Video con audio';
+    job.size = addAudioTotalBytes(job);
+    job.info = job.video?.info || null;
+    job.dirtySinceOutput = addAudioHasUnexportedChanges(job);
+    const validation = validateAddAudioProject(job, job.options);
+    job.validationError = validation.message;
+    job.validationCode = validation.code;
+
+    if (!['queued', 'running'].includes(job.status)) {
+      const waiting = [job.video, job.audio].filter(Boolean)
+        .some((asset) => asset.status === 'pending' || asset.status === 'probing');
+      job.status = waiting
+        ? 'probing'
+        : (job.outputs?.length && (job.dirtySinceOutput || job.status === 'done') ? 'done' : 'ready');
+    }
+  }
+
+  async probeAddAudioAsset(job, asset) {
+    if (!this.jobs.includes(job) || job[asset.role] !== asset) return;
+    asset.status = 'probing';
+    asset.error = null;
+    this.syncAddAudioProject(job);
+    this.paintQueue();
+    if (job.id === this.selectedId) this.paintDetail();
+
+    try {
+      const info = await this.engine.probe(asset.file);
+      // Replacing or removing a source while its probe waited in the serial
+      // queue makes this result obsolete. Never write it into the new asset.
+      if (!this.jobs.includes(job) || job[asset.role] !== asset) return;
+      asset.info = info;
+      if (asset.role === 'video' && !info?.hasVideo) {
+        asset.status = 'failed';
+        asset.error = 'El archivo no contiene una pista de video.';
+      } else if (asset.role === 'audio' && !info?.hasAudio) {
+        asset.status = 'failed';
+        asset.error = 'El archivo no contiene una pista de audio.';
+      } else if (asset.role === 'video' && !videoTrackDuration(info)) {
+        asset.status = 'failed';
+        asset.error = 'No pudimos determinar la duración del video.';
+      } else if (asset.role === 'audio' && !audioTrackDuration(info)) {
+        asset.status = 'failed';
+        asset.error = 'No pudimos determinar la duración del audio.';
+      } else {
+        asset.status = 'ready';
+        asset.error = null;
+        if (asset.role === 'video') {
+          const choices = { ...job.options };
+          // Dynamic defaults belong to the current primary video. Replacing a
+          // video with a silent one should become full-volume replacement,
+          // while an explicit gain or mode chosen by the user stays intact.
+          for (const key of ['mixMode', 'addedGain']) {
+            if (!job.addAudioTouchedOptions?.[key]) delete choices[key];
+          }
+          const normalised = normalizeAddAudioOptions(info, choices);
+          if (normalised) Object.assign(job.options, normalised);
+        }
+      }
+    } catch (error) {
+      if (!this.jobs.includes(job) || job[asset.role] !== asset) return;
+      asset.status = 'failed';
+      asset.error = error.message;
+    }
+
+    this.syncAddAudioProject(job);
+    this.paintQueue();
+    if (job.id === this.selectedId) this.paintDetail();
+  }
+
+  openAddAudioPicker(job, role = 'audio') {
+    if (!this.isAddAudioJob(job) || !['video', 'audio'].includes(role)) return;
+    if (['queued', 'running'].includes(job.status)) return;
+    this.setPickerIntent({ kind: 'add-audio-asset', projectId: job.id, role });
+    this.dom.fileInput.accept = role === 'video' ? 'video/*' : 'audio/*';
+    this.dom.fileInput.multiple = false;
+    this.dom.fileInput.click();
+  }
+
   /** Serialise everything that uses the worker; it can only do one thing. */
   enqueue(task) {
     this.chain = this.chain.then(task).catch((error) => {
@@ -585,10 +834,14 @@ export class App {
 
     const index = this.jobs.indexOf(job);
     if (index < 0) return;
+    if (this.pickerIntent?.projectId === job.id) this.clearPickerIntent();
     if (this.isMergeJob(job)) {
-      if (this.mergePickerJobId === job.id) this.mergePickerJobId = null;
       if (this.mergeSourcePreview?.jobId === job.id) this.releaseMergeSourcePreview();
       if (this.mergeSequence?.jobId === job.id) this.releaseMergeSequence();
+    }
+    if (this.isAddAudioJob(job)) {
+      if (this.audioMixPreview?.jobId === job.id) this.releaseAudioMixPreview();
+      if (this.audioMixTimeline?.jobId === job.id) this.releaseAudioMixTimeline();
     }
     this.jobs.splice(index, 1);
     if (this.selectedId === job.id) this.selectedId = this.jobs[Math.min(index, this.jobs.length - 1)]?.id || null;
@@ -680,6 +933,26 @@ export class App {
       else if (job.status === 'done') bits.push(STATUS_LABELS.done);
       return bits.join(' · ');
     }
+    if (this.isAddAudioJob(job)) {
+      if (job.status === 'failed') return job.error ? truncateName(job.error, 44) : 'Falló la mezcla';
+      if (job.status === 'running') {
+        const percent = Math.round(job.progress * 100);
+        const left = job.remaining !== null ? ` · ${formatDuration(job.remaining)} restantes` : '';
+        return `${percent}%${left}`;
+      }
+      if (job.status === 'probing') {
+        if (job.video?.status !== 'ready') return 'Analizando video';
+        if (job.audio?.status === 'probing') return 'Analizando audio';
+      }
+      const bits = [job.audio ? 'Video + audio' : 'Falta audio', formatBytes(job.size || 0)];
+      const duration = videoTrackDuration(job.video?.info);
+      if (duration) bits.splice(1, 0, formatDuration(duration));
+      if (job.validationError && job.audio) bits.push('Revisar');
+      else if (job.validationError && job.validationCode !== 'missing-audio') bits.push('Revisar');
+      else if (job.dirtySinceOutput) bits.push('Cambios pendientes');
+      else if (job.status === 'done') bits.push(STATUS_LABELS.done);
+      return bits.join(' · ');
+    }
     const quickTool = focusedQuickTool(job?.forgeToolId);
     if (job.status === 'failed') return job.error ? truncateName(job.error, 44) : 'Failed';
     if (job.status === 'running') {
@@ -705,14 +978,20 @@ export class App {
   jobIsSettledDone(job) {
     if (job?.status !== 'done') return false;
     if (this.isMergeJob(job)) return !job.dirtySinceOutput && !job.validationError;
+    if (this.isAddAudioJob(job)) return !job.dirtySinceOutput && !job.validationError;
     if (focusedQuickTool(job.forgeToolId)) return !job.dirtySinceOutput && !job.validationError;
     return true;
   }
 
   jobPendingForRun(job) {
     if (!job) return false;
-    if (job.status === 'ready' || job.status === 'queued') return true;
+    if (job.status === 'queued') return true;
+    if (job.status === 'ready') {
+      if (this.isAddAudioJob(job)) return this.addAudioValidation(job).ok;
+      return true;
+    }
     if (job.status !== 'done' || !job.dirtySinceOutput) return false;
+    if (this.isAddAudioJob(job)) return this.addAudioValidation(job).ok;
     return this.isMergeJob(job) || Boolean(focusedQuickTool(job.forgeToolId));
   }
 
@@ -821,6 +1100,7 @@ export class App {
   renderDetail() {
     const job = this.selected;
     const mergeJob = this.isMergeJob(job);
+    const audioMixJob = this.isAddAudioJob(job);
     const quickTool = this.quickToolFor(job);
     this.dom.detail.hidden = !job;
     this.dom.empty.hidden = Boolean(job);
@@ -835,18 +1115,27 @@ export class App {
       this.releaseCropper();
       this.releaseMergeSourcePreview();
       this.releaseMergeSequence();
+      this.releaseAudioMixPreview();
+      this.releaseAudioMixTimeline();
       return;
     }
 
-    this.dom.detail.dataset.workspace = mergeJob ? 'video-merge' : (quickTool ? 'quick-tool' : 'converter');
+    this.dom.detail.dataset.workspace = mergeJob
+      ? 'video-merge'
+      : (audioMixJob ? 'video-add-audio' : (quickTool ? 'quick-tool' : 'converter'));
     this.dom.detail.dataset.status = job.status === 'done' && job.dirtySinceOutput ? 'ready' : job.status;
     if (mergeJob) this.dom.detail.dataset.tool = MERGE_TOOL_ID;
+    else if (audioMixJob) this.dom.detail.dataset.tool = ADD_AUDIO_TOOL_ID;
     else if (quickTool) this.dom.detail.dataset.tool = quickTool.id;
     else delete this.dom.detail.dataset.tool;
 
     if (!mergeJob) {
       this.releaseMergeSourcePreview();
       this.releaseMergeSequence();
+    }
+    if (!audioMixJob) {
+      this.releaseAudioMixPreview();
+      this.releaseAudioMixTimeline();
     }
 
     // Selecting a different file means the timeline belongs to a file that is
@@ -855,10 +1144,16 @@ export class App {
     if (this.cropper && (this.cropper.jobId !== job.id || quickTool?.focus !== 'crop')) this.releaseCropper();
     if (this.quickSourcePreview && this.quickSourcePreview.jobId !== job.id) this.releaseQuickSourcePreview();
     if (this.quickOutputPreview && this.quickOutputPreview.jobId !== job.id) this.releaseQuickOutputPreview();
+    if (this.audioMixPreview && this.audioMixPreview.jobId !== job.id) this.releaseAudioMixPreview();
+    if (this.audioMixTimeline && this.audioMixTimeline.jobId !== job.id) this.releaseAudioMixTimeline();
 
-    this.dom.detailName.textContent = mergeJob ? 'Unir videos' : (quickTool?.title || job.name);
+    this.dom.detailName.textContent = mergeJob
+      ? 'Unir videos'
+      : (audioMixJob ? 'Agregar audio al video' : (quickTool?.title || job.name));
     this.dom.detailFacts.textContent = mergeJob
       ? `${job.clips.length} ${job.clips.length === 1 ? 'clip' : 'clips'} · ${formatBytes(job.size)}${mergeTotalDuration(job.clips) ? ` · ${formatDuration(mergeTotalDuration(job.clips))}` : ''}`
+      : audioMixJob
+      ? `${job.video?.name || 'Video'} · ${formatBytes(job.size || 0)}${videoTrackDuration(job.video?.info) ? ` · ${formatDuration(videoTrackDuration(job.video.info))}` : ''}`
       : quickTool
       ? `${job.name} · ${this.describeSource(job)}`
       : this.describeSource(job);
@@ -877,6 +1172,23 @@ export class App {
       this.dom.commandBlock.hidden = !advanced || job.status === 'probing';
       this.renderDetailActions(job, null);
       this.restoreMergeFocus(job);
+      return;
+    }
+
+    if (audioMixJob) {
+      this.releasePreview();
+      this.releaseQuickSourcePreview();
+      this.releaseCropper();
+      this.releaseScrubber();
+      this.dom.preview.replaceChildren();
+      delete this.dom.preview.dataset.job;
+      this.renderAudioMixControls(job);
+      this.renderCommand();
+      this.renderAddAudioFooter(job);
+      const advanced = prefs.get('advanced');
+      this.dom.commandBlock.hidden = !advanced || job.status === 'probing';
+      this.renderDetailActions(job, null);
+      this.restoreAddAudioFocus(job);
       return;
     }
 
@@ -927,6 +1239,28 @@ export class App {
     const remove = this.dom.detail.querySelector('[data-action="remove-one"]');
     const running = job.status === 'running';
     const queued = job.status === 'queued';
+
+    if (this.isAddAudioJob(job)) {
+      const runnable = this.addAudioJobRunnable(job);
+      start.hidden = running || queued || job.status === 'probing' || !job.audio;
+      start.disabled = !runnable;
+      start.textContent = job.outputs?.length
+        ? (job.dirtySinceOutput ? 'Actualizar resultado' : 'Crear otra versión')
+        : 'Crear video con audio';
+      cancel.hidden = !running;
+      cancel.textContent = 'Cancelar';
+      download.hidden = !job.outputs?.length;
+      download.textContent = job.dirtySinceOutput || job.status !== 'done'
+        ? 'Descargar versión anterior'
+        : 'Descargar video';
+      remove.textContent = 'Quitar proyecto';
+      const downloadIsPrimary = Boolean(job.status === 'done' && !job.dirtySinceOutput && job.outputs?.length);
+      start.classList.toggle('primary-button', !downloadIsPrimary);
+      start.classList.toggle('text-button', downloadIsPrimary);
+      download.classList.toggle('primary-button', downloadIsPrimary);
+      download.classList.toggle('text-button', !downloadIsPrimary);
+      return;
+    }
 
     if (this.isMergeJob(job)) {
       const runnable = this.mergeJobRunnable(job);
@@ -1028,6 +1362,231 @@ export class App {
 
   pauseQuickSourcePreview() {
     this.quickSourcePreview?.media.pause();
+  }
+
+  releaseAudioMixTimeline() {
+    if (!this.audioMixTimeline) return;
+    this.audioMixTimeline.control?.destroy?.();
+    this.audioMixTimeline = null;
+  }
+
+  releaseAudioMixPreview() {
+    if (!this.audioMixPreview) return;
+    const record = this.audioMixPreview;
+    record.video?.pause();
+    record.audio?.pause();
+    for (const node of [record.videoSource, record.audioSource, record.originalGain, record.addedGain, record.compressor]) {
+      try { node?.disconnect(); } catch { /* already disconnected */ }
+    }
+    record.context?.close?.().catch(() => {});
+    for (const media of [record.video, record.audio]) {
+      media?.removeAttribute('src');
+      media?.load();
+    }
+    if (record.videoUrl) URL.revokeObjectURL(record.videoUrl);
+    if (record.audioUrl) URL.revokeObjectURL(record.audioUrl);
+    this.audioMixPreview = null;
+  }
+
+  updateAudioMixPreview(job, { forceSync = false } = {}) {
+    const record = this.audioMixPreview;
+    if (!record || record.jobId !== job.id) return;
+    const locked = ['queued', 'running'].includes(job.status);
+    record.video.controls = !locked;
+    if (locked) {
+      record.video.pause();
+      record.audio.pause();
+      record.context?.suspend?.().catch(() => {});
+    }
+    const options = normalizeAddAudioOptions(job.video?.info, job.options) || job.options;
+    const originalGain = options.mixMode === 'mix' && job.video?.info?.hasAudio
+      ? Number(options.originalGain) || 0
+      : 0;
+    const addedGain = Number(options.addedGain) || 0;
+    if (record.originalGain) record.originalGain.gain.value = originalGain;
+    else {
+      record.video.muted = originalGain === 0;
+      record.video.volume = Math.min(1, originalGain);
+    }
+    if (record.addedGain) record.addedGain.gain.value = addedGain;
+    else record.audio.volume = Math.min(1, addedGain);
+    record.audio.loop = options.audioFit === 'loop';
+    if (record.compressor) {
+      const protectedMix = options.limiter !== false;
+      record.compressor.threshold.value = protectedMix ? -3 : 0;
+      record.compressor.knee.value = protectedMix ? 6 : 0;
+      record.compressor.ratio.value = protectedMix ? 20 : 1;
+      record.compressor.attack.value = protectedMix ? 0.003 : 0;
+      record.compressor.release.value = protectedMix ? 0.08 : 0.25;
+    }
+    record.options = options;
+    if (!locked) record.sync?.(forceSync);
+  }
+
+  audioMixPreviewFor(job) {
+    if (!job.video?.file) {
+      return el('div', { class: 'audio-mix-preview-placeholder' }, [
+        el('strong', { text: 'Elegí un video' }),
+        el('p', { text: 'El video define el cuadro y la duración final del proyecto.' }),
+      ]);
+    }
+    if (!job.audio?.file) {
+      const pick = el('button', {
+        type: 'button',
+        class: 'primary-button',
+        text: 'Elegir audio',
+        dataset: { audioMixAction: 'pick-audio' },
+      });
+      pick.addEventListener('click', () => this.openAddAudioPicker(job, 'audio'));
+      return el('div', { class: 'audio-mix-preview-placeholder' }, [
+        el('strong', { text: 'El video está listo' }),
+        el('p', { text: 'Agregá una pista de audio para activar la mezcla y su timeline.' }),
+        pick,
+      ]);
+    }
+    if (
+      this.audioMixPreview?.jobId === job.id
+      && this.audioMixPreview.videoAssetId === job.video.id
+      && this.audioMixPreview.audioAssetId === job.audio.id
+    ) {
+      this.updateAudioMixPreview(job);
+      return this.audioMixPreview.node;
+    }
+
+    this.releaseAudioMixPreview();
+    const videoUrl = URL.createObjectURL(job.video.file);
+    const audioUrl = URL.createObjectURL(job.audio.file);
+    const projectDuration = videoTrackDuration(job.video.info);
+    const projectStart = addAudioVideoTimelineStart(job.video.info);
+    const projectEnd = projectDuration ? projectStart + projectDuration : null;
+    const video = el('video', {
+      class: 'audio-mix-preview-media',
+      src: projectEnd ? `${videoUrl}#t=${projectStart},${projectEnd}` : videoUrl,
+      controls: true,
+      playsInline: true,
+      preload: 'metadata',
+      attrs: { 'aria-label': `Vista previa del proyecto ${job.video.name}` },
+    });
+    const audio = el('audio', { src: audioUrl, preload: 'auto', hidden: true });
+    const note = el('p', {
+      class: 'audio-mix-preview-note',
+      text: 'Simulación en el navegador · el archivo exportado es el resultado exacto.',
+    });
+    const badge = el('span', { class: 'audio-mix-preview-badge', text: 'Preview combinada' });
+    const node = el('div', { class: 'audio-mix-preview-composite' }, [video, audio, badge, note]);
+    const record = {
+      jobId: job.id,
+      videoAssetId: job.video.id,
+      audioAssetId: job.audio.id,
+      videoUrl,
+      audioUrl,
+      video,
+      audio,
+      node,
+      context: null,
+      videoSource: null,
+      audioSource: null,
+      originalGain: null,
+      addedGain: null,
+      compressor: null,
+      options: null,
+      sync: null,
+      projectStart,
+    };
+
+    const ensureGraph = async () => {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextClass) return false;
+      try {
+        if (!record.context) {
+          record.context = new AudioContextClass();
+          record.videoSource = record.context.createMediaElementSource(video);
+          record.audioSource = record.context.createMediaElementSource(audio);
+          record.originalGain = record.context.createGain();
+          record.addedGain = record.context.createGain();
+          record.compressor = record.context.createDynamicsCompressor();
+          video.muted = false;
+          audio.muted = false;
+          video.volume = 1;
+          audio.volume = 1;
+          record.videoSource.connect(record.originalGain).connect(record.compressor);
+          record.audioSource.connect(record.addedGain).connect(record.compressor);
+          record.compressor.connect(record.context.destination);
+          this.updateAudioMixPreview(job);
+        }
+        if (record.context.state === 'suspended') await record.context.resume();
+        return true;
+      } catch {
+        note.textContent = 'No pudimos combinar el audio en la preview; FFmpeg sí puede crear el resultado.';
+        return false;
+      }
+    };
+
+    const sync = async (forcePlay = false) => {
+      const options = record.options || normalizeAddAudioOptions(job.video?.info, job.options) || job.options;
+      const duration = audioTrackDuration(job.audio?.info) || audio.duration;
+      const projectTime = Math.max(0, video.currentTime - projectStart);
+      const relative = projectTime - (Number(options.audioOffset) || 0);
+      const loops = options.audioFit === 'loop';
+      const active = Number.isFinite(duration) && duration > 0 && relative >= 0 && (loops || relative < duration);
+      if (!active) {
+        audio.pause();
+        return;
+      }
+      const target = loops ? relative % duration : relative;
+      if (Number.isFinite(target) && (forcePlay || Math.abs(audio.currentTime - target) > 0.12)) {
+        try { audio.currentTime = Math.max(0, Math.min(duration - 0.001, target)); } catch { /* metadata pending */ }
+      }
+      audio.playbackRate = video.playbackRate;
+      if (!video.paused && audio.paused) await audio.play().catch(() => {
+        note.textContent = 'El navegador no puede preescuchar esta pista; FFmpeg sí puede procesarla.';
+      });
+    };
+    record.sync = sync;
+
+    const enforceProjectDuration = () => {
+      if (video.currentTime < projectStart - 0.001) {
+        try { video.currentTime = projectStart; } catch { /* media not seekable yet */ }
+        audio.pause();
+        this.audioMixTimeline?.control?.setCurrentTime?.(0);
+        return true;
+      }
+      if (!projectEnd || video.currentTime < projectEnd) return false;
+      if (video.currentTime > projectEnd + 0.001) {
+        try { video.currentTime = projectEnd; } catch { /* media not seekable yet */ }
+      }
+      video.pause();
+      audio.pause();
+      this.audioMixTimeline?.control?.setCurrentTime?.(projectDuration);
+      return true;
+    };
+
+    video.addEventListener('play', () => {
+      if (['queued', 'running'].includes(job.status)) {
+        video.pause();
+        return;
+      }
+      ensureGraph().then(() => sync(true));
+    });
+    video.addEventListener('pause', () => audio.pause());
+    video.addEventListener('ended', () => audio.pause());
+    video.addEventListener('seeking', () => {
+      audio.pause();
+      enforceProjectDuration();
+    });
+    video.addEventListener('seeked', () => sync(true));
+    video.addEventListener('timeupdate', () => {
+      if (enforceProjectDuration()) return;
+      sync(false);
+      this.audioMixTimeline?.control?.setCurrentTime?.(Math.max(0, video.currentTime - projectStart));
+    });
+    video.addEventListener('ratechange', () => { audio.playbackRate = video.playbackRate; });
+    audio.addEventListener('error', () => {
+      note.textContent = 'No podemos preescuchar este audio en el navegador; FFmpeg sí puede procesarlo.';
+    });
+    this.audioMixPreview = record;
+    this.updateAudioMixPreview(job, { forceSync: true });
+    return node;
   }
 
   quickOutputPreviewFor(job) {
@@ -1370,7 +1929,7 @@ export class App {
 
   openMergePicker(job) {
     if (!this.isMergeJob(job) || ['queued', 'running'].includes(job.status)) return;
-    this.mergePickerJobId = job.id;
+    this.setPickerIntent({ kind: 'merge-append', projectId: job.id });
     this.dom.fileInput.accept = 'video/*';
     this.dom.fileInput.multiple = true;
     this.dom.fileInput.click();
@@ -1698,6 +2257,493 @@ export class App {
       el('strong', { text: copy.title }),
       el('span', { text: copy.detail })
     );
+  }
+
+  markAddAudioJobEdited(job) {
+    Object.assign(job, markAddAudioEdited(job));
+    job.previewMode = 'source';
+    this.syncAddAudioProject(job);
+  }
+
+  setAddAudioOption(job, key, value) {
+    if (!this.isAddAudioJob(job) || ['queued', 'running'].includes(job.status)) return;
+    if (String(job.options[key]) === String(value)) return;
+    if (this.dom.controls.contains(document.activeElement)) {
+      job.pendingAddAudioFocus = { type: 'option', key };
+    }
+    job.options[key] = value;
+    job.addAudioTouchedOptions ||= {};
+    job.addAudioTouchedOptions[key] = true;
+    this.markAddAudioJobEdited(job);
+    this.updateAudioMixPreview(job, { forceSync: key === 'audioOffset' || key === 'audioFit' });
+    this.scheduleCommandPreview();
+    this.paintQueue();
+    if (job.id === this.selectedId) this.paintDetail();
+  }
+
+  setAddAudioLiveOption(job, key, value) {
+    if (!this.isAddAudioJob(job) || ['queued', 'running'].includes(job.status)) return;
+    if (String(job.options[key]) === String(value)) return;
+    job.options[key] = value;
+    job.addAudioTouchedOptions ||= {};
+    job.addAudioTouchedOptions[key] = true;
+    this.markAddAudioJobEdited(job);
+    if (key === 'audioOffset') this.audioMixTimeline?.control?.setOffset?.(value);
+    this.updateAudioMixPreview(job);
+    this.scheduleCommandPreview();
+    this.paintQueue();
+    this.updateAddAudioProgress(job);
+    this.renderDetailActions(job);
+  }
+
+  commitAddAudioLiveOption(job, key, { timeline = false } = {}) {
+    if (!this.isAddAudioJob(job) || ['queued', 'running'].includes(job.status)) return;
+    this.updateAudioMixPreview(job, { forceSync: key === 'audioOffset' || key === 'audioFit' });
+    job.pendingAddAudioFocus = timeline ? { type: 'timeline' } : { type: 'option', key };
+    if (job.id === this.selectedId) this.paintDetail();
+  }
+
+  addAudioJobRunnable(job) {
+    if (!this.isAddAudioJob(job) || ['probing', 'queued', 'running'].includes(job.status)) return false;
+    return this.addAudioValidation(job).ok;
+  }
+
+  addAudioValidation(job) {
+    const validation = validateAddAudioProject(job, job?.options);
+    const retainedBytes = Number(job?.outputSize) || 0;
+    if (
+      validation.ok
+      && retainedBytes > 0
+      && validation.estimatedWorkingBytes + retainedBytes > ADD_AUDIO_LIMITS.maxWorkingBytes
+    ) {
+      return {
+        ...validation,
+        ok: false,
+        code: 'retained-output-memory-limit',
+        message: 'El resultado anterior y esta nueva exportación superarían el límite seguro de memoria. Descargá el anterior y creá un proyecto nuevo para esta versión.',
+      };
+    }
+    return validation;
+  }
+
+  validateAddAudioJob(job, { notify = true } = {}) {
+    if (!this.isAddAudioJob(job)) return true;
+    const validation = this.addAudioValidation(job);
+    job.validationError = validation.message;
+    if (validation.ok) return true;
+    if (notify) this.toast(validation.message, { kind: 'error', duration: 7000 });
+    if (job.id === this.selectedId) this.paintDetail();
+    return false;
+  }
+
+  addAudioStatusCopy(job) {
+    const validation = this.addAudioValidation(job);
+    if (job.video?.status === 'probing') {
+      return { title: 'Analizando el video', detail: 'Leyendo cuadro, duración y pistas sin subir el archivo.' };
+    }
+    if (!job.audio) {
+      return { title: 'Elegí una pista de audio', detail: 'Puede ser música, voz o un efecto; el video define la duración final.' };
+    }
+    if (job.audio.status === 'probing') {
+      return { title: 'Analizando el audio', detail: 'Midiendo duración y formato antes de preparar la mezcla.' };
+    }
+    if (!validation.ok) return { title: 'Revisá el proyecto', detail: validation.message };
+    if (job.status === 'queued') return { title: 'En cola', detail: 'La mezcla empezará cuando el motor quede libre.' };
+    if (job.status === 'running') {
+      const remaining = job.remaining !== null ? ` · ${formatDuration(job.remaining)} restantes` : '';
+      return {
+        title: `Creando video · ${Math.round(job.progress * 100)}%`,
+        detail: `Mezcla y codificación local${remaining}`,
+      };
+    }
+    if (job.status === 'done' && !job.dirtySinceOutput) {
+      return { title: 'Video listo', detail: `${formatBytes(job.outputSize || 0)} · listo para revisar o descargar.` };
+    }
+    if (job.status === 'failed') {
+      const previous = job.outputs?.length ? ' El resultado anterior sigue disponible.' : '';
+      return { title: 'No pudimos crear el video', detail: `${job.error || 'Intentá de nuevo.'}${previous}` };
+    }
+    if (job.status === 'cancelled') {
+      const previous = job.outputs?.length ? ' El resultado anterior sigue disponible.' : '';
+      return { title: 'Procesamiento cancelado', detail: `Las dos fuentes siguen intactas.${previous}` };
+    }
+    if (job.dirtySinceOutput) {
+      return { title: 'Cambios sin procesar', detail: 'El resultado anterior sigue disponible mientras ajustás una nueva versión.' };
+    }
+    const duration = videoTrackDuration(job.video?.info);
+    return {
+      title: 'Proyecto listo',
+      detail: `${job.options.mixMode === 'mix' ? 'Audio mezclado' : 'Audio reemplazado'} · resultado de ${duration ? formatDuration(duration) : 'duración pendiente'}.`,
+    };
+  }
+
+  addAudioStatusCard(job) {
+    const copy = this.addAudioStatusCopy(job);
+    const activeStatus = ['probing', 'queued', 'running', 'failed', 'cancelled'].includes(job.status);
+    const validation = this.addAudioValidation(job);
+    const status = !validation.ok && job.audio && job.status !== 'probing'
+      ? 'failed'
+      : (activeStatus ? job.status : (job.dirtySinceOutput ? 'ready' : job.status));
+    return el('div', {
+      class: 'audio-mix-status-card',
+      dataset: { status },
+      attrs: { 'aria-live': 'polite' },
+    }, [
+      el('strong', { text: copy.title, dataset: { addAudioProgressTitle: '' } }),
+      el('span', { text: copy.detail, dataset: { addAudioProgressDetail: '' } }),
+      el('progress', {
+        max: 1,
+        value: job.progress || 0,
+        hidden: job.status !== 'running' && job.status !== 'queued',
+      }),
+    ]);
+  }
+
+  parseSignedTimestamp(value) {
+    const text = String(value || '').trim();
+    const negative = text.startsWith('-');
+    const seconds = parseTimestamp(negative ? text.slice(1) : text);
+    return seconds === null ? null : (negative ? -seconds : seconds);
+  }
+
+  describeAudioOffset(value) {
+    const offset = Number(value) || 0;
+    if (offset < 0) return `Omitir ${formatTimestamp(Math.abs(offset))} del inicio`;
+    if (offset > 0) return `Entrar en ${formatTimestamp(offset)}`;
+    return 'Empezar junto al video';
+  }
+
+  addAudioSourceCard(job, role) {
+    const asset = job[role];
+    const label = role === 'video' ? 'Video base' : 'Pista agregada';
+    if (!asset) {
+      const pick = el('button', {
+        type: 'button',
+        class: 'audio-mix-source-empty',
+        dataset: { audioMixAction: `pick-${role}` },
+      }, [
+        el('span', { class: 'audio-mix-source-icon', text: '+' }),
+        el('strong', { text: role === 'audio' ? 'Elegir audio' : 'Elegir video' }),
+        el('small', { text: role === 'audio' ? 'Música, voz o efectos' : 'Define el cuadro final' }),
+      ]);
+      pick.addEventListener('click', () => this.openAddAudioPicker(job, role));
+      return el('section', { class: 'audio-mix-source-card', dataset: { role, empty: 'true' } }, [
+        el('h3', { text: label }),
+        pick,
+      ]);
+    }
+
+    const duration = role === 'video' ? videoTrackDuration(asset.info) : audioTrackDuration(asset.info);
+    const facts = [
+      duration ? formatDuration(duration) : null,
+      role === 'video' && asset.info?.video?.width ? `${asset.info.video.width}×${asset.info.video.height}` : null,
+      role === 'audio' && asset.info?.audio?.codec ? String(asset.info.audio.codec).toUpperCase() : null,
+      formatBytes(asset.size),
+    ].filter(Boolean).join(' · ');
+    const replace = el('button', {
+      type: 'button',
+      class: 'text-button',
+      text: 'Reemplazar',
+      disabled: ['queued', 'running'].includes(job.status),
+      dataset: { audioMixAction: `pick-${role}` },
+    });
+    replace.addEventListener('click', () => this.openAddAudioPicker(job, role));
+    const actions = [replace];
+    if (role === 'audio') {
+      const remove = el('button', {
+        type: 'button',
+        class: 'text-button danger-text',
+        text: 'Quitar',
+        disabled: ['queued', 'running'].includes(job.status),
+        dataset: { audioMixAction: 'remove-audio' },
+      });
+      remove.addEventListener('click', () => this.removeAddAudioTrack(job));
+      actions.push(remove);
+    }
+    return el('section', { class: 'audio-mix-source-card', dataset: { role, status: asset.status } }, [
+      el('div', { class: 'audio-mix-source-head' }, [
+        el('div', {}, [el('h3', { text: label }), el('strong', { text: truncateName(asset.name, 38), title: asset.name })]),
+        el('span', { class: 'audio-mix-source-state', text: asset.status === 'probing' ? 'Analizando' : (asset.error ? 'Atención' : 'Lista') }),
+      ]),
+      el('p', { text: asset.error || facts || 'Esperando información…' }),
+      el('div', { class: 'audio-mix-source-actions' }, actions),
+    ]);
+  }
+
+  renderAudioMixControls(job) {
+    const container = this.dom.controls;
+    container.replaceChildren();
+    this.releaseAudioMixTimeline();
+
+    const resultAvailable = Boolean(job.outputs?.length);
+    if (!resultAvailable && job.previewMode === 'result') job.previewMode = 'source';
+    const showingResult = resultAvailable && job.previewMode === 'result';
+    if (showingResult) this.releaseAudioMixPreview();
+    else this.pauseQuickOutputPreview();
+
+    const panelId = `audio-mix-preview-panel-${job.id}`;
+    const sourceTabId = `audio-mix-preview-source-${job.id}`;
+    const resultTabId = `audio-mix-preview-result-${job.id}`;
+    const sourceTab = el('button', {
+      id: sourceTabId,
+      type: 'button',
+      class: `quick-preview-tab${showingResult ? '' : ' is-active'}`,
+      text: 'Proyecto',
+      tabIndex: showingResult ? -1 : 0,
+      dataset: { action: 'preview-source' },
+      attrs: { role: 'tab', 'aria-selected': String(!showingResult), 'aria-controls': panelId },
+    });
+    const resultTab = el('button', {
+      id: resultTabId,
+      type: 'button',
+      class: `quick-preview-tab${showingResult ? ' is-active' : ''}`,
+      text: resultAvailable && (job.dirtySinceOutput || job.status !== 'done') ? 'Resultado anterior' : 'Resultado',
+      disabled: !resultAvailable,
+      tabIndex: showingResult ? 0 : -1,
+      dataset: { action: 'preview-result' },
+      attrs: { role: 'tab', 'aria-selected': String(showingResult), 'aria-controls': panelId },
+    });
+    this.wireQuickTabs(job, sourceTab, resultTab);
+
+    const stage = el('div', {
+      id: panelId,
+      class: 'audio-mix-preview-stage',
+      attrs: { role: 'tabpanel', 'aria-labelledby': showingResult ? resultTabId : sourceTabId },
+    }, [showingResult ? this.quickOutputPreviewFor(job) : this.audioMixPreviewFor(job)]);
+    const canvas = el('section', { class: 'audio-mix-canvas' }, [
+      el('header', { class: 'audio-mix-preview-head' }, [
+        el('div', { class: 'audio-mix-preview-copy' }, [
+          el('strong', { text: showingResult ? 'Resultado exportado' : 'Preview del proyecto' }),
+          el('span', {
+            text: showingResult
+              ? `${formatBytes(job.outputSize || 0)} · mezcla exacta`
+              : (job.audio ? `${truncateName(job.video.name, 34)} + ${truncateName(job.audio.name, 34)}` : truncateName(job.video.name, 52)),
+          }),
+          el('small', { text: 'Local · ninguno de los archivos sale de este dispositivo' }),
+        ]),
+        el('div', { class: 'quick-preview-switch', attrs: { role: 'tablist', 'aria-label': 'Vista previa' } }, [sourceTab, resultTab]),
+      ]),
+      stage,
+    ]);
+
+    const locked = job.status === 'queued' || job.status === 'running';
+    const videoDuration = videoTrackDuration(job.video?.info) || 0;
+    const addedDuration = audioTrackDuration(job.audio?.info) || 0;
+    const currentTime = this.audioMixPreview?.jobId === job.id
+      ? Math.max(0, this.audioMixPreview.video.currentTime - (this.audioMixPreview.projectStart || 0))
+      : 0;
+    const timeline = createAudioMixTimeline({
+      video: job.video ? { ...job.video, duration: videoDuration } : null,
+      audio: job.audio ? { ...job.audio, duration: addedDuration } : null,
+      offset: Number(job.options.audioOffset) || 0,
+      fit: job.options.audioFit,
+      currentTime,
+      disabled: locked,
+      onSeek: (seconds) => {
+        if (this.audioMixPreview?.jobId === job.id) {
+          this.audioMixPreview.video.currentTime = (this.audioMixPreview.projectStart || 0) + seconds;
+          this.audioMixPreview.sync?.(true);
+        }
+      },
+      onOffsetInput: (seconds) => this.setAddAudioLiveOption(job, 'audioOffset', seconds),
+      onOffsetCommit: () => this.commitAddAudioLiveOption(job, 'audioOffset', { timeline: true }),
+      onPickAudio: () => this.openAddAudioPicker(job, 'audio'),
+      onReplaceVideo: () => this.openAddAudioPicker(job, 'video'),
+      onReplaceAudio: () => this.openAddAudioPicker(job, 'audio'),
+      onRemoveAudio: () => this.removeAddAudioTrack(job),
+    });
+    this.audioMixTimeline = { jobId: job.id, control: timeline };
+
+    const settings = [];
+    if (job.audio?.info && job.video?.info) {
+      const hasOriginal = job.video.info.hasAudio === true;
+      const mode = this.quickEffectSegments(job, {
+        key: 'mixMode',
+        label: 'Tratamiento del audio original',
+        columns: 2,
+        items: [
+          { value: 'mix', label: 'Mezclar', meta: 'Conservar el original', disabled: !hasOriginal },
+          { value: 'replace', label: 'Reemplazar', meta: hasOriginal ? 'Quitar el original' : 'El video no trae audio' },
+        ],
+        onSelect: (value) => this.setAddAudioOption(job, 'mixMode', value),
+      });
+      for (const button of mode.querySelectorAll('[data-quick-option]')) {
+        button.dataset.audioMixOption = 'mixMode';
+      }
+      settings.push(el('div', { class: 'audio-mix-control-block' }, [
+        el('h3', { text: 'Mezcla' }),
+        mode,
+      ]));
+
+      if (hasOriginal && job.options.mixMode === 'mix') {
+        const original = this.quickEffectRange(job, {
+          key: 'originalGain',
+          label: 'Audio original',
+          description: 'Nivel de la pista que ya trae el video.',
+          min: ADD_AUDIO_LIMITS.minGain,
+          max: ADD_AUDIO_LIMITS.maxGain,
+          step: 0.01,
+          value: job.options.originalGain,
+          formatValue: (value) => `${Math.round(value * 100)}%`,
+          scale: ['0%', '100%', '200%'],
+          onInput: (value) => this.setAddAudioLiveOption(job, 'originalGain', value),
+          onCommit: () => this.commitAddAudioLiveOption(job, 'originalGain'),
+        });
+        original.querySelector('[data-quick-option]')?.setAttribute('data-audio-mix-option', 'originalGain');
+        settings.push(original);
+      }
+      const added = this.quickEffectRange(job, {
+        key: 'addedGain',
+        label: 'Pista agregada',
+        description: 'Nivel de la música, voz o efecto nuevo.',
+        min: ADD_AUDIO_LIMITS.minGain,
+        max: ADD_AUDIO_LIMITS.maxGain,
+        step: 0.01,
+        value: job.options.addedGain,
+        formatValue: (value) => `${Math.round(value * 100)}%`,
+        scale: ['0%', '100%', '200%'],
+        onInput: (value) => this.setAddAudioLiveOption(job, 'addedGain', value),
+        onCommit: () => this.commitAddAudioLiveOption(job, 'addedGain'),
+      });
+      added.querySelector('[data-quick-option]')?.setAttribute('data-audio-mix-option', 'addedGain');
+      settings.push(added);
+
+      const fit = this.quickEffectSegments(job, {
+        key: 'audioFit',
+        label: 'Qué pasa cuando termina la pista',
+        columns: 2,
+        items: [
+          { value: 'once', label: 'Una vez', meta: 'Después continúa el original o silencio' },
+          { value: 'loop', label: 'Repetir', meta: 'Hasta el final del video' },
+        ],
+        onSelect: (value) => this.setAddAudioOption(job, 'audioFit', value),
+      });
+      for (const button of fit.querySelectorAll('[data-quick-option]')) {
+        button.dataset.audioMixOption = 'audioFit';
+      }
+      settings.push(el('div', { class: 'audio-mix-control-block' }, [
+        el('h3', { text: 'Duración de la pista' }),
+        fit,
+      ]));
+
+      if (videoDuration > 0 && addedDuration > 0) {
+        // Keep the native range's min/max on the same hundredth-second grid
+        // as its step. Otherwise browsers snap an exact zero to values such
+        // as -0.004 when a source has millisecond-precise duration metadata.
+        const minimum = Math.min(0, Math.ceil((-(addedDuration - 0.01)) * 100) / 100);
+        const maximum = Math.max(0, Math.floor((videoDuration - 0.01) * 100) / 100);
+        const offset = this.quickEffectRange(job, {
+          key: 'audioOffset',
+          label: 'Posición del audio',
+          description: 'A la derecha entra más tarde; a la izquierda omite el comienzo.',
+          min: minimum,
+          max: maximum,
+          step: 0.01,
+          value: job.options.audioOffset,
+          formatValue: (value) => this.describeAudioOffset(value),
+          scale: [`-${formatTimestamp(Math.abs(minimum))}`, '00:00.000', formatTimestamp(maximum)],
+          onInput: (value) => this.setAddAudioLiveOption(job, 'audioOffset', value),
+          onCommit: () => this.commitAddAudioLiveOption(job, 'audioOffset'),
+        });
+        offset.querySelector('[data-quick-option]')?.setAttribute('data-audio-mix-option', 'audioOffset');
+        const exact = el('input', {
+          type: 'text',
+          class: 'control-input',
+          value: `${Number(job.options.audioOffset) < 0 ? '-' : ''}${formatTimestamp(Math.abs(Number(job.options.audioOffset) || 0))}`,
+          disabled: locked,
+          dataset: { audioMixOption: 'audioOffset' },
+          attrs: { inputmode: 'decimal', 'aria-label': 'Posición exacta del audio' },
+        });
+        exact.addEventListener('change', () => {
+          const value = this.parseSignedTimestamp(exact.value);
+          if (value !== null) {
+            this.setAddAudioOption(job, 'audioOffset', Math.min(maximum, Math.max(minimum, value)));
+          }
+        });
+        const useCurrent = el('button', {
+          type: 'button',
+          class: 'text-button',
+          text: 'Usar posición actual',
+          disabled: locked,
+        });
+        useCurrent.addEventListener('click', () => {
+          const seconds = this.audioMixPreview?.jobId === job.id
+            ? Math.max(0, this.audioMixPreview.video.currentTime - (this.audioMixPreview.projectStart || 0))
+            : 0;
+          this.setAddAudioOption(job, 'audioOffset', Math.min(maximum, Math.max(minimum, seconds)));
+        });
+        settings.push(offset, el('div', { class: 'audio-mix-offset-exact' }, [exact, useCurrent]));
+      }
+    }
+
+    const quality = this.selectControl(
+      this.quickQualityOptions(),
+      job.options.quality,
+      (value) => this.setAddAudioOption(job, 'quality', value),
+    );
+    quality.dataset.audioMixOption = 'quality';
+    const limiter = this.checkbox(job.options.limiter !== false, 'Protección anti-saturación', (value) => this.setAddAudioOption(job, 'limiter', value));
+    limiter.querySelector('input').dataset.audioMixOption = 'limiter';
+    const outputSection = el('section', { class: 'audio-mix-output-section' }, [
+      el('h3', { text: 'Salida' }),
+      el('p', { text: videoDuration ? `MP4 H.264 + AAC · ${formatDuration(videoDuration)}` : 'MP4 H.264 + AAC' }),
+      this.field('Calidad', quality),
+      el('div', { class: 'control' }, [limiter]),
+      el('p', { class: 'audio-mix-output-note', text: 'La protección controla picos cuando ambas pistas suenan juntas.' }),
+    ]);
+    for (const input of outputSection.querySelectorAll('input, select, button')) input.disabled = locked;
+
+    const inspector = el('aside', { class: 'audio-mix-inspector', attrs: { 'aria-label': 'Ajustes para agregar audio' } }, [
+      ...(settings.length ? [el('section', { class: 'audio-mix-inspector-section audio-mix-settings' }, settings)] : []),
+      outputSection,
+      el('section', { class: 'audio-mix-inspector-section' }, [this.addAudioStatusCard(job)]),
+    ]);
+    container.append(el('div', {
+      class: 'audio-mix-layout',
+      attrs: { 'aria-busy': String(job.status === 'probing' || job.status === 'running') },
+    }, [canvas, timeline.node, inspector]));
+  }
+
+  restoreAddAudioFocus(job) {
+    if (job.pendingQuickTab) {
+      const action = job.pendingQuickTab === 'result' ? 'preview-result' : 'preview-source';
+      this.dom.controls.querySelector(`[data-action="${action}"]`)?.focus({ preventScroll: true });
+      delete job.pendingQuickTab;
+      return;
+    }
+    const pending = job.pendingAddAudioFocus;
+    if (!pending) return;
+    if (pending.type === 'timeline') this.audioMixTimeline?.control?.focusOffset?.();
+    else this.dom.controls.querySelector(`[data-audio-mix-option="${pending.key}"]`)?.focus({ preventScroll: true });
+    delete job.pendingAddAudioFocus;
+  }
+
+  updateAddAudioProgress(job) {
+    if (this.selectedId !== job.id || !this.isAddAudioJob(job)) return;
+    const card = this.dom.controls.querySelector('.audio-mix-status-card');
+    if (card) {
+      const copy = this.addAudioStatusCopy(job);
+      const active = ['probing', 'queued', 'running', 'failed', 'cancelled'].includes(job.status);
+      card.dataset.status = active ? job.status : (job.dirtySinceOutput ? 'ready' : job.status);
+      const title = card.querySelector('[data-add-audio-progress-title]');
+      const detail = card.querySelector('[data-add-audio-progress-detail]');
+      const progress = card.querySelector('progress');
+      if (title) title.textContent = copy.title;
+      if (detail) detail.textContent = copy.detail;
+      if (progress) {
+        progress.hidden = job.status !== 'running' && job.status !== 'queued';
+        progress.value = job.progress || 0;
+      }
+    }
+    this.renderAddAudioFooter(job);
+  }
+
+  renderAddAudioFooter(job) {
+    const summary = this.dom.quickFootSummary;
+    if (!this.isAddAudioJob(job)) return;
+    const copy = this.addAudioStatusCopy(job);
+    summary.hidden = false;
+    summary.replaceChildren(el('strong', { text: copy.title }), el('span', { text: copy.detail }));
   }
 
   /* ------------------------------------------------------------------ *
@@ -2234,6 +3280,7 @@ export class App {
     formatValue,
     scale,
     onInput,
+    onCommit,
     disabled = false,
   }) {
     const locked = disabled || job.status === 'running' || job.status === 'queued';
@@ -2272,6 +3319,7 @@ export class App {
       input.closest('.quick-effect-control')?.style.setProperty('--quick-range-position', `${nextPosition}%`);
       onInput(next);
     });
+    if (onCommit) input.addEventListener('change', () => onCommit(Number(input.value)));
 
     return el('div', {
       class: 'quick-effect-control',
@@ -3302,6 +4350,23 @@ export class App {
   renderCommand() {
     const job = this.selected;
     if (!job || !job.info) return;
+    if (this.isAddAudioJob(job)) {
+      const validation = this.addAudioValidation(job);
+      if (!validation.ok) {
+        this.dom.commandText.textContent = validation.message;
+        this.dom.commandText.dataset.invalid = 'true';
+        return;
+      }
+      try {
+        const plan = buildAddAudioPlan(addAudioProjectSource(job), job.options);
+        this.dom.commandText.textContent = planToCommand(plan);
+        this.dom.commandText.dataset.invalid = 'false';
+      } catch (error) {
+        this.dom.commandText.textContent = error.message;
+        this.dom.commandText.dataset.invalid = 'true';
+      }
+      return;
+    }
     if (this.isMergeJob(job)) {
       const validation = validateMergeClips(job.clips);
       if (!validation.ok) {
@@ -3425,9 +4490,11 @@ export class App {
     // tasks idempotent: if "Process queue" consumes a job before an individual
     // task for that same job gets its turn, the latter sees `done` and exits.
     if (!this.jobs.includes(job) || !job.info || !this.jobPendingForRun(job)) return;
-    const valid = this.isMergeJob(job)
-      ? this.validateMergeJob(job, { notify: job.status !== 'queued' })
-      : this.validateQuickJob(job, { notify: job.status !== 'queued' });
+    const valid = this.isAddAudioJob(job)
+      ? this.validateAddAudioJob(job, { notify: job.status !== 'queued' })
+      : (this.isMergeJob(job)
+        ? this.validateMergeJob(job, { notify: job.status !== 'queued' })
+        : this.validateQuickJob(job, { notify: job.status !== 'queued' }));
     if (!valid) {
       if (job.status === 'queued') job.status = 'ready';
       this.paintQueue();
@@ -3437,8 +4504,18 @@ export class App {
 
     let plan;
     let mergeSnapshot = null;
+    let addAudioSnapshot = null;
     try {
-      if (this.isMergeJob(job)) {
+      if (this.isAddAudioJob(job)) {
+        addAudioSnapshot = job.pendingAddAudioSnapshot || createAddAudioSnapshot(job);
+        const retainedBytes = Number(job.outputSize) || 0;
+        const validation = validateAddAudioProject(addAudioSnapshot, addAudioSnapshot.options);
+        if (!validation.ok) throw new Error(validation.message);
+        if (validation.estimatedWorkingBytes + retainedBytes > ADD_AUDIO_LIMITS.maxWorkingBytes) {
+          throw new Error('El resultado anterior y esta nueva exportación superarían el límite seguro de memoria. Descargá el anterior y quitá el proyecto antes de volver a procesar.');
+        }
+        plan = buildAddAudioPlan(addAudioSnapshot.source, addAudioSnapshot.options);
+      } else if (this.isMergeJob(job)) {
         mergeSnapshot = job.pendingMergeSnapshot || createMergeSnapshot(job);
         plan = buildJoinVideosPlan(mergeSnapshot.source.inputs, mergeSnapshot.options);
       } else {
@@ -3446,6 +4523,7 @@ export class App {
       }
     } catch (error) {
       delete job.pendingMergeSnapshot;
+      delete job.pendingAddAudioSnapshot;
       job.status = 'failed';
       job.error = error.message;
       this.paintQueue();
@@ -3457,7 +4535,7 @@ export class App {
     job.progress = 0;
     job.error = null;
     job.log = [];
-    if (this.quickToolFor(job) || this.isMergeJob(job)) {
+    if (this.quickToolFor(job) || this.isMergeJob(job) || this.isAddAudioJob(job)) {
       job.previewMode = 'source';
       if (this.quickOutputPreview?.jobId === job.id) this.releaseQuickOutputPreview();
     }
@@ -3466,7 +4544,7 @@ export class App {
     this.paintQueue();
     this.paintDetail();
 
-    const running = this.engine.start(plan, mergeSnapshot?.files || job.file, {
+    const running = this.engine.start(plan, addAudioSnapshot?.files || mergeSnapshot?.files || job.file, {
       onProgress: (message) => {
         job.progress = message.fraction;
         job.speed = message.speed;
@@ -3481,6 +4559,7 @@ export class App {
         this.paintQueue();
         this.updateQuickProgress(job);
         this.updateMergeProgress(job);
+        this.updateAddAudioProgress(job);
       },
       onStep: (message) => {
         this.appendLog(`— ${plan.steps[message.step].label} —`);
@@ -3502,13 +4581,15 @@ export class App {
       job.downloadName = plan.downloadName;
       job.status = 'done';
       job.progress = 1;
-      if (this.isMergeJob(job)) {
+      if (this.isAddAudioJob(job)) {
+        Object.assign(job, markAddAudioExported(job, addAudioSnapshot.revision));
+      } else if (this.isMergeJob(job)) {
         Object.assign(job, markMergeExported(job, mergeSnapshot.revision));
       } else {
         if (this.quickToolFor(job)) job.quickExportSignature = planToCommand(plan);
         job.dirtySinceOutput = false;
       }
-      if (this.quickToolFor(job) || this.isMergeJob(job)) job.previewMode = 'result';
+      if (this.quickToolFor(job) || this.isMergeJob(job) || this.isAddAudioJob(job)) job.previewMode = 'result';
 
       const seconds = (performance.now() - startedAt) / 1000;
       this.appendLog(`Finished in ${formatDuration(seconds)} · ${formatBytes(job.outputSize)}`);
@@ -3518,6 +4599,7 @@ export class App {
       if (!error.cancelled) this.appendLog(`Failed: ${error.message}`);
     } finally {
       delete job.pendingMergeSnapshot;
+      delete job.pendingAddAudioSnapshot;
       this.running = null;
       this.runningId = null;
       this.paintQueue();
@@ -3597,6 +4679,9 @@ export class App {
       this.releaseCropper();
       this.releaseMergeSourcePreview();
       this.releaseMergeSequence();
+      this.releaseAudioMixPreview();
+      this.releaseAudioMixTimeline();
+      this.clearPickerIntent();
     });
     on(window, 'pageshow', (event) => {
       if (!event.persisted) return;
@@ -3609,7 +4694,7 @@ export class App {
       this.dom.fileInput.value = '';
     });
     on(this.dom.fileInput, 'cancel', () => {
-      this.mergePickerJobId = null;
+      this.clearPickerIntent();
     });
 
     // A conversion in flight is minutes of the user's processor time; losing it
@@ -3644,6 +4729,7 @@ export class App {
     switch (action) {
       case 'add-files':
         if (this.isMergeJob(job)) this.openMergePicker(job);
+        else if (this.isAddAudioJob(job)) this.openAddAudioPicker(job, 'audio');
         else this.dom.fileInput.click();
         return true;
       case 'load-sample':
@@ -3667,7 +4753,9 @@ export class App {
         return true;
       case 'start-one':
         if (job && !['probing', 'queued', 'running'].includes(job.status)) {
-          const valid = this.isMergeJob(job) ? this.validateMergeJob(job) : this.validateQuickJob(job);
+          const valid = this.isAddAudioJob(job)
+            ? this.validateAddAudioJob(job)
+            : (this.isMergeJob(job) ? this.validateMergeJob(job) : this.validateQuickJob(job));
           if (!valid) return true;
           // Reset here rather than only inside `runJob`: the run is queued
           // behind whatever else is using the engine, and until it starts the
@@ -3677,6 +4765,7 @@ export class App {
           job.status = 'queued';
           job.previewMode = 'source';
           if (this.isMergeJob(job)) job.pendingMergeSnapshot = createMergeSnapshot(job);
+          if (this.isAddAudioJob(job)) job.pendingAddAudioSnapshot = createAddAudioSnapshot(job);
           this.releaseQuickOutputPreview();
           this.paintQueue();
           this.paintDetail();
@@ -3734,6 +4823,7 @@ export class App {
     if (meta && event.key.toLowerCase() === 'o') {
       event.preventDefault();
       if (this.isMergeJob(this.selected)) this.openMergePicker(this.selected);
+      else if (this.isAddAudioJob(this.selected)) this.openAddAudioPicker(this.selected, 'audio');
       else this.dom.fileInput.click();
       return;
     }

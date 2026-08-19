@@ -18,6 +18,7 @@ Your files are never uploaded, because there is nowhere to upload them to.
 - Resolution, frame rate and quality, with the source never enlarged
 - Trim, crop, rotate, flip, resize, adjust volume, change playback speed, or repeat a video
 - Join an ordered sequence of videos, even when their sizes, frame rates or audio tracks differ
+- Add an external audio track to a video, mix or replace its original sound, and position or loop it
 - Extract the audio from a video, or the video's frames as images
 - Compress to a target file size, in two passes
 - A poster frame from any point in the clip

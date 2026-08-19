@@ -20,6 +20,9 @@ import {
   parseProgress,
   progressFraction,
   estimateRemaining,
+  trackDuration,
+  videoTrackDuration,
+  audioTrackDuration,
 } from '../src/media/probe.js';
 
 /* ------------------------------------------------------------------ *
@@ -196,6 +199,107 @@ test('ffprobe JSON preserves each stream start on a shared container timeline', 
   assert.equal(info.audio.startTime, 6);
   assert.equal(info.streams[0].startTime, 5);
   assert.equal(info.streams[1].startTime, 6);
+});
+
+test('ffprobe JSON promotes Matroska DURATION tags to precise track durations', () => {
+  const info = parseProbeJson(JSON.stringify({
+    format: {
+      format_name: 'matroska,webm',
+      duration: '6.008000',
+      start_time: '0.000000',
+    },
+    streams: [
+      {
+        index: 0,
+        codec_type: 'video',
+        codec_name: 'vp9',
+        width: 320,
+        height: 240,
+        avg_frame_rate: '30/1',
+        tags: { DURATION: '00:00:03.000000000' },
+      },
+      {
+        index: 1,
+        codec_type: 'audio',
+        codec_name: 'opus',
+        sample_rate: '48000',
+        channels: 2,
+        tags: { DURATION: '00:00:06.008000000' },
+      },
+    ],
+  }));
+
+  assert.equal(info.video.duration, 3);
+  assert.equal(info.audio.duration, 6.008);
+  assert.equal(videoTrackDuration(info), 3, 'the longer audio/container must not redefine video');
+  assert.equal(audioTrackDuration(info), 6.008);
+  assert.equal(trackDuration(info, 'video'), 3);
+  assert.equal(trackDuration(info, 'subtitle'), null);
+});
+
+test('Matroska DURATION tags are end timestamps when a stream starts later', () => {
+  const info = parseProbeJson(JSON.stringify({
+    format: {
+      format_name: 'matroska,webm',
+      duration: '8.000000',
+      start_time: '5.000000',
+    },
+    streams: [{
+      index: 0,
+      codec_type: 'video',
+      codec_name: 'vp9',
+      width: 320,
+      height: 240,
+      start_time: '5.000000',
+      avg_frame_rate: '30/1',
+      tags: { DURATION: '00:00:08.000000000' },
+    }],
+  }));
+
+  assert.equal(info.video.startTime, 5);
+  assert.equal(info.video.duration, 3);
+  assert.equal(videoTrackDuration(info), 3);
+});
+
+test('numeric stream duration wins over a stale tag', () => {
+  const info = parseProbeJson(JSON.stringify({
+    format: { format_name: 'matroska', duration: '6' },
+    streams: [{
+      index: 0,
+      codec_type: 'audio',
+      codec_name: 'opus',
+      duration: '2.5',
+      tags: { duration: '00:00:06.000000000' },
+    }],
+  }));
+  assert.equal(info.audio.duration, 2.5);
+});
+
+test('track duration uses the container only when no sibling track can have extended it', () => {
+  assert.equal(videoTrackDuration({
+    duration: 3,
+    hasVideo: true,
+    hasAudio: false,
+    video: { duration: null },
+    audio: null,
+  }), 3);
+  assert.equal(audioTrackDuration({
+    duration: 4,
+    hasVideo: false,
+    hasAudio: true,
+    video: null,
+    audio: { duration: null },
+  }), 4);
+
+  const ambiguous = {
+    duration: 6,
+    hasVideo: true,
+    hasAudio: true,
+    video: { duration: null },
+    audio: { duration: 6 },
+  };
+  assert.equal(videoTrackDuration(ambiguous), null);
+  assert.equal(audioTrackDuration({ ...ambiguous, video: { duration: 3 }, audio: { duration: null } }), null);
 });
 
 test('Matroska prints SAR without brackets and it still parses', () => {

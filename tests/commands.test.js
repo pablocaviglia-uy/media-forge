@@ -21,6 +21,7 @@ import assert from 'node:assert/strict';
 
 import {
   OPERATIONS,
+  buildAddAudioPlan,
   buildPlan,
   buildJoinVideosPlan,
   planToCommand,
@@ -283,6 +284,161 @@ test('a join refuses incomplete projects before it reaches FFmpeg', () => {
   assert.throws(
     () => buildJoinVideosPlan([VIDEO, source('stream.mkv', { hasVideo: true, duration: null })]),
     /does not report a usable duration/
+  );
+});
+
+/* ------------------------------------------------------------------ *
+ * Adding audio to video
+ * ------------------------------------------------------------------ */
+
+const ADD_AUDIO_VIDEO = {
+  name: 'odd-phone.mov',
+  size: 10_000_000,
+  info: {
+    hasVideo: true,
+    hasAudio: true,
+    duration: 7,
+    startTime: 5,
+    bitrate: 900_000,
+    video: { codec: 'h264', width: 321, height: 241, fps: 30, duration: 3, startTime: 5 },
+    audio: { codec: 'aac', channels: 1, sampleRate: 44_100, duration: 6, startTime: 6 },
+  },
+};
+
+const ADD_AUDIO_TRACK = {
+  name: 'music.mp3',
+  size: 1_000_000,
+  info: {
+    hasVideo: false,
+    hasAudio: true,
+    duration: 1,
+    startTime: 0.025,
+    video: null,
+    audio: { codec: 'mp3', channels: 1, sampleRate: 32_000, duration: 1, startTime: 0.025 },
+  },
+};
+
+const addAudioSource = (video = ADD_AUDIO_VIDEO, audio = ADD_AUDIO_TRACK) => ({ video, audio });
+
+test('add-audio is a specialised role-ordered MP4 plan whose duration belongs to video', () => {
+  assert.equal(OPERATIONS.some((operation) => operation.id === 'add-audio-to-video'), false);
+  const plan = buildAddAudioPlan(addAudioSource(), { audioOffset: 0.5 });
+  const args = body(plan);
+
+  assert.equal(plan.operation, 'add-audio-to-video');
+  assert.deepEqual(plan.inputNames, ['input-video.mov', 'input-audio.mp3']);
+  assert.deepEqual(args.slice(0, 4), ['-i', 'input-video.mov', '-i', 'input-audio.mp3']);
+  assert.deepEqual(plan.outputs, ['output.mp4']);
+  assert.equal(plan.mime, 'video/mp4');
+  assert.equal(plan.downloadName, 'odd-phone-con-audio.mp4');
+  assert.equal(plan.duration, 3, 'the longer original audio/container must not define output length');
+  assert.equal(plan.mixMode, 'mix');
+  assert.equal(plan.audioFit, 'once');
+  assert.equal(valueAfter(args, '-c:v'), 'libx264');
+  assert.equal(valueAfter(args, '-c:a'), 'aac');
+  assert.equal(valueAfter(args, '-b:a'), '192k');
+  assert.equal(valueAfter(args, '-ar'), '48000');
+  assert.equal(valueAfter(args, '-ac'), '2');
+  assert.equal(valueAfter(args, '-t'), '3');
+  assert.equal(valueAfter(args, '-movflags'), '+faststart');
+});
+
+test('mix preserves original A/V offset and applies quiet added gain, delay and limiter', () => {
+  const graph = valueAfter(body(buildAddAudioPlan(addAudioSource(), { audioOffset: 0.5 })), '-filter_complex');
+
+  assert.match(graph, /^\[0:v:0\]trim=duration=3,setpts=PTS-STARTPTS,pad=ceil\(iw\/2\)\*2:ceil\(ih\/2\)\*2,format=yuv420p\[v\]/);
+  assert.match(graph, /\[0:a:0\]aresample=48000,aformat=.*channel_layouts=stereo,volume=1,asetpts=PTS-STARTPTS,adelay=1000:all=1,apad,atrim=duration=3\[original\]/);
+  assert.match(graph, /\[1:a:0\]atrim=duration=1,aresample=48000,aformat=.*volume=0\.35,asetpts=PTS-STARTPTS,adelay=500:all=1,apad,atrim=duration=3\[added\]/);
+  assert.match(graph, /\[original\]\[added\]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0\.95:level=false:latency=true/);
+});
+
+test('replace ignores original audio and a negative once offset trims the added track', () => {
+  const plan = buildAddAudioPlan(addAudioSource(), {
+    mixMode: 'replace',
+    audioOffset: -0.25,
+    addedGain: 1.5,
+    limiter: false,
+    audioBitrate: 128,
+  });
+  const args = body(plan);
+  const graph = valueAfter(args, '-filter_complex');
+
+  assert.equal(plan.mixMode, 'replace');
+  assert.doesNotMatch(graph, /\[0:a:0\]|amix|alimiter/);
+  assert.match(graph, /\[1:a:0\]atrim=start=0\.25:duration=0\.75/);
+  assert.match(graph, /volume=1\.5,asetpts=PTS-STARTPTS,apad/);
+  assert.equal(valueAfter(args, '-b:a'), '128k');
+});
+
+test('a silent primary dynamically becomes full-volume replace', () => {
+  const silent = {
+    ...ADD_AUDIO_VIDEO,
+    name: 'silent.webm',
+    info: {
+      ...ADD_AUDIO_VIDEO.info,
+      hasAudio: false,
+      audio: null,
+      duration: 3,
+      startTime: 0,
+      video: { ...ADD_AUDIO_VIDEO.info.video, startTime: 0 },
+    },
+  };
+  const plan = buildAddAudioPlan(addAudioSource(silent));
+  const graph = valueAfter(body(plan), '-filter_complex');
+
+  assert.equal(plan.mixMode, 'replace');
+  assert.equal(plan.options.addedGain, 1);
+  assert.doesNotMatch(graph, /\[0:a:0\]|amix/);
+  assert.match(graph, /volume=1,/);
+});
+
+test('loop is an input option on added audio and fills only the video timeline', () => {
+  const plan = buildAddAudioPlan(addAudioSource(), {
+    mixMode: 'replace',
+    audioFit: 'loop',
+    audioOffset: -10.25,
+  });
+  const args = body(plan);
+  const graph = valueAfter(args, '-filter_complex');
+
+  assert.deepEqual(args.slice(0, 6), ['-i', 'input-video.mov', '-stream_loop', '-1', '-i', 'input-audio.mp3']);
+  assert.equal(plan.placement.trimStart, 0.25, 'negative loop offset should fold to one phase');
+  assert.equal(plan.placement.audibleDuration, 3);
+  assert.match(graph, /\[1:a:0\]atrim=start=0\.25:duration=3/);
+  assert.equal(valueAfter(args, '-t'), '3');
+});
+
+test('add-audio refuses wrong roles, unknown track duration, bad options and no-overlap', () => {
+  assert.throws(
+    () => buildAddAudioPlan(addAudioSource({ ...ADD_AUDIO_VIDEO, info: { hasVideo: false } })),
+    /primary file with a video track/,
+  );
+  assert.throws(
+    () => buildAddAudioPlan(addAudioSource(ADD_AUDIO_VIDEO, { ...ADD_AUDIO_TRACK, info: { hasAudio: false } })),
+    /second file with an audio track/,
+  );
+  assert.throws(
+    () => buildAddAudioPlan(addAudioSource({
+      ...ADD_AUDIO_VIDEO,
+      info: { ...ADD_AUDIO_VIDEO.info, video: { ...ADD_AUDIO_VIDEO.info.video, duration: null } },
+    })),
+    /usable track duration/,
+  );
+  assert.throws(() => buildAddAudioPlan(addAudioSource(), { addedGain: 2.1 }), /options are invalid/);
+  assert.throws(() => buildAddAudioPlan(addAudioSource(), { audioOffset: 3 }), /does not overlap/);
+  assert.throws(() => buildAddAudioPlan(addAudioSource(), { audioOffset: -1 }), /does not overlap/);
+  const delayedOriginal = {
+    ...ADD_AUDIO_VIDEO,
+    info: {
+      ...ADD_AUDIO_VIDEO.info,
+      startTime: 0,
+      video: { ...ADD_AUDIO_VIDEO.info.video, startTime: 0, duration: 3 },
+      audio: { ...ADD_AUDIO_VIDEO.info.audio, startTime: 5, duration: 1 },
+    },
+  };
+  assert.throws(
+    () => buildAddAudioPlan(addAudioSource(delayedOriginal), { mixMode: 'mix', originalGain: 1, addedGain: 0 }),
+    /silent output/,
   );
 });
 
