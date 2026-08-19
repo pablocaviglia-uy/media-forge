@@ -432,6 +432,8 @@ html[data-interface="forge"] .queue-result-item.is-current .queue-result-icon {
 
 html[data-interface="forge"] .inspector {
   position: relative;
+  container-name: forge-inspector;
+  container-type: inline-size;
   min-width: 0;
   background:
     linear-gradient(var(--border) 1px, transparent 1px),
@@ -7256,6 +7258,745 @@ html[data-interface="forge"] .generated-results-empty p {
 
 @media (prefers-reduced-motion: reduce) {
   html[data-interface="forge"] .generated-audio-lab-node:hover:not(:disabled) {
+    transform: none;
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Conversion workspace
+ *
+ * The converter is intentionally quieter than the legacy vertical form. The
+ * source owns the flexible column, while the few decisions needed for the
+ * current output live in one 360px inspector. The markup supplies every label
+ * and state; CSS only establishes hierarchy and interaction feedback.
+ * ------------------------------------------------------------------ */
+
+html[data-interface="forge"] .detail[data-workspace="converter"]:has(.conversion-workspace) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 360px);
+  gap: 1rem clamp(1rem, 2.2vw, 1.5rem);
+  align-items: start;
+  width: min(1180px, 100%);
+}
+
+html[data-interface="forge"] .detail[data-workspace="converter"]:has(.conversion-workspace) > .forge-workspace-toolbar,
+html[data-interface="forge"] .detail[data-workspace="converter"]:has(.conversion-workspace) > .detail-head,
+html[data-interface="forge"] .detail[data-workspace="converter"]:has(.conversion-workspace) > .command,
+html[data-interface="forge"] .detail[data-workspace="converter"]:has(.conversion-workspace) > .detail-foot {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+html[data-interface="forge"] .detail[data-workspace="converter"]:has(.conversion-workspace) > #preview {
+  grid-column: 1;
+  position: sticky;
+  top: 1rem;
+  align-self: start;
+  width: 100%;
+  min-width: 0;
+  max-height: 58dvh;
+  background: #000;
+  border-color: var(--border-strong);
+}
+
+html[data-interface="forge"] .detail[data-workspace="converter"]:has(.conversion-workspace) > #preview .preview-media {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  max-height: 58dvh;
+  object-fit: contain;
+}
+
+html[data-interface="forge"] .detail[data-workspace="converter"]:has(.conversion-workspace) > #controls {
+  grid-column: 2;
+  align-self: start;
+  min-width: 0;
+  padding: 0;
+  overflow: visible;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+html[data-interface="forge"] .conversion-workspace,
+html[data-interface="forge"] .conversion-source-pane,
+html[data-interface="forge"] .conversion-settings-pane {
+  min-width: 0;
+  max-width: 100%;
+}
+
+html[data-interface="forge"] .conversion-workspace {
+  display: grid;
+  gap: 0.75rem;
+  width: 100%;
+}
+
+html[data-interface="forge"] .conversion-source-pane {
+  display: grid;
+  gap: 0.75rem;
+}
+
+html[data-interface="forge"] .conversion-settings-pane {
+  position: sticky;
+  top: 1rem;
+  display: grid;
+  gap: 0;
+  overflow: clip;
+  color: var(--fg);
+  background: color-mix(in srgb, var(--bg-raised) 96%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow-sm);
+}
+
+html[data-interface="forge"] .conversion-source-card {
+  display: grid;
+  gap: 0.75rem;
+  min-width: 0;
+  padding: clamp(0.8rem, 1.8vw, 1rem);
+  overflow: hidden;
+  background: color-mix(in srgb, var(--bg-sunken) 72%, var(--bg-raised));
+  border: 1px solid var(--border);
+  border-radius: 14px;
+}
+
+html[data-interface="forge"] .conversion-source-card > video,
+html[data-interface="forge"] .conversion-source-card > audio,
+html[data-interface="forge"] .conversion-source-card .preview-media,
+html[data-interface="forge"] .conversion-source-card .scrub-video {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  max-height: 58dvh;
+  object-fit: contain;
+  background: #000;
+  border-radius: 11px;
+}
+
+html[data-interface="forge"] .conversion-section {
+  display: grid;
+  gap: 0.75rem;
+  min-width: 0;
+  padding: 1rem;
+}
+
+html[data-interface="forge"] .conversion-section + .conversion-section,
+html[data-interface="forge"] .conversion-settings-pane > .conversion-disclosure,
+html[data-interface="forge"] .conversion-settings-pane > .conversion-more-actions,
+html[data-interface="forge"] .conversion-settings-pane > .conversion-output-bar {
+  border-top: 1px solid var(--border);
+}
+
+html[data-interface="forge"] .conversion-section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+html[data-interface="forge"] .conversion-section-head > div {
+  display: grid;
+  gap: 0.18rem;
+  min-width: 0;
+}
+
+html[data-interface="forge"] .conversion-section-head h2,
+html[data-interface="forge"] .conversion-section-head h3,
+html[data-interface="forge"] .conversion-section-head strong {
+  margin: 0;
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 720;
+  line-height: 1.25;
+  letter-spacing: -0.012em;
+}
+
+html[data-interface="forge"] .conversion-section-head p,
+html[data-interface="forge"] .conversion-section-head small {
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+html[data-interface="forge"] .conversion-intent-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+html[data-interface="forge"] .conversion-quality-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+html[data-interface="forge"] .conversion-output-types {
+  grid-template-columns: repeat(auto-fit, minmax(60px, 1fr));
+}
+
+html[data-interface="forge"] .conversion-output-types .conversion-intent-choice {
+  justify-content: center;
+  min-height: 42px;
+  padding-inline: 0.42rem;
+  text-align: center;
+}
+
+html[data-interface="forge"] .conversion-quality-grid .conversion-intent-choice {
+  justify-content: center;
+  min-height: 42px;
+  padding-inline: 0.4rem;
+  text-align: center;
+}
+
+html[data-interface="forge"] .conversion-intent-choice {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-width: 0;
+  min-height: 48px;
+  padding: 0.62rem 0.7rem;
+  overflow: hidden;
+  color: var(--fg-muted);
+  text-align: left;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  cursor: pointer;
+  transition:
+    color 140ms var(--ease),
+    background-color 140ms var(--ease),
+    border-color 140ms var(--ease),
+    box-shadow 140ms var(--ease),
+    transform 140ms var(--ease);
+}
+
+html[data-interface="forge"] .conversion-intent-choice > span,
+html[data-interface="forge"] .conversion-intent-choice > strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[data-interface="forge"] .conversion-intent-choice > strong {
+  color: inherit;
+  font-size: 12px;
+  font-weight: 680;
+}
+
+html[data-interface="forge"] .conversion-intent-choice:hover:not(:disabled):not([aria-disabled="true"]) {
+  color: var(--fg);
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+  transform: translateY(-1px);
+}
+
+html[data-interface="forge"] .conversion-intent-choice[aria-pressed="true"],
+html[data-interface="forge"] .conversion-intent-choice[aria-selected="true"],
+html[data-interface="forge"] .conversion-intent-choice[data-active="true"],
+html[data-interface="forge"] .conversion-intent-choice:has(input:checked) {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 78%, var(--bg-raised));
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 10%, transparent) inset;
+}
+
+html[data-interface="forge"] .conversion-intent-choice input[type="radio"],
+html[data-interface="forge"] .conversion-intent-choice input[type="checkbox"] {
+  flex: 0 0 auto;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+html[data-interface="forge"] .conversion-intent-choice:has(input:focus-visible),
+html[data-interface="forge"] .conversion-intent-choice:focus-visible {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+html[data-interface="forge"] .conversion-intent-choice:disabled,
+html[data-interface="forge"] .conversion-intent-choice[aria-disabled="true"] {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+html[data-interface="forge"] .conversion-field {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+  color: var(--fg);
+}
+
+html[data-interface="forge"] .conversion-field > label,
+html[data-interface="forge"] .conversion-field > .control-label,
+html[data-interface="forge"] label.conversion-field > span:first-child {
+  color: var(--fg);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+html[data-interface="forge"] .conversion-field > small,
+html[data-interface="forge"] .conversion-field > .control-hint {
+  color: var(--fg-muted);
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+
+html[data-interface="forge"] .conversion-field select,
+html[data-interface="forge"] .conversion-field input:not([type="radio"]):not([type="checkbox"]),
+html[data-interface="forge"] .conversion-field .control-input {
+  width: 100%;
+  max-width: 100%;
+  min-height: 42px;
+  padding: 0.55rem 0.68rem;
+  color: var(--fg);
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+}
+
+html[data-interface="forge"] .conversion-field select:focus,
+html[data-interface="forge"] .conversion-field input:focus,
+html[data-interface="forge"] .conversion-field .control-input:focus {
+  border-color: var(--accent);
+  outline: 0;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+html[data-interface="forge"] .conversion-field select:disabled,
+html[data-interface="forge"] .conversion-field input:disabled,
+html[data-interface="forge"] .conversion-field .control-input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+html[data-interface="forge"] .conversion-disclosure {
+  min-width: 0;
+  background: transparent;
+}
+
+html[data-interface="forge"] .conversion-disclosure-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 0;
+  min-height: 52px;
+  padding: 0.75rem 1rem;
+  color: var(--fg);
+  cursor: pointer;
+  list-style: none;
+  transition: background-color 140ms var(--ease), color 140ms var(--ease);
+}
+
+html[data-interface="forge"] .conversion-disclosure-summary::-webkit-details-marker {
+  display: none;
+}
+
+html[data-interface="forge"] .conversion-disclosure-summary::after {
+  content: "";
+  width: 7px;
+  height: 7px;
+  margin-right: 0.2rem;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg) translateY(-2px);
+  transition: transform 140ms var(--ease);
+}
+
+html[data-interface="forge"] .conversion-disclosure[open] > .conversion-disclosure-summary::after {
+  transform: rotate(225deg) translate(-1px, -1px);
+}
+
+html[data-interface="forge"] .conversion-disclosure-summary:hover {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 34%, transparent);
+}
+
+html[data-interface="forge"] .conversion-disclosure-summary > div,
+html[data-interface="forge"] .conversion-disclosure-summary > span {
+  min-width: 0;
+}
+
+html[data-interface="forge"] .conversion-disclosure-summary strong {
+  display: block;
+  overflow: hidden;
+  color: inherit;
+  font-size: 12px;
+  font-weight: 680;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[data-interface="forge"] .conversion-disclosure-summary small {
+  display: block;
+  margin-top: 0.12rem;
+  overflow: hidden;
+  color: var(--fg-muted);
+  font-size: 10.5px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[data-interface="forge"] .conversion-disclosure-body {
+  display: grid;
+  gap: 0.75rem;
+  min-width: 0;
+  padding: 0 1rem 1rem;
+}
+
+html[data-interface="forge"] .conversion-trim-shell {
+  display: grid;
+  gap: 0.65rem;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0.7rem;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--bg-sunken) 76%, var(--bg-raised));
+  border: 1px solid var(--border);
+  border-radius: 11px;
+}
+
+html[data-interface="forge"] .conversion-trim-shell .scrubber,
+html[data-interface="forge"] .conversion-trim-shell .scrub-track,
+html[data-interface="forge"] .conversion-trim-shell .scrub-frames,
+html[data-interface="forge"] .conversion-trim-shell .control-row {
+  min-width: 0;
+  max-width: 100%;
+}
+
+html[data-interface="forge"] .conversion-trim-shell .scrub-video {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  max-height: 58dvh;
+  object-fit: contain;
+}
+
+html[data-interface="forge"] .conversion-trim-shell .scrub-bar {
+  flex-wrap: wrap;
+  row-gap: 0.4rem;
+}
+
+html[data-interface="forge"] .conversion-trim-shell .scrub-time {
+  flex: 1 1 9ch;
+  width: auto;
+  min-width: 0;
+}
+
+html[data-interface="forge"] .conversion-trim-shell .scrub-spacer {
+  min-width: 0;
+}
+
+html[data-interface="forge"] .conversion-trim-shell .scrub-note {
+  line-height: 1.45;
+}
+
+html[data-interface="forge"] .conversion-output-bar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 0;
+  min-height: 66px;
+  padding: 0.7rem 0.8rem max(0.7rem, env(safe-area-inset-bottom));
+  background: color-mix(in srgb, var(--bg-raised) 94%, transparent);
+}
+
+html[data-interface="forge"] .conversion-output-summary {
+  display: grid;
+  flex: 1 1 auto;
+  gap: 0.1rem;
+  min-width: 0;
+  color: var(--fg-muted);
+  font-size: 10.5px;
+  line-height: 1.35;
+}
+
+html[data-interface="forge"] .conversion-output-summary strong {
+  overflow: hidden;
+  color: var(--fg);
+  font-size: 11.5px;
+  font-weight: 680;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[data-interface="forge"] .conversion-output-bar .primary-button {
+  flex: 0 0 auto;
+  min-height: 42px;
+  padding-inline: 0.9rem;
+  white-space: nowrap;
+}
+
+html[data-interface="forge"] .detail[data-workspace="converter"]:has(.conversion-workspace) > .detail-foot > .conversion-output-summary,
+html[data-interface="forge"] .detail[data-workspace="converter"]:has(.conversion-workspace) > .detail-foot > [data-action="start-one"],
+html[data-interface="forge"] .detail[data-workspace="converter"]:has(.conversion-workspace) > .detail-foot > [data-action="cancel-one"] {
+  display: none !important;
+}
+
+html[data-interface="forge"] .conversion-output-bar > [data-action="cancel-one"] {
+  flex: 0 0 auto;
+  min-height: 44px;
+}
+
+html[data-interface="forge"] .conversion-result-return {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0.55rem 0.7rem;
+  overflow: hidden;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 66%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+  border-radius: 10px;
+}
+
+html[data-interface="forge"] .conversion-result-return > div,
+html[data-interface="forge"] .conversion-result-return > span,
+html[data-interface="forge"] .conversion-result-return > p {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+html[data-interface="forge"] .conversion-result-return > div {
+  display: grid;
+  gap: 0.12rem;
+}
+
+html[data-interface="forge"] .conversion-result-return strong {
+  color: inherit;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+html[data-interface="forge"] .conversion-result-return small {
+  color: var(--fg-muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+html[data-interface="forge"] .conversion-result-return button,
+html[data-interface="forge"] .conversion-result-return .text-button {
+  flex: 0 0 auto;
+  min-height: 34px;
+  white-space: nowrap;
+}
+
+html[data-interface="forge"] .conversion-more-actions {
+  min-width: 0;
+  padding: 0.75rem 1rem;
+  color: var(--fg-muted);
+  background: color-mix(in srgb, var(--bg-sunken) 40%, transparent);
+}
+
+html[data-interface="forge"] details.conversion-more-actions > summary {
+  min-height: 34px;
+  color: var(--fg-muted);
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+html[data-interface="forge"] .conversion-inline-notice {
+  display: grid;
+  gap: 0.18rem;
+  min-width: 0;
+  padding: 0.62rem 0.7rem;
+  color: var(--warn);
+  font-size: 10.5px;
+  line-height: 1.5;
+  background: color-mix(in srgb, var(--warn-soft) 84%, var(--bg-raised));
+  border: 1px solid color-mix(in srgb, var(--warn) 30%, var(--border));
+  border-radius: 9px;
+  overflow-wrap: anywhere;
+}
+
+html[data-interface="forge"] .conversion-inline-notice[data-kind="info"] {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 64%, var(--bg-raised));
+  border-color: color-mix(in srgb, var(--accent) 24%, var(--border));
+}
+
+html[data-interface="forge"] .conversion-inline-notice[data-kind="error"] {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger-soft) 82%, var(--bg-raised));
+  border-color: color-mix(in srgb, var(--danger) 28%, var(--border));
+}
+
+@media (max-width: 960px) {
+  html[data-interface="forge"] .detail[data-workspace="converter"]:has(.conversion-workspace) {
+    grid-template-columns: minmax(0, 1fr);
+    width: min(760px, 100%);
+  }
+
+  html[data-interface="forge"] .detail[data-workspace="converter"]:has(.conversion-workspace) > .forge-workspace-toolbar,
+  html[data-interface="forge"] .detail[data-workspace="converter"]:has(.conversion-workspace) > .detail-head,
+  html[data-interface="forge"] .detail[data-workspace="converter"]:has(.conversion-workspace) > #preview,
+  html[data-interface="forge"] .detail[data-workspace="converter"]:has(.conversion-workspace) > #controls,
+  html[data-interface="forge"] .detail[data-workspace="converter"]:has(.conversion-workspace) > .command,
+  html[data-interface="forge"] .detail[data-workspace="converter"]:has(.conversion-workspace) > .detail-foot {
+    grid-column: 1;
+  }
+
+  html[data-interface="forge"] .detail[data-workspace="converter"]:has(.conversion-workspace) > #preview,
+  html[data-interface="forge"] .conversion-settings-pane {
+    position: static;
+  }
+}
+
+@media (max-width: 560px) {
+  html[data-interface="forge"] .detail[data-workspace="converter"]:has(.conversion-workspace) {
+    gap: 0.75rem;
+    width: 100%;
+    padding: 0.75rem 0.75rem 1rem;
+  }
+
+  html[data-interface="forge"] .detail[data-workspace="converter"]:has(.conversion-workspace) > #preview,
+  html[data-interface="forge"] .detail[data-workspace="converter"]:has(.conversion-workspace) > #preview .preview-media {
+    max-height: 52dvh;
+  }
+
+  html[data-interface="forge"] .conversion-workspace,
+  html[data-interface="forge"] .conversion-source-pane {
+    gap: 0.6rem;
+  }
+
+  html[data-interface="forge"] .conversion-settings-pane {
+    border-radius: 13px;
+  }
+
+  html[data-interface="forge"] .conversion-section {
+    gap: 0.65rem;
+    padding: 0.82rem;
+  }
+
+  html[data-interface="forge"] .conversion-intent-grid {
+    gap: 0.42rem;
+  }
+
+  html[data-interface="forge"] .conversion-intent-choice {
+    min-height: 46px;
+    padding-inline: 0.58rem;
+  }
+
+  html[data-interface="forge"] .conversion-disclosure-summary {
+    min-height: 48px;
+    padding: 0.68rem 0.82rem;
+  }
+
+  html[data-interface="forge"] .conversion-disclosure-body {
+    padding: 0 0.82rem 0.82rem;
+  }
+
+  html[data-interface="forge"] .conversion-trim-shell {
+    padding: 0.55rem;
+  }
+
+  html[data-interface="forge"] .conversion-trim-shell .scrub-track {
+    height: 54px;
+  }
+
+  html[data-interface="forge"] .conversion-trim-shell .scrub-spacer {
+    display: none;
+  }
+
+  html[data-interface="forge"] .conversion-result-return {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  html[data-interface="forge"] .conversion-result-return > div,
+  html[data-interface="forge"] .conversion-result-return > span,
+  html[data-interface="forge"] .conversion-result-return > p {
+    flex: 1 1 180px;
+  }
+
+  html[data-interface="forge"] .conversion-output-bar {
+    gap: 0.55rem;
+    margin-inline: -1px;
+    padding-inline: 0.7rem;
+  }
+
+  html[data-interface="forge"] .conversion-output-bar .primary-button {
+    min-height: 44px;
+  }
+}
+
+@media (max-width: 380px) {
+  html[data-interface="forge"] .conversion-output-types {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  html[data-interface="forge"] .conversion-output-bar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  html[data-interface="forge"] .conversion-output-bar .primary-button,
+  html[data-interface="forge"] .conversion-output-bar > [data-action="cancel-one"] {
+    width: 100%;
+  }
+}
+
+@media (pointer: coarse) {
+  html[data-interface="forge"] .conversion-intent-choice,
+  html[data-interface="forge"] .conversion-disclosure-summary,
+  html[data-interface="forge"] .conversion-field select,
+  html[data-interface="forge"] .conversion-field input:not([type="radio"]):not([type="checkbox"]),
+  html[data-interface="forge"] .conversion-result-return button,
+  html[data-interface="forge"] .conversion-more-actions summary {
+    min-height: 44px;
+  }
+
+  html[data-interface="forge"] .conversion-intent-choice:hover:not(:disabled):not([aria-disabled="true"]) {
+    transform: none;
+  }
+}
+
+/* Viewport width is not the converter's usable width: the queue and FFmpeg
+   log may both be open beside it. Collapse from the inspector's real inline
+   size so opening either panel cannot crush the preview into a sliver. */
+@container forge-inspector (max-width: 840px) {
+  html[data-interface="forge"] .detail[data-workspace="converter"]:has(.conversion-workspace) {
+    grid-template-columns: minmax(0, 1fr);
+    width: min(760px, 100%);
+  }
+
+  html[data-interface="forge"] .detail[data-workspace="converter"]:has(.conversion-workspace) > .forge-workspace-toolbar,
+  html[data-interface="forge"] .detail[data-workspace="converter"]:has(.conversion-workspace) > .detail-head,
+  html[data-interface="forge"] .detail[data-workspace="converter"]:has(.conversion-workspace) > #preview,
+  html[data-interface="forge"] .detail[data-workspace="converter"]:has(.conversion-workspace) > #controls,
+  html[data-interface="forge"] .detail[data-workspace="converter"]:has(.conversion-workspace) > .command,
+  html[data-interface="forge"] .detail[data-workspace="converter"]:has(.conversion-workspace) > .detail-foot {
+    grid-column: 1;
+  }
+
+  html[data-interface="forge"] .detail[data-workspace="converter"]:has(.conversion-workspace) > #preview,
+  html[data-interface="forge"] .conversion-settings-pane {
+    position: static;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-interface="forge"] .conversion-intent-choice,
+  html[data-interface="forge"] .conversion-disclosure-summary,
+  html[data-interface="forge"] .conversion-disclosure-summary::after {
+    transition: none;
+  }
+
+  html[data-interface="forge"] .conversion-intent-choice:hover:not(:disabled):not([aria-disabled="true"]) {
     transform: none;
   }
 }

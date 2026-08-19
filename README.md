@@ -30,6 +30,9 @@ storage; that can be disabled or cleared at any time in **Configuración**.
 - Drag and drop files, or a whole folder
 - A queue that converts one file after another, with progress and an estimate
 - Cancel a conversion that is taking longer than it is worth
+- A contextual converter: choose Video, Audio, GIF or Images first, then see
+  only the settings that can affect that result; technical choices stay under
+  **Personalizar** and trim opens only when it is needed
 - A result-first workspace with local video playback and image previews
 - An Audio Lab for generated audio, with a real locally decoded waveform,
   precise selection, zoom, looped playback and keyboard-friendly controls
@@ -160,6 +163,8 @@ src/
   media/
     formats.js        The output formats, and what each needs from the core
     commands.js       {source, operation, options} -> exact ffmpeg arguments
+    conversion-workspace.js
+                       Contextual control model and safe execution options
     audio-lab.js      Byte-free nested audio fragments and range resolution
     audio-peaks.js    Bounded Web Audio decode and transient waveform peaks
     merge.js          Ordered multi-file project state and immutable snapshots

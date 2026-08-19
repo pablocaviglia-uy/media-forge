@@ -122,12 +122,12 @@
     <aside class="queue" id="queue" aria-label="Queue">
       <div class="queue-head">
         <span class="queue-count" id="queue-count">Nothing queued</span>
-        <button type="button" class="text-button" data-action="clear-done">Clear finished</button>
+        <button type="button" class="text-button" data-action="clear-done">Quitar terminados</button>
       </div>
       <nav class="queue-list" id="queue-list" aria-label="Files"></nav>
       <div class="queue-foot">
-        <button type="button" class="text-button" data-action="add-files">Add files</button>
-        <button type="button" class="text-button" data-action="download-all" disabled>Download all</button>
+        <button type="button" class="text-button" data-action="add-files">Agregar archivos</button>
+        <button type="button" class="text-button" data-action="download-all" disabled>Descargar todo</button>
       </div>
       <div class="queue-resizer" data-resize="queue" role="separator" aria-orientation="vertical" tabindex="-1"></div>
     </aside>
@@ -233,19 +233,19 @@
         <div class="controls" id="controls"></div>
 
         <details class="command" id="command-block">
-          <summary>The command this will run</summary>
+          <summary>Comando que se ejecutará</summary>
           <pre class="command-text" id="command-text"></pre>
           <div class="command-actions">
-            <button type="button" class="text-button" data-action="copy-command">Copy</button>
+            <button type="button" class="text-button" data-action="copy-command">Copiar</button>
           </div>
         </details>
 
         <div class="detail-foot">
           <span class="quick-foot-summary forge-only" id="quick-foot-summary" hidden></span>
-          <button type="button" class="primary-button" data-action="start-one">Convert</button>
-          <button type="button" class="text-button" data-action="cancel-one" hidden>Cancel</button>
-          <button type="button" class="text-button" data-action="download-one" hidden>Download</button>
-          <button type="button" class="text-button danger" data-action="remove-one">Remove</button>
+          <button type="button" class="primary-button" data-action="start-one">Convertir</button>
+          <button type="button" class="text-button" data-action="cancel-one" hidden>Cancelar</button>
+          <button type="button" class="text-button" data-action="download-one" hidden>Descargar</button>
+          <button type="button" class="text-button danger" data-action="remove-one">Quitar</button>
         </div>
       </div>
     </main>
@@ -253,7 +253,7 @@
     <aside class="logpane" id="logpane" aria-label="FFmpeg log">
       <div class="logpane-head">
         <span>FFmpeg</span>
-        <button type="button" class="text-button" data-action="copy-log">Copy</button>
+        <button type="button" class="text-button" data-action="copy-log">Copiar</button>
       </div>
       <pre class="logpane-body" id="log-body" aria-live="off"></pre>
       <div class="logpane-resizer" data-resize="log" role="separator" aria-orientation="vertical" tabindex="-1"></div>

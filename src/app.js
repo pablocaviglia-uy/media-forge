@@ -32,8 +32,6 @@ import {
   buildAddAudioPlan,
   buildPlan,
   planToCommand,
-  operationsFor,
-  operationById,
   DEFAULT_OPTIONS,
 } from './media/commands.js';
 import {
@@ -105,6 +103,17 @@ import {
   validateAddAudioProject,
 } from './media/add-audio.js';
 import { audioTrackDuration, videoTrackDuration } from './media/probe.js';
+import {
+  CONVERSION_AUDIO_FORMAT_IDS,
+  CONVERSION_QUALITY_CHOICES,
+  CONVERSION_VIDEO_FORMAT_IDS,
+  conversionControlModel,
+  conversionCta,
+  conversionSummary,
+  deriveConversionIntent,
+  effectiveConversionOperation,
+  effectiveConversionOptions,
+} from './media/conversion-workspace.js';
 import {
   RESULT_HISTORY_SCHEMA_VERSION,
   appendResult,
@@ -184,6 +193,7 @@ export class App {
     this.capabilities = null;
     this.engineDetails = null;
     this.previewUrl = null;
+    this.previewMedia = null;
     this.quickSourcePreview = null;
     this.quickOutputPreview = null;
     this.scrubber = null;
@@ -369,6 +379,8 @@ export class App {
       'pendingMergeSnapshot', 'pendingAddAudioSnapshot',
       'pendingQuickFocus', 'pendingQuickTab', 'pendingMergeFocus',
       'pendingAddAudioFocus', 'cropPreviewUnavailable',
+      'pendingConversionSnapshot', 'pendingConversionFocus',
+      'conversionAdvancedOpen', 'conversionTrimOpen', 'conversionMoreOpen',
     ]);
     const seenBlobs = new WeakMap();
     let nextBlob = 1;
@@ -2127,13 +2139,15 @@ export class App {
     }
     this.renderControls(job);
     this.renderCommand();
-    this.renderQuickFooter(job, quickTool);
+    if (quickTool) this.renderQuickFooter(job, quickTool);
+    else this.renderConversionFooter(job);
 
     const advanced = prefs.get('advanced');
     this.dom.commandBlock.hidden = !advanced || job.status === 'probing';
 
     this.renderDetailActions(job, quickTool);
-    this.restoreQuickFocus(job);
+    if (quickTool) this.restoreQuickFocus(job);
+    else this.restoreConversionFocus(job);
   }
 
   renderRelinkState(job) {
@@ -2261,14 +2275,14 @@ export class App {
       ? (job.status === 'done'
           ? (job.dirtySinceOutput ? 'Actualizar resultado' : 'Crear otra versión')
           : (job.outputs?.length ? 'Reintentar' : 'Crear resultado'))
-      : (job.status === 'done' ? 'Convert again' : 'Convert');
+      : conversionCta(this.conversionModel(job));
     cancel.hidden = !running;
-    cancel.textContent = quickTool ? 'Cancelar' : 'Cancel';
+    cancel.textContent = 'Cancelar';
     download.hidden = !job.outputs?.length;
     download.textContent = quickTool
       ? (job.dirtySinceOutput || job.status !== 'done' ? 'Descargar versión anterior' : 'Descargar resultado')
-      : 'Download';
-    remove.textContent = quickTool ? 'Quitar archivo' : 'Remove';
+      : 'Descargar resultado anterior';
+    remove.textContent = quickTool ? 'Quitar archivo' : 'Quitar proyecto';
 
     const downloadIsPrimary = Boolean(quickTool && job.status === 'done' && !job.dirtySinceOutput && job.outputs?.length);
     start.classList.toggle('primary-button', !downloadIsPrimary);
@@ -2279,7 +2293,7 @@ export class App {
 
   describeSource(job) {
     const info = job.info;
-    if (job.status === 'probing') return 'Reading the file…';
+    if (job.status === 'probing') return 'Analizando el archivo…';
     if (!info) return formatBytes(job.size);
 
     const parts = [formatBytes(job.size)];
@@ -2294,7 +2308,7 @@ export class App {
       if (info.video.fps) parts.push(`${info.video.fps} fps`);
     }
     if (info.audio) {
-      const channels = info.audio.channels === 1 ? 'mono' : info.audio.channels === 2 ? 'stereo' : `${info.audio.channels} channels`;
+      const channels = info.audio.channels === 1 ? 'mono' : info.audio.channels === 2 ? 'estéreo' : `${info.audio.channels} canales`;
       parts.push(`${info.audio.codec} ${channels}`);
     }
     if (info.bitrate) parts.push(formatBitrate(info.bitrate));
@@ -2821,9 +2835,14 @@ export class App {
   }
 
   releasePreview() {
-    if (!this.previewUrl) return;
-    URL.revokeObjectURL(this.previewUrl);
+    if (this.previewMedia) {
+      this.previewMedia.pause?.();
+      this.previewMedia.removeAttribute?.('src');
+      this.previewMedia.load?.();
+    }
+    if (this.previewUrl) URL.revokeObjectURL(this.previewUrl);
     this.previewUrl = null;
+    this.previewMedia = null;
   }
 
   releaseGeneratedResults() {
@@ -3254,12 +3273,17 @@ export class App {
 
     this.releaseScrubber();
     const range = trimRange(job.info, job.options);
+    const sharedPreview = !job.forgeToolId && this.previewMedia?.tagName === 'VIDEO'
+      ? this.previewMedia
+      : null;
     const control = createScrubber({
       file: job.file,
       info: job.info,
       initialSelection: range.to === null ? null : { from: range.from, to: range.to },
       mediaControls: job.forgeToolId === 'video-trim',
-      locale: job.forgeToolId === 'video-trim' ? 'es' : 'en',
+      mediaElement: sharedPreview,
+      showVideo: !sharedPreview,
+      locale: 'es',
       onChange: ({ from, to }) => {
         // Written straight into the options rather than through `set`, because
         // the whole point of holding on to the control is not repainting the
@@ -3271,7 +3295,8 @@ export class App {
         this.syncQuickDirty(job);
         this.scheduleCommandPreview();
         this.paintQueue();
-        this.updateQuickRangeSummary(job);
+        if (job.forgeToolId) this.updateQuickRangeSummary(job);
+        else this.updateConversionSummary(job);
       },
     });
 
@@ -3368,13 +3393,17 @@ export class App {
       src: this.previewUrl,
       controls: true,
       preload: 'metadata',
+      playsInline: true,
+      attrs: { 'aria-label': `Vista previa de ${job.name}` },
     });
+    this.previewMedia = media;
     media.addEventListener('error', () => {
+      if (this.previewMedia === media) this.previewMedia = null;
       container.textContent = '';
       container.append(
         el('p', {
           class: 'preview-note',
-          text: 'This browser cannot play this format. FFmpeg can still convert it.',
+          text: 'Este navegador no puede reproducir el formato, pero FFmpeg sí puede procesarlo.',
         })
       );
     });
@@ -5451,6 +5480,7 @@ export class App {
 
   renderQuickFooter(job, tool) {
     const summary = this.dom.quickFootSummary;
+    summary.classList.remove('conversion-output-summary');
     if (!tool || !job) {
       summary.hidden = true;
       summary.replaceChildren();
@@ -5484,7 +5514,9 @@ export class App {
     }
     if (job.status === 'probing') return;
 
+    const model = this.conversionModel(job);
     const history = this.resultHistoryFor(job);
+    const workspace = el('div', { class: 'conversion-workspace' });
     if (history.resultHistory.length) {
       const count = history.resultHistory.length;
       const showResults = el('button', {
@@ -5493,40 +5525,515 @@ export class App {
         text: count === 1 ? 'Ver resultado' : `Ver ${count} resultados`,
         dataset: { action: 'preview-result' },
       });
-      container.append(el('section', { class: 'generated-results-return' }, [
+      workspace.append(el('section', { class: 'conversion-result-return' }, [
         el('div', {}, [
           el('strong', { text: count === 1 ? 'Tenés un archivo generado' : `Tenés ${count} versiones generadas` }),
-          el('span', { text: count === 1
-            ? 'Podés reproducirlo y descargarlo sin perder estos ajustes.'
-            : 'Podés reproducirlas y descargarlas sin perder estos ajustes.' }),
+          el('small', { text: count === 1
+            ? 'Podés volver a verlo o crear otra versión.'
+            : 'Podés volver a verlas o crear otra versión.' }),
         ]),
         showResults,
       ]));
     }
 
-    const operations = operationsFor(job.info);
-    if (!operations.some((operation) => operation.id === job.operation)) job.operation = operations[0].id;
-    const operation = operationById(job.operation);
+    const locked = ['queued', 'running'].includes(job.status);
+    const settings = el('section', {
+      class: 'conversion-settings-pane',
+      attrs: { 'aria-label': 'Configuración del resultado' },
+    });
 
-    container.append(
-      this.field('What to do', this.selectControl(
-        operations.map((item) => ({ value: item.id, label: item.label })),
-        job.operation,
-        (value) => {
-          job.operation = value;
-          this.paintDetail();
-        }
-      ), operation.summary)
-    );
-
-    const advanced = prefs.get('advanced');
-    for (const control of operation.controls) {
-      const built = this.buildControl(control, job, advanced);
-      if (built) container.append(built);
+    const intentGrid = el('div', {
+      class: 'conversion-intent-grid conversion-output-types',
+      attrs: { role: 'group', 'aria-label': 'Qué querés obtener' },
+    });
+    for (const intent of model.intents) {
+      const active = model.intent === intent.id;
+      const button = el('button', {
+        type: 'button',
+        class: 'conversion-intent-choice',
+        dataset: { conversionOption: 'intent', conversionValue: intent.id, active: String(active) },
+        attrs: { 'aria-pressed': String(active) },
+      }, [
+        el('strong', { text: intent.label }),
+        el('span', { class: 'sr-only', text: intent.detail }),
+      ]);
+      button.addEventListener('click', () => this.setConversionIntent(job, intent.id));
+      intentGrid.append(button);
     }
 
+    const primary = el('section', { class: 'conversion-section' }, [
+      el('div', { class: 'conversion-section-head' }, [
+        el('div', {}, [
+          el('h3', { text: model.title }),
+          el('p', { text: model.detail }),
+        ]),
+      ]),
+      intentGrid,
+    ]);
+    for (const control of model.primary) {
+      const built = this.renderConversionControl(control, job, model);
+      if (built) primary.append(built);
+    }
     const notice = this.fidelityNotice(job);
-    if (notice) container.append(notice);
+    if (notice) {
+      notice.classList.add('conversion-inline-notice');
+      primary.append(notice);
+    }
+    settings.append(primary);
+
+    if (model.duration.includes('trim')) settings.append(this.renderConversionTrim(job, model));
+    else this.releaseScrubber();
+
+    if (model.advanced.length) {
+      const advanced = el('details', {
+        class: 'conversion-disclosure',
+        open: Boolean(job.conversionAdvancedOpen),
+      }, [
+        el('summary', { class: 'conversion-disclosure-summary' }, [
+          el('div', {}, [
+            el('strong', { text: 'Personalizar' }),
+            el('small', { text: this.conversionAdvancedSummary(job, model) }),
+          ]),
+        ]),
+      ]);
+      const body = el('div', { class: 'conversion-disclosure-body' });
+      for (const control of model.advanced) {
+        const built = this.renderConversionControl(control, job, model);
+        if (built) body.append(built);
+      }
+      advanced.append(body);
+      advanced.addEventListener('toggle', () => { job.conversionAdvancedOpen = advanced.open; });
+      settings.append(advanced);
+    }
+
+    const more = el('details', {
+      class: 'conversion-more-actions',
+      open: model.intent === 'more' || Boolean(job.conversionMoreOpen),
+    }, [
+      el('summary', { text: model.intent === 'more' ? model.title : 'Otras tareas' }),
+      el('div', { class: 'conversion-disclosure-body' }, model.moreActions.map((action) => {
+        const active = job.operation === action.id;
+        const button = el('button', {
+          type: 'button',
+          class: 'conversion-intent-choice',
+          dataset: { conversionOption: 'operation', conversionValue: action.id, active: String(active) },
+          attrs: { 'aria-pressed': String(active) },
+        }, [el('strong', { text: action.label }), el('span', { text: action.detail })]);
+        button.addEventListener('click', () => this.setConversionOperation(job, action.id));
+        return button;
+      })),
+    ]);
+    more.addEventListener('toggle', () => { job.conversionMoreOpen = more.open; });
+    settings.append(more);
+
+    const output = el('div', { class: 'conversion-output-bar' }, [
+      el('div', { class: 'conversion-output-summary', dataset: { conversionOutput: 'summary' } }, [
+        el('strong', { text: conversionSummary(model, job.options) }),
+        el('span', { text: 'Procesamiento local · el original queda intacto' }),
+      ]),
+      el('button', {
+        type: 'button',
+        class: 'primary-button',
+        text: conversionCta(model),
+        dataset: { action: 'start-one', conversionOutput: 'action' },
+      }),
+      el('button', {
+        type: 'button',
+        class: 'text-button',
+        text: 'Cancelar',
+        hidden: true,
+        dataset: { action: 'cancel-one', conversionOutput: 'cancel' },
+      }),
+    ]);
+    settings.append(output);
+    // Keep the primary result and its action together. Optional duration and
+    // technical settings follow below, so the CTA never masks the choice that
+    // explains what it will create.
+    settings.insertBefore(output, settings.children[1] || null);
+    if (locked) {
+      for (const control of settings.querySelectorAll('button:not([data-action]), input, select, textarea')) {
+        control.disabled = true;
+      }
+      settings.setAttribute('aria-busy', job.status === 'running' ? 'true' : 'false');
+    }
+    workspace.append(settings);
+    container.append(workspace);
+  }
+
+  conversionModel(job, operation = job?.operation, options = job?.options) {
+    const effectiveOperation = effectiveConversionOperation(job?.info, operation);
+    const visible = this.conversionPresentationOptions(job?.info, effectiveOperation, options);
+    return conversionControlModel({ info: job?.info, operation: effectiveOperation, options: visible });
+  }
+
+  conversionRunOptions(job, operation = job.operation, options = job.options) {
+    const effectiveOperation = effectiveConversionOperation(job.info, operation);
+    const visible = this.conversionPresentationOptions(job.info, effectiveOperation, options);
+    return effectiveConversionOptions({ info: job.info, operation: effectiveOperation, options: visible });
+  }
+
+  conversionPresentationOptions(info, operation, options = {}) {
+    const next = { ...options };
+    const intent = deriveConversionIntent(info, operation, options);
+    if (intent === 'video') {
+      const supported = this.usable(VIDEO_FORMATS.filter((format) => CONVERSION_VIDEO_FORMAT_IDS.has(format.id)));
+      const selected = supported.some((format) => format.value === options.format)
+        ? options.format
+        : supported[0]?.value;
+      if (selected) next.format = selected;
+    } else if (intent === 'audio') {
+      const supported = this.usable(AUDIO_FORMATS.filter((format) => CONVERSION_AUDIO_FORMAT_IDS.has(format.id)));
+      const requested = operation === 'extract-audio' ? options.audioFormat : options.format;
+      const selected = supported.some((format) => format.value === requested)
+        ? requested
+        : supported[0]?.value;
+      if (selected) {
+        next.audioFormat = selected;
+        next.format = selected;
+      }
+    }
+    return next;
+  }
+
+  createConversionSnapshot(job) {
+    const operation = this.quickToolFor(job)
+      ? job.operation
+      : effectiveConversionOperation(job.info, job.operation);
+    // Focused Quick tools already validate and normalise their own narrow
+    // option contract. The contextual converter sanitizer is intentionally
+    // stricter and would erase rotate/crop/volume/speed/loop if it were applied
+    // here, so preserve the validated Quick plan verbatim in its own snapshot.
+    const options = this.quickToolFor(job)
+      ? Object.freeze({ ...job.options })
+      : this.conversionRunOptions(job, operation, job.options);
+    return Object.freeze({ operation, options });
+  }
+
+  conversionFocusable(node, key, value = '') {
+    const control = node.matches?.('button,input,select,textarea')
+      ? node
+      : node.querySelector?.('button,input,select,textarea');
+    if (control) {
+      control.dataset.conversionOption = key;
+      control.dataset.conversionValue = String(value);
+    }
+    return node;
+  }
+
+  conversionField(key, label, control, hint, value = '') {
+    const field = this.field(label, control, hint);
+    field.classList.add('conversion-field');
+    return this.conversionFocusable(field, key, value);
+  }
+
+  formatNote(format) {
+    return {
+      'mp4-h264': 'Compatible con casi cualquier dispositivo.',
+      'webm-vp8': 'Formato abierto, útil para la web.',
+      'mkv-h264': 'Contenedor flexible para video y audio.',
+      'mov-h264': 'Pensado para editores que usan QuickTime.',
+      mp3: 'Compatible con prácticamente cualquier reproductor.',
+      m4a: 'Buena calidad con archivos pequeños.',
+      opus: 'Excelente calidad por byte en reproductores modernos.',
+      ogg: 'Formato abierto con compresión Vorbis.',
+      wav: 'Sin compresión: grande y sin pérdida.',
+      flac: 'Sin pérdida y bastante más pequeño que WAV.',
+    }[format?.id] || '';
+  }
+
+  renderConversionControl(control, job, model) {
+    const set = (key, value, { repaint = false } = {}) => this.setConversionOption(job, key, value, { repaint });
+    const options = job.options;
+
+    if (control === 'format' || control === 'audioFormat') {
+      const audio = model.intent === 'audio';
+      const formats = audio
+        ? AUDIO_FORMATS.filter((format) => CONVERSION_AUDIO_FORMAT_IDS.has(format.id))
+        : VIDEO_FORMATS.filter((format) => CONVERSION_VIDEO_FORMAT_IDS.has(format.id));
+      const usable = this.usable(formats);
+      const key = control;
+      const requested = model.target?.id || (control === 'audioFormat' ? options.audioFormat : options.format);
+      const current = usable.some((item) => item.value === requested)
+        ? requested
+        : usable[0]?.value;
+      const node = this.selectControl(usable, current, (value) => {
+        if (audio) {
+          job.options.audioFormat = value;
+          job.options.format = value;
+          prefs.set('preset', value);
+        } else {
+          job.options.format = value;
+          prefs.set('preset', value);
+        }
+        this.markConversionEdited(job);
+        job.pendingConversionFocus = { key, value };
+        this.paintDetail();
+      });
+      return this.conversionField(key, 'Formato', node, this.formatNote(formatById(current)), current);
+    }
+
+    if (control === 'quality') {
+      const group = el('div', { class: 'conversion-field' }, [
+        el('span', { class: 'control-label', text: 'Calidad' }),
+        el('div', { class: 'conversion-intent-grid conversion-quality-grid', attrs: { role: 'group', 'aria-label': 'Calidad del video' } },
+          CONVERSION_QUALITY_CHOICES.map((choice) => {
+            const active = options.quality === choice.id;
+            const button = el('button', {
+              type: 'button',
+              class: 'conversion-intent-choice',
+              text: choice.label,
+              dataset: { conversionOption: 'quality', conversionValue: choice.id, active: String(active) },
+              attrs: { 'aria-pressed': String(active) },
+            });
+            button.addEventListener('click', () => set('quality', choice.id, { repaint: true }));
+            return button;
+          })
+        ),
+      ]);
+      return group;
+    }
+
+    if (control === 'resolution') {
+      const current = model.resolutions.some((item) => item.id === String(options.resolution))
+        ? String(options.resolution)
+        : 'source';
+      const node = this.selectControl(
+        model.resolutions.map((item) => ({ value: item.id, label: item.label })),
+        current,
+        (value) => set('resolution', value)
+      );
+      return this.conversionField('resolution', 'Resolución', node, 'Nunca agranda un archivo más chico.', current);
+    }
+
+    if (control === 'fps') {
+      const current = model.frameRates.some((item) => item.id === String(options.fps))
+        ? String(options.fps)
+        : 'source';
+      const node = this.selectControl(
+        model.frameRates.map((item) => ({ value: item.id, label: item.label })),
+        current,
+        (value) => set('fps', value)
+      );
+      return this.conversionField('fps', 'Cuadros por segundo', node, 'Original conserva el movimiento de la fuente.', current);
+    }
+
+    if (control === 'audioBitrate') {
+      if (options.mute && model.intent === 'video') return null;
+      const node = this.selectControl(
+        AUDIO_BITRATES.map((item) => ({ value: String(item.kbps), label: item.label })),
+        String(options.audioBitrate),
+        (value) => set('audioBitrate', Number(value))
+      );
+      return this.conversionField('audioBitrate', 'Calidad del audio', node, '192 kbps equilibra calidad y tamaño.', options.audioBitrate);
+    }
+
+    if (control === 'mute') {
+      const input = this.checkbox(options.mute, 'Exportar sin audio', (value) => set('mute', value, { repaint: true }));
+      const field = el('label', { class: 'conversion-field' }, [input, el('small', { text: 'El video final no tendrá pista de sonido.' })]);
+      return this.conversionFocusable(field, 'mute', options.mute);
+    }
+
+    if (control === 'speed') {
+      const labels = {
+        ultrafast: 'Más rápido · archivo mayor', superfast: 'Muy rápido', veryfast: 'Recomendado',
+        faster: 'Más compacto', fast: 'Compacto', medium: 'Lento', slow: 'Muy lento', slower: 'Extremo',
+      };
+      const node = this.selectControl(
+        SPEED_PRESETS.map((value) => ({ value, label: labels[value] || value })),
+        options.speed,
+        (value) => set('speed', value)
+      );
+      return this.conversionField('speed', 'Velocidad de procesamiento', node, 'Más lento puede reducir un poco el tamaño.', options.speed);
+    }
+
+    if (control === 'flacCompression') {
+      const node = this.number(options.flacCompression, { min: FLAC_COMPRESSION.min, max: FLAC_COMPRESSION.max }, (value) => set('flacCompression', value));
+      return this.conversionField('flacCompression', 'Esfuerzo de compresión', node, 'No cambia la calidad; sólo el tiempo y unos pocos bytes.', options.flacCompression);
+    }
+
+    if (control === 'gifFps') {
+      return this.conversionField('gifFps', 'Fluidez', this.number(options.gifFps, { min: 1, max: 50, suffix: 'fps' }, (value) => set('gifFps', value)), '12 fps suele ser suficiente.', options.gifFps);
+    }
+    if (control === 'gifWidth') {
+      return this.conversionField('gifWidth', 'Ancho', this.number(options.gifWidth, { min: 32, max: 1920, step: 10, suffix: 'px' }, (value) => set('gifWidth', value)), 'La altura conserva la proporción.', options.gifWidth);
+    }
+    if (control === 'dither') {
+      const input = this.checkbox(options.dither, 'Suavizar gradientes', (value) => set('dither', value));
+      return this.conversionFocusable(el('label', { class: 'conversion-field' }, [input, el('small', { text: 'Reduce bandas de color con una textura sutil.' })]), 'dither', options.dither);
+    }
+    if (control === 'targetSize') {
+      return this.conversionField('targetSize', 'Tamaño aproximado', this.number(options.targetSize, { min: 0.1, max: 2000, step: 0.1, suffix: 'MB' }, (value) => set('targetSize', value)), 'El resultado puede variar ligeramente.', options.targetSize);
+    }
+    if (control === 'frameInterval') {
+      return this.conversionField('frameInterval', 'Guardar una imagen cada', this.number(options.frameInterval, { min: 0.04, max: 600, step: 0.1, suffix: 's' }, (value) => set('frameInterval', value)), null, options.frameInterval);
+    }
+    if (control === 'at') {
+      const node = this.text(formatTimestamp(options.at), '00:00:00.000', (value) => set('at', parseTimestamp(value) ?? 0));
+      return this.conversionField('at', 'Momento', node, 'Instante exacto del fotograma.', options.at);
+    }
+    if (control === 'imageFormat') {
+      const node = this.selectControl(this.usable(IMAGE_FORMATS), options.imageFormat, (value) => set('imageFormat', value));
+      return this.conversionField('imageFormat', 'Formato de imagen', node, null, options.imageFormat);
+    }
+    if (control === 'remuxTarget') {
+      const targets = remuxTargets(job.info, job.name);
+      if (!targets.length) return null;
+      const current = targets.some((item) => item.id === options.remuxTarget) ? options.remuxTarget : targets[0].id;
+      const node = this.selectControl(targets.map((item) => ({ value: item.id, label: item.label })), current, (value) => set('remuxTarget', value));
+      return this.conversionField('remuxTarget', 'Nuevo contenedor', node, 'Las pistas se copian sin perder calidad.', current);
+    }
+    if (control === 'rawArguments') {
+      const node = this.text(options.rawArguments, '-i $in -c copy $out.mkv', (value) => set('rawArguments', value));
+      return this.conversionField('rawArguments', 'Argumentos', node, '$in es la fuente y $out el archivo final.', options.rawArguments);
+    }
+    return null;
+  }
+
+  renderConversionTrim(job, model) {
+    const details = el('details', {
+      class: 'conversion-disclosure',
+      open: Boolean(job.conversionTrimOpen),
+    }, [
+      el('summary', { class: 'conversion-disclosure-summary' }, [
+        el('div', {}, [
+          el('strong', { text: 'Duración' }),
+          el('small', { text: model.trimSummary, dataset: { conversionTrimSummary: '' } }),
+        ]),
+      ]),
+    ]);
+    const body = el('div', { class: 'conversion-disclosure-body' });
+    const duration = Number(job.info?.duration);
+    if (job.info?.hasVideo && Number.isFinite(duration) && duration > 0) {
+      body.append(el('div', { class: 'conversion-trim-shell' }, [this.scrubberFor(job)]));
+    } else {
+      const start = this.text(job.options.trimStart == null ? '' : formatTimestamp(job.options.trimStart), '00:00:00.000', (value) => {
+        this.setConversionOption(job, 'trimStart', value.trim() ? parseTimestamp(value) : null);
+      });
+      const end = this.text(job.options.trimEnd == null ? '' : formatTimestamp(job.options.trimEnd), Number.isFinite(duration) ? formatTimestamp(duration) : 'Fin', (value) => {
+        this.setConversionOption(job, 'trimEnd', value.trim() ? parseTimestamp(value) : null);
+      });
+      body.append(
+        this.conversionField('trimStart', 'Desde', start, null, job.options.trimStart),
+        this.conversionField('trimEnd', 'Hasta', end, 'Vacío usa el principio o el final.', job.options.trimEnd),
+      );
+    }
+    details.append(body);
+    details.addEventListener('toggle', () => { job.conversionTrimOpen = details.open; });
+    return details;
+  }
+
+  conversionAdvancedSummary(job, model) {
+    const labels = [];
+    if (model.advanced.includes('resolution')) {
+      labels.push(model.resolutions.find((item) => item.id === String(job.options.resolution))?.label || 'Original');
+    }
+    if (model.advanced.includes('fps')) {
+      labels.push(model.frameRates.find((item) => item.id === String(job.options.fps))?.label || 'FPS original');
+    }
+    if (model.advanced.includes('mute') && job.options.mute) labels.push('Sin audio');
+    return labels.length ? labels.join(' · ') : 'Valores recomendados';
+  }
+
+  setConversionIntent(job, intent) {
+    if (!job?.info || ['queued', 'running'].includes(job.status)) return;
+    const currentModel = this.conversionModel(job);
+    const available = currentModel.intents.some((item) => item.id === intent);
+    if (!available) return;
+    if (currentModel.intent === intent) return;
+    if (intent === 'video') {
+      job.operation = 'convert';
+      const current = formatById(job.options.format);
+      if (current?.kind !== 'video') {
+        job.options.format = this.usable(VIDEO_FORMATS.filter((item) => item.kind === 'video'))[0]?.value || 'mp4-h264';
+      }
+    } else if (intent === 'audio') {
+      job.operation = job.info.hasVideo ? 'extract-audio' : 'convert';
+      const current = formatById(job.options.audioFormat) || formatById(job.options.format);
+      const target = current?.kind === 'audio'
+        ? current.id
+        : (this.usable(AUDIO_FORMATS)[0]?.value || 'mp3');
+      job.options.audioFormat = target;
+      job.options.format = target;
+    } else if (intent === 'gif') {
+      job.operation = 'gif';
+    } else if (intent === 'images') {
+      job.operation = 'frames';
+    }
+    job.pendingConversionFocus = { key: 'intent', value: intent };
+    this.markConversionEdited(job);
+    this.paintDetail();
+  }
+
+  setConversionOperation(job, operation) {
+    if (!job?.info || ['queued', 'running'].includes(job.status)) return;
+    if (!this.conversionModel(job).moreActions.some((item) => item.id === operation)) return;
+    job.operation = operation;
+    job.conversionMoreOpen = true;
+    job.pendingConversionFocus = { key: 'operation', value: operation };
+    this.markConversionEdited(job);
+    this.paintDetail();
+  }
+
+  markConversionEdited(job) {
+    job.previewMode = 'source';
+    job.validationError = null;
+    this.scheduleCommandPreview();
+    this.paintQueue();
+  }
+
+  setConversionOption(job, key, value, { repaint = false } = {}) {
+    if (!job || ['queued', 'running'].includes(job.status)) return;
+    const active = document.activeElement;
+    if (this.dom.controls.contains(active)) {
+      job.pendingConversionFocus = {
+        key: active.dataset.conversionOption || key,
+        value: active.dataset.conversionValue || String(value),
+      };
+    }
+    job.options[key] = value;
+    if (key === 'format') prefs.set('preset', value);
+    this.markConversionEdited(job);
+    this.updateConversionSummary(job);
+    if (repaint && this.selectedId === job.id) this.paintDetail();
+  }
+
+  updateConversionSummary(job) {
+    if (!job || this.selectedId !== job.id || this.quickToolFor(job)) return;
+    const model = this.conversionModel(job);
+    const summary = conversionSummary(model, job.options);
+    const local = this.dom.controls.querySelector('[data-conversion-output="summary"] strong');
+    if (local) local.textContent = summary;
+    const trim = this.dom.controls.querySelector('[data-conversion-trim-summary]');
+    if (trim) trim.textContent = model.trimSummary;
+    this.renderConversionFooter(job);
+    this.renderDetailActions(job, null);
+  }
+
+  renderConversionFooter(job) {
+    const summary = this.dom.quickFootSummary;
+    if (!job || this.quickToolFor(job)) {
+      summary.hidden = true;
+      summary.classList.remove('conversion-output-summary');
+      summary.replaceChildren();
+      return;
+    }
+    const model = this.conversionModel(job);
+    summary.hidden = false;
+    summary.classList.add('conversion-output-summary');
+    summary.replaceChildren(
+      el('strong', { text: conversionSummary(model, job.options) }),
+      el('span', { text: 'Procesamiento local · original intacto' }),
+    );
+  }
+
+  restoreConversionFocus(job) {
+    const pending = job?.pendingConversionFocus;
+    if (!pending) return;
+    const candidates = Array.from(this.dom.controls.querySelectorAll('[data-conversion-option]'));
+    const exact = candidates.find((node) => node.dataset.conversionOption === pending.key && node.dataset.conversionValue === String(pending.value));
+    const target = exact || candidates.find((node) => node.dataset.conversionOption === pending.key);
+    target?.focus({ preventScroll: true });
+    delete job.pendingConversionFocus;
   }
 
   /**
@@ -5536,9 +6043,10 @@ export class App {
    * to the audio builder entirely.
    */
   audioTarget(job) {
-    const { options } = job;
-    if (job.operation === 'extract-audio') return formatById(options.audioFormat);
-    if (job.operation !== 'convert') return null;
+    const operation = effectiveConversionOperation(job.info, job.operation);
+    const options = this.conversionPresentationOptions(job.info, operation, job.options);
+    if (operation === 'extract-audio') return formatById(options.audioFormat);
+    if (operation !== 'convert') return null;
 
     const target = formatById(options.format);
     if (!target) return null;
@@ -5568,9 +6076,9 @@ export class App {
     return el('p', {
       class: 'notice',
       text:
-        `This file's audio is ${source.toUpperCase()}, which already threw information away to get small. ` +
-        `Saving it as ${target.label} cannot bring any of it back — it only makes the file several times larger. ` +
-        `${target.label} is worth it when the source is a CD, a master, or another lossless file.`,
+        `El audio original usa ${source.toUpperCase()}, un formato con pérdida. ` +
+        `${target.label} no recuperará esa información y ocupará bastante más. ` +
+        `Conviene usarlo para un CD, un máster u otra fuente sin pérdida.`,
     });
   }
 
@@ -5918,7 +6426,8 @@ export class App {
       return;
     }
     try {
-      const plan = buildPlan({ name: job.name, info: job.info }, job.operation, job.options);
+      const snapshot = this.createConversionSnapshot(job);
+      const plan = buildPlan({ name: job.name, info: job.info }, snapshot.operation, snapshot.options);
       this.dom.commandText.textContent = planToCommand(plan);
       this.dom.commandText.dataset.invalid = 'false';
     } catch (error) {
@@ -6035,6 +6544,7 @@ export class App {
     let plan;
     let mergeSnapshot = null;
     let addAudioSnapshot = null;
+    let conversionSnapshot = null;
     try {
       if (this.isAddAudioJob(job)) {
         addAudioSnapshot = job.pendingAddAudioSnapshot || createAddAudioSnapshot(job);
@@ -6049,11 +6559,17 @@ export class App {
         mergeSnapshot = job.pendingMergeSnapshot || createMergeSnapshot(job);
         plan = buildJoinVideosPlan(mergeSnapshot.source.inputs, mergeSnapshot.options);
       } else {
-        plan = buildPlan({ name: job.name, info: job.info }, job.operation, job.options);
+        conversionSnapshot = job.pendingConversionSnapshot || this.createConversionSnapshot(job);
+        plan = buildPlan(
+          { name: job.name, info: job.info },
+          conversionSnapshot.operation,
+          conversionSnapshot.options,
+        );
       }
     } catch (error) {
       delete job.pendingMergeSnapshot;
       delete job.pendingAddAudioSnapshot;
+      delete job.pendingConversionSnapshot;
       job.status = 'failed';
       job.error = error.message;
       this.paintQueue();
@@ -6113,9 +6629,9 @@ export class App {
         .toLowerCase()
         .match(/\.([a-z0-9]+)$/)?.[1] || '';
       const optionFormats = [
-        formatById(job.options.format),
-        formatById(job.options.audioFormat),
-        formatById(job.options.imageFormat),
+        formatById(conversionSnapshot?.options?.format ?? job.options.format),
+        formatById(conversionSnapshot?.options?.audioFormat ?? job.options.audioFormat),
+        formatById(conversionSnapshot?.options?.imageFormat ?? job.options.imageFormat),
       ].filter(Boolean);
       const knownFormats = [...VIDEO_FORMATS, ...AUDIO_FORMATS, ...IMAGE_FORMATS];
       const resultFormat = optionFormats.find((format) => (
@@ -6126,7 +6642,7 @@ export class App {
         || knownFormats.find((format) => format.extension === outputExtension)
         || null;
       const resultRevision = addAudioSnapshot?.revision ?? mergeSnapshot?.revision ?? job.revision;
-      const resultOperation = plan.operation || job.operation;
+      const resultOperation = plan.operation || conversionSnapshot?.operation || job.operation;
       const audioTranscode = plan.mime?.startsWith('audio/')
         && ['convert', 'extract-audio'].includes(resultOperation);
       const nextHistory = appendResult(currentHistory, {
@@ -6135,14 +6651,14 @@ export class App {
         operation: resultOperation,
         forgeToolId: job.forgeToolId,
         revision: resultRevision,
-        options: addAudioSnapshot?.options || mergeSnapshot?.options || job.options,
+        options: addAudioSnapshot?.options || mergeSnapshot?.options || conversionSnapshot?.options || job.options,
         metadata: {
           label: this.resultOperationLabel({ forgeToolId: job.forgeToolId, operation: resultOperation }),
           mime: plan.mime,
           format: resultFormat?.label || null,
           codec: audioTranscode ? resultFormat?.encoders?.[0] || null : null,
           bitrate: audioTranscode && !resultFormat?.lossless
-            ? Number(addAudioSnapshot?.options?.audioBitrate ?? mergeSnapshot?.options?.audioBitrate ?? job.options.audioBitrate) * 1000 || null
+            ? Number(addAudioSnapshot?.options?.audioBitrate ?? mergeSnapshot?.options?.audioBitrate ?? conversionSnapshot?.options?.audioBitrate ?? job.options.audioBitrate) * 1000 || null
             : null,
           duration: Number.isFinite(plan.duration) && plan.duration > 0 ? plan.duration : null,
           sampleRate: audioTranscode && Number.isFinite(job.info?.audio?.sampleRate)
@@ -6194,6 +6710,7 @@ export class App {
     } finally {
       delete job.pendingMergeSnapshot;
       delete job.pendingAddAudioSnapshot;
+      delete job.pendingConversionSnapshot;
       this.running = null;
       this.runningId = null;
       this.paintQueue();
@@ -6405,6 +6922,9 @@ export class App {
           job.previewMode = 'source';
           if (this.isMergeJob(job)) job.pendingMergeSnapshot = createMergeSnapshot(job);
           if (this.isAddAudioJob(job)) job.pendingAddAudioSnapshot = createAddAudioSnapshot(job);
+          if (!this.isMergeJob(job) && !this.isAddAudioJob(job) && !this.quickToolFor(job)) {
+            job.pendingConversionSnapshot = this.createConversionSnapshot(job);
+          }
           this.releaseQuickOutputPreview();
           this.scheduleProjectSave({ immediate: true });
           this.paintQueue();
@@ -6443,10 +6963,10 @@ export class App {
         this.clearFinishedProjects();
         return true;
       case 'copy-command':
-        copyText(this.dom.commandText.textContent).then((ok) => this.toast(ok ? 'Copied.' : 'Could not copy.'));
+        copyText(this.dom.commandText.textContent).then((ok) => this.toast(ok ? 'Copiado.' : 'No se pudo copiar.'));
         return true;
       case 'copy-log':
-        copyText(this.dom.logBody.textContent).then((ok) => this.toast(ok ? 'Copied.' : 'Could not copy.'));
+        copyText(this.dom.logBody.textContent).then((ok) => this.toast(ok ? 'Copiado.' : 'No se pudo copiar.'));
         return true;
       default:
         return false;

@@ -16,8 +16,8 @@
  * the single exception called out at IMMUTABLE.
  */
 
-// v17 adds direct region editing and contextual fragment controls in Audio Lab.
-const CACHE_VERSION = 'v17';
+// v18 replaces the generic option wall with a contextual conversion workspace.
+const CACHE_VERSION = 'v18';
 const CACHE_NAME = `media-forge-${CACHE_VERSION}`;
 
 /**
@@ -52,6 +52,7 @@ const PRECACHE = [
   './src/ffmpeg/failures.js',
   './src/worker/ffmpeg.worker.js',
   './src/media/commands.js',
+  './src/media/conversion-workspace.js',
   './src/media/formats.js',
   './src/media/probe.js',
   './src/media/quick-tools.js',

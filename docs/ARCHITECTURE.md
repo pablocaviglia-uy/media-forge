@@ -272,6 +272,21 @@ which is why every operation is testable in milliseconds and why the "show me
 the command" panel can print the array that is about to run rather than a
 plausible reconstruction of it.
 
+The generic converter does not render the command builder's broad option bag
+directly. `src/media/conversion-workspace.js` first derives a user-facing
+intent — Video, Audio, GIF, Images or a specialised task — and owns the exact
+control matrix for that intent. It also produces an immutable effective option
+snapshot before the job is queued. Values saved by another tool remain in the
+project as drafts, but hidden rotation, crop, speed, mute or trim settings are
+neutralised and cannot leak into the next export. The UI and command preview
+consume the same model, so a visible choice always corresponds to an argument
+the selected builder actually reads.
+
+The ordinary video preview is shared with the trim scrubber. The scrubber may
+borrow that media element for its clock and filmstrip without creating a
+second decoder or owning its object URL; teardown therefore leaves the main
+preview untouched.
+
 Two operations need more than one invocation, and both are two passes in every
 FFmpeg tutorial ever written: a GIF builds a palette from the clip before
 quantising against it, and a size target measures before it commits to a

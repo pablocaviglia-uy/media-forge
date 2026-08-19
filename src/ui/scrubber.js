@@ -30,12 +30,26 @@ const WHEEL = 0.88;
 /**
  * @param {{file: File, info: object,
  *   initialSelection?: {from: number, to: number}, mediaControls?: boolean,
+ *   mediaElement?: HTMLVideoElement|null, showVideo?: boolean,
  *   locale?: 'en' | 'es',
  *   onChange?: (selection: {from: number, to: number}) => void}} options
+ * `mediaElement` is borrowed: the scrubber uses it for seeking, playback and
+ * thumbnails, but never inserts it, replaces its source or tears it down.
+ * Without one, the legacy path owns a private video and object URL. Set
+ * `showVideo: false` to keep that owned decoder out of the rendered node.
  * @returns {{node: HTMLElement, destroy: () => void,
  *   selection: () => {from: number, to: number}, setDisabled: (disabled: boolean) => void}}
  */
-export function createScrubber({ file, info, initialSelection = null, mediaControls = false, locale = 'en', onChange }) {
+export function createScrubber({
+  file,
+  info,
+  initialSelection = null,
+  mediaControls = false,
+  mediaElement = null,
+  showVideo = true,
+  locale = 'en',
+  onChange,
+}) {
   const duration = Number.isFinite(info?.duration) ? info.duration : 0;
   const fps = info?.video?.fps || null;
   const least = step('frame', fps);
@@ -68,17 +82,22 @@ export function createScrubber({ file, info, initialSelection = null, mediaContr
   let disabled = false;
   let stripSeeks = 0;
   let strip = null; // AbortController for the filmstrip being drawn
+  let stripSource = null;
   let stopDrag = null;
 
-  const url = URL.createObjectURL(file);
-  const video = el('video', {
+  const ownsVideo = !mediaElement;
+  const url = ownsVideo ? URL.createObjectURL(file) : null;
+  const video = mediaElement || el('video', {
     class: 'scrub-video',
     src: url,
     preload: 'auto',
     playsInline: true,
     controls: mediaControls,
   });
-  video.muted = false;
+  if (ownsVideo) video.muted = false;
+  else if (Number.isFinite(video.currentTime)) {
+    playhead = Math.max(0, Math.min(duration, video.currentTime));
+  }
 
   const frames = el('div', { class: 'scrub-frames' });
   const shade = el('div', { class: 'scrub-shade' });
@@ -95,7 +114,7 @@ export function createScrubber({ file, info, initialSelection = null, mediaContr
   const note = el('p', { class: 'scrub-note' });
 
   const node = el('div', { class: 'scrubber' }, [
-    video,
+    ownsVideo && showVideo !== false ? video : null,
     track,
     el('div', { class: 'scrub-bar' }, [
       fromField,
@@ -123,6 +142,8 @@ export function createScrubber({ file, info, initialSelection = null, mediaContr
 
     const left = fractionOf(view, selection.from);
     const right = fractionOf(view, selection.to);
+    handleFrom.dataset.edge = left <= 0.001 ? 'start' : (left >= 0.999 ? 'end' : 'inside');
+    handleTo.dataset.edge = right <= 0.001 ? 'start' : (right >= 0.999 ? 'end' : 'inside');
     band.style.left = `${left * 100}%`;
     band.style.width = `${(right - left) * 100}%`;
     // Two shadows would be two elements; one gradient is one, and it is the
@@ -154,9 +175,14 @@ export function createScrubber({ file, info, initialSelection = null, mediaContr
 
   async function renderStrip() {
     if (!canDraw(video)) return;
+    // A borrowed preview can be playing under controls owned by its caller.
+    // Thumbnail seeks must never fight that playback.
+    if (!ownsVideo && video.paused === false) return;
     strip?.abort();
     const controller = new AbortController();
     strip = controller;
+    const sourceAtStart = video.currentSrc || video.src || null;
+    stripSource = sourceAtStart;
 
     const width = track.clientWidth || 640;
     const count = fitCount(width);
@@ -182,7 +208,23 @@ export function createScrubber({ file, info, initialSelection = null, mediaContr
       // Thumbnail seeks are implementation detail, not user navigation. The
       // desired playhead may have changed while drawing, so restore its latest
       // value rather than whichever thumbnail happened to be drawn last.
-      if (!controller.signal.aborted && strip === controller) video.currentTime = playhead;
+      if (!controller.signal.aborted && strip === controller) restorePlayhead(sourceAtStart);
+      if (strip === controller) stripSource = null;
+    }
+  }
+
+  function restorePlayhead(sourceAtStart = null) {
+    if (!Number.isFinite(playhead) || !Number.isFinite(video.duration) || video.duration <= 0) return false;
+    if (!ownsVideo) {
+      if (video.paused === false) return false;
+      const currentSource = video.currentSrc || video.src || null;
+      if (sourceAtStart && currentSource && sourceAtStart !== currentSource) return false;
+    }
+    try {
+      video.currentTime = Math.max(0, Math.min(playhead, video.duration));
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -347,6 +389,23 @@ export function createScrubber({ file, info, initialSelection = null, mediaContr
       paint();
     }),
 
+    // Starting the caller-owned preview while a strip is still seeking should
+    // resume from the user's playhead, not from an implementation thumbnail.
+    on(video, 'play', () => {
+      if (ownsVideo || stripSeeks <= 0) return;
+      strip?.abort();
+      const wasPlaying = video.paused === false;
+      if (wasPlaying) {
+        try { video.currentTime = Math.max(0, Math.min(playhead, video.duration)); } catch { /* best-effort shared clock restore */ }
+      }
+    }),
+    on(video, 'pointerdown', () => {
+      // Native controls on a borrowed preview belong to its owner. Once the
+      // user interacts there, abandon thumbnail work and do not restore over
+      // the position they are choosing.
+      if (!ownsVideo && stripSeeks > 0) strip?.abort();
+    }),
+
     // `loadedmetadata` is the wrong event to draw on, and it is the obvious
     // one to reach for. It fires at readyState 1 — the duration and the
     // dimensions are known, and there is no picture yet — so a strip drawn
@@ -419,10 +478,18 @@ export function createScrubber({ file, info, initialSelection = null, mediaContr
       for (const remove of off) remove?.();
       clearTimeout(stripTimer);
       strip?.abort();
-      video.pause();
-      video.removeAttribute('src');
-      video.load();
-      URL.revokeObjectURL(url);
+      if (ownsVideo) {
+        video.pause();
+        video.removeAttribute('src');
+        video.load();
+        URL.revokeObjectURL(url);
+      } else {
+        // Aborting a half-drawn strip otherwise strands the shared preview on
+        // its last thumbnail. Restore only while it is paused and still on the
+        // source we borrowed; ownership of everything else stays with caller.
+        restorePlayhead(stripSource);
+      }
+      stripSource = null;
     },
   };
 }
