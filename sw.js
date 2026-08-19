@@ -16,8 +16,8 @@
  * the single exception called out at IMMUTABLE.
  */
 
-// v9 adds the two-source audio-over-video Studio workspace.
-const CACHE_VERSION = 'v9';
+// v10 adds recoverable local projects and their IndexedDB persistence layer.
+const CACHE_VERSION = 'v10';
 const CACHE_NAME = `media-forge-${CACHE_VERSION}`;
 
 /**
@@ -59,7 +59,9 @@ const PRECACHE = [
   './src/media/add-audio.js',
   './src/media/timeline.js',
   './src/media/zip.js',
+  './src/storage/ids.js',
   './src/storage/prefs.js',
+  './src/storage/projects.js',
   './src/ui/dom.js',
   './src/ui/filmstrip.js',
   './src/ui/scrubber.js',

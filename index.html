@@ -88,7 +88,7 @@
         <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" class="icon-sun"><path d="M8 11a3 3 0 100-6 3 3 0 000 6zm0 2.2v1.8m0-14v1.8M2.2 8H.4m15.2 0h-1.8M3.9 3.9L2.6 2.6m10.8 11.8l-1.3-1.3M3.9 12.1l-1.3 1.3M13.4 2.6l-1.3 1.3" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round"/></svg>
         <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" class="icon-moon"><path d="M13.5 9.8A6 6 0 016.2 2.5a6 6 0 107.3 7.3z"/></svg>
       </button>
-      <button type="button" class="icon-button" data-action="settings" aria-label="Settings" title="Settings (⌘,)">
+      <button type="button" class="icon-button" data-action="settings" aria-label="Configuración" title="Configuración (⌘,)">
         <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M8 5.5a2.5 2.5 0 100 5 2.5 2.5 0 000-5zm6.4 2.5c0 .4 0 .8-.1 1.1l1.4 1.1-1.4 2.4-1.7-.6q-.8.7-1.8 1L10.5 15h-2.8l-.3-1.9q-1-.3-1.8-1l-1.7.6-1.4-2.4L3.7 9.1a7 7 0 010-2.2L2.3 5.8l1.4-2.4 1.7.6q.8-.7 1.8-1L7.5 1h2.8l.3 1.9q1 .3 1.8 1l1.7-.6 1.4 2.4-1.4 1.1c.1.4.1.8.1 1.2z"/></svg>
       </button>
     </div>
@@ -141,7 +141,7 @@
             <path d="M6 24h52M14 14v-4M50 14v-4" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
           </svg>
           <h1>Drop video or audio here</h1>
-          <p>Everything happens in this tab. Your files are never uploaded, and there is no server to upload them to.</p>
+          <p>Everything happens in this browser. Your files are never uploaded. Local projects can keep a private copy on this device so your work survives a reload.</p>
           <div class="empty-actions">
             <button type="button" class="primary-button" data-action="add-files">Choose files</button>
             <button type="button" class="text-button" data-action="load-sample">Make a test clip</button>
@@ -174,7 +174,7 @@
                 <button type="button" class="primary-button" data-action="add-files">Elegir archivos</button>
                 <button type="button" class="text-button" data-action="load-sample">Probar sin archivo</button>
               </div>
-              <p class="forge-local-note">Se procesa en este dispositivo. Nada se sube.</p>
+              <p class="forge-local-note">Se procesa en este dispositivo. Nada se sube; el proyecto puede recuperarse en este navegador.</p>
             </section>
 
             <section class="forge-continue" aria-labelledby="forge-ready-title">
@@ -264,6 +264,7 @@
     <span class="status-item" id="status-engine">Starting FFmpeg…</span>
     <span class="status-spacer"></span>
     <span class="status-item" id="status-queue"></span>
+    <span class="status-item status-storage" id="status-storage" data-state="saving" aria-live="polite">Preparando proyectos locales…</span>
     <span class="status-item status-offline" id="status-offline" hidden>offline ready</span>
   </footer>
 </div>
@@ -303,71 +304,95 @@
 
 <dialog class="sheet sheet-confirm" id="confirm-sheet" aria-labelledby="confirm-title">
   <div class="confirm-body">
-    <h2 id="confirm-title">Are you sure?</h2>
+    <h2 id="confirm-title">¿Confirmás esta acción?</h2>
     <p id="confirm-message"></p>
   </div>
   <div class="confirm-actions">
-    <button type="button" class="text-button" data-action="confirm-cancel">Cancel</button>
-    <button type="button" class="primary-button" data-action="confirm-accept">Confirm</button>
+    <button type="button" class="text-button" data-action="confirm-cancel">Cancelar</button>
+    <button type="button" class="primary-button" data-action="confirm-accept">Confirmar</button>
   </div>
 </dialog>
 
-<dialog class="sheet" id="settings-sheet" aria-label="Settings">
+<dialog class="sheet" id="settings-sheet" aria-label="Configuración">
   <form method="dialog" class="sheet-head">
-    <h2>Settings</h2>
-    <button class="icon-button" value="close" aria-label="Close settings">✕</button>
+    <h2>Configuración</h2>
+    <button class="icon-button" value="close" aria-label="Cerrar configuración">✕</button>
   </form>
 
   <div class="sheet-body">
     <section class="setting-group">
-      <h3>Appearance</h3>
+      <h3>Apariencia</h3>
       <label class="setting">
-        <span>Theme</span>
+        <span>Tema</span>
         <select data-pref="theme">
-          <option value="auto">Match system</option>
-          <option value="light">Light</option>
-          <option value="dark">Dark</option>
+          <option value="auto">Según el sistema</option>
+          <option value="light">Claro</option>
+          <option value="dark">Oscuro</option>
         </select>
       </label>
       <label class="setting">
-        <span>Accent</span>
+        <span>Color de énfasis</span>
         <select data-pref="accent">
-          <option value="teal">Teal</option>
-          <option value="indigo">Indigo</option>
-          <option value="amber">Amber</option>
-          <option value="rose">Rose</option>
-          <option value="slate">Slate</option>
+          <option value="teal">Turquesa</option>
+          <option value="indigo">Índigo</option>
+          <option value="amber">Ámbar</option>
+          <option value="rose">Rosa</option>
+          <option value="slate">Pizarra</option>
         </select>
       </label>
     </section>
 
     <section class="setting-group">
-      <h3>Converting</h3>
-      <label class="setting setting-switch"><input type="checkbox" data-pref="autoStart"><span>Start converting as soon as files are added</span></label>
-      <label class="setting setting-switch"><input type="checkbox" data-pref="advanced"><span>Show codec-level controls and the command</span></label>
-      <label class="setting setting-switch"><input type="checkbox" data-pref="logOpen"><span>Keep the FFmpeg log open</span></label>
+      <h3>Conversión</h3>
+      <label class="setting setting-switch"><input type="checkbox" data-pref="autoStart"><span>Empezar a procesar apenas se agreguen archivos</span></label>
+      <label class="setting setting-switch"><input type="checkbox" data-pref="advanced"><span>Mostrar controles avanzados de códec y el comando</span></label>
+      <label class="setting setting-switch"><input type="checkbox" data-pref="logOpen"><span>Mantener abierto el registro de FFmpeg</span></label>
+    </section>
+
+    <section class="setting-group setting-storage" aria-labelledby="settings-storage-title">
+      <h3 id="settings-storage-title">Proyectos locales</h3>
+      <label class="setting setting-switch setting-storage-toggle">
+        <input type="checkbox" role="switch" data-pref="persistProjects" aria-describedby="settings-storage-description">
+        <span>
+          <strong>Guardar proyectos en este navegador</strong>
+          <small id="settings-storage-description">Conserva archivos, opciones y resultados para recuperar el trabajo después de recargar o cerrar la página.</small>
+        </span>
+      </label>
+      <div class="storage-status" aria-live="polite">
+        <p class="setting-note storage-summary" id="settings-storage-summary">Preparando el almacenamiento local…</p>
+        <p class="setting-note" id="settings-storage-quota">Consultando el espacio disponible.</p>
+        <p class="setting-note" id="settings-storage-persistence">El navegador administra este espacio privado y puede liberarlo si necesita lugar.</p>
+      </div>
+      <p class="setting-note storage-privacy">
+        Tus archivos nunca se suben. MediaForge guarda una copia privada sólo en este navegador.
+        Desactivar el guardado detiene las copias nuevas, pero no borra proyectos anteriores.
+      </p>
+      <div class="setting-actions storage-actions">
+        <button type="button" class="text-button" data-action="request-persistent-storage">Solicitar protección al navegador</button>
+        <button type="button" class="text-button danger" data-action="clear-local-projects">Borrar todos los proyectos locales</button>
+      </div>
     </section>
 
     <section class="setting-group">
-      <h3>This browser</h3>
+      <h3>Este navegador</h3>
       <p class="setting-note" id="settings-engine"></p>
       <p class="setting-note" id="settings-isolation"></p>
       <p class="setting-note">
-        Nothing here is uploaded. The conversion runs on your own processor, which is why
-        it is slower than a server would be and why it works with the network off.
+        Nada de esto se sube. La conversión usa tu propio procesador. Cuando los proyectos
+        locales están activos, las copias recuperables quedan en el espacio privado de este navegador.
       </p>
     </section>
 
     <section class="setting-group">
-      <h3>Keyboard</h3>
+      <h3>Teclado</h3>
       <ul class="shortcut-list">
-        <li><kbd>⌘</kbd><kbd>O</kbd><span>Add files</span></li>
-        <li><kbd>⌘</kbd><kbd>↵</kbd><span>Convert everything queued</span></li>
-        <li><kbd>⌘</kbd><kbd>B</kbd><span>Toggle the queue</span></li>
-        <li><kbd>⌘</kbd><kbd>L</kbd><span>Toggle the log</span></li>
-        <li><kbd>⌘</kbd><kbd>J</kbd><span>Toggle the theme</span></li>
-        <li><kbd>↑</kbd><kbd>↓</kbd><span>Move through the queue</span></li>
-        <li><kbd>⌫</kbd><span>Remove the selected file</span></li>
+        <li><kbd>⌘</kbd><kbd>O</kbd><span>Agregar archivos</span></li>
+        <li><kbd>⌘</kbd><kbd>↵</kbd><span>Procesar toda la cola</span></li>
+        <li><kbd>⌘</kbd><kbd>B</kbd><span>Mostrar u ocultar la cola</span></li>
+        <li><kbd>⌘</kbd><kbd>L</kbd><span>Mostrar u ocultar el registro</span></li>
+        <li><kbd>⌘</kbd><kbd>J</kbd><span>Cambiar el tema</span></li>
+        <li><kbd>↑</kbd><kbd>↓</kbd><span>Recorrer la cola</span></li>
+        <li><kbd>⌫</kbd><span>Quitar el archivo seleccionado</span></li>
       </ul>
     </section>
   </div>

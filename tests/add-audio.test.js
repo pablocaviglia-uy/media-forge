@@ -91,8 +91,10 @@ test('the add-audio foundation publishes stable ids, defaults and memory limits'
 
 test('assets carry an explicit role and projects start with revision state', () => {
   const project = createAddAudioProject(file('clip.mov'));
+  const restored = createAddAudioAsset(file('song.mp3'), 'audio', 'restored-audio');
   assert.equal(project.video.role, 'video');
   assert.equal(project.video.status, 'pending');
+  assert.equal(restored.id, 'restored-audio');
   assert.equal(project.audio, null);
   assert.deepEqual(project.options, {});
   assert.equal(project.revision, 0);

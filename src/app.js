@@ -18,6 +18,8 @@ import {
   truncateName, copyText, downloadFile,
 } from './ui/dom.js';
 import { prefs, resolveTheme } from './storage/prefs.js';
+import { createPersistentId } from './storage/ids.js';
+import { createProjectStore, isQuotaExceededError } from './storage/projects.js';
 import { createEngine, isolationStatus } from './ffmpeg/client.js';
 import { createScrubber } from './ui/scrubber.js';
 import { createCropper } from './ui/cropper.js';
@@ -114,6 +116,15 @@ import { audioTrackDuration, videoTrackDuration } from './media/probe.js';
  */
 const REFUSE_BYTES = 500 * 1024 * 1024;
 const WARN_BYTES = 150 * 1024 * 1024;
+const READ_ONLY_STORAGE_ISSUES = new Set([
+  'newer-schema',
+  'unsupported-schema',
+  'invalid-record',
+  'invalid-project-kind',
+  'missing-asset-record',
+]);
+
+const assetBasename = (name) => String(name || '').split(/[\\/]/).pop();
 
 const STATUS_LABELS = {
   probing: 'Reading',
@@ -125,11 +136,10 @@ const STATUS_LABELS = {
   cancelled: 'Cancelled',
 };
 
-let nextJobId = 1;
-
 export class App {
   constructor() {
     this.engine = createEngine();
+    this.projectStore = createProjectStore();
 
     // Queue state.
     this.jobs = [];
@@ -156,6 +166,24 @@ export class App {
     this.pickerIntent = null;
     this.nextPickerToken = 1;
 
+    // Project persistence is deliberately independent from the FFmpeg queue.
+    // IndexedDB writes are serialised here so an older, slower Blob commit can
+    // never land after a newer edit or resurrect a project that was removed.
+    this.projectsHydrated = false;
+    this.projectSaveTimer = null;
+    this.projectSaveDeadline = null;
+    this.projectSaveRevision = 0;
+    this.projectDeleteRevision = 0;
+    this.projectSaveChain = Promise.resolve();
+    this.projectStorageRevision = null;
+    this.projectStorageState = 'saving';
+    this.projectStorageIssue = null;
+    this.projectStorageUnavailable = false;
+    this.projectStorageReadOnly = false;
+    this.projectExternalChange = false;
+    this.ignoreProjectBroadcast = false;
+    this.unsubscribeProjectStore = null;
+
     this.dom = {
       app: $('#app'),
       queueList: $('#queue-list'),
@@ -175,6 +203,7 @@ export class App {
       statusEngine: $('#status-engine'),
       statusQueue: $('#status-queue'),
       statusOffline: $('#status-offline'),
+      statusStorage: $('#status-storage'),
       engineNote: $('#engine-note'),
       dropOverlay: $('#drop-overlay'),
       fileInput: $('#file-input'),
@@ -185,8 +214,14 @@ export class App {
       downloadAll: $('[data-action="download-all"]'),
     };
 
-    this.paintQueue = raf(() => this.renderQueue());
-    this.paintDetail = raf(() => this.renderDetail());
+    this.paintQueue = raf(() => {
+      this.renderQueue();
+      this.scheduleProjectSave();
+    });
+    this.paintDetail = raf(() => {
+      this.renderDetail();
+      this.scheduleProjectSave();
+    });
     this.scheduleCommandPreview = debounce(() => this.renderCommand(), 120);
   }
 
@@ -196,15 +231,26 @@ export class App {
 
   async start() {
     this.applyPreferences(Object.keys(prefs.all()));
-    prefs.subscribe((_, changed) => this.applyPreferences(changed));
+    prefs.subscribe((_, changed) => {
+      this.applyPreferences(changed);
+      if (changed.includes('persistProjects')) this.onProjectPersistencePreference();
+    });
 
+    this.setProjectStorageState('saving', 'Recuperando proyectos…');
+    this.renderQueue();
+    this.updateOfflineBadge();
+
+    await this.restoreLocalProjects();
+    // File and tool intents are bound only after hydration. Otherwise a fast
+    // click during the IndexedDB read could create an in-memory job which the
+    // restored workspace would replace a moment later.
     this.bindGlobalEvents();
     this.bindDropZone();
     this.bindSettings();
     this.bindConfirmSheet();
     this.bindResizers();
     this.renderQueue();
-    this.updateOfflineBadge();
+    this.renderDetail();
 
     // Bringing up 32 MB of WebAssembly takes a moment and the page should be
     // usable — droppable, at least — while it happens.
@@ -258,6 +304,493 @@ export class App {
   }
 
   /* ------------------------------------------------------------------ *
+   * Local projects
+   * ------------------------------------------------------------------ */
+
+  projectPersistenceEnabled() {
+    return Boolean(prefs.get('persistProjects'));
+  }
+
+  setProjectStorageState(state, message) {
+    this.projectStorageState = state;
+    const badge = this.dom?.statusStorage;
+    if (!badge) return;
+    badge.dataset.state = state;
+    badge.textContent = message || {
+      saving: 'Guardando proyectos…',
+      saved: 'Proyectos guardados',
+      error: 'Guardado local incompleto',
+      off: 'Guardado local desactivado',
+    }[state] || '';
+  }
+
+  /**
+   * Produce a cheap signature of durable state. Paints happen for every
+   * FFmpeg progress frame; filtering runtime-only values here prevents those
+   * frames from turning into hundreds of IndexedDB transactions.
+   */
+  projectStateSignature() {
+    const runtimeKeys = new Set([
+      'progress', 'speed', 'remaining', 'log',
+      'pendingMergeSnapshot', 'pendingAddAudioSnapshot',
+      'pendingQuickFocus', 'pendingQuickTab', 'pendingMergeFocus',
+      'pendingAddAudioFocus', 'cropPreviewUnavailable',
+    ]);
+    const seenBlobs = new WeakMap();
+    let nextBlob = 1;
+    return JSON.stringify({ selectedId: this.selectedId, jobs: this.jobs }, (key, value) => {
+      if (runtimeKeys.has(key)) return undefined;
+      if (typeof Blob !== 'undefined' && value instanceof Blob) {
+        if (!seenBlobs.has(value)) seenBlobs.set(value, nextBlob++);
+        return {
+          $blob: seenBlobs.get(value),
+          name: typeof File !== 'undefined' && value instanceof File ? value.name : undefined,
+          size: value.size,
+          type: value.type,
+          lastModified: typeof File !== 'undefined' && value instanceof File ? value.lastModified : undefined,
+        };
+      }
+      return value;
+    });
+  }
+
+  clearProjectSaveTimers() {
+    if (this.projectSaveTimer) clearTimeout(this.projectSaveTimer);
+    if (this.projectSaveDeadline) clearTimeout(this.projectSaveDeadline);
+    this.projectSaveTimer = null;
+    this.projectSaveDeadline = null;
+  }
+
+  scheduleProjectSave({ immediate = false, force = false } = {}) {
+    if (
+      !this.projectsHydrated
+      || this.projectExternalChange
+      || this.projectStorageUnavailable
+      || this.projectStorageReadOnly
+      || !prefs.get('persistProjects')
+    ) return;
+
+    let signature;
+    try {
+      signature = this.projectStateSignature();
+    } catch {
+      // A malformed third-party File implementation must not break the app.
+      signature = null;
+    }
+    if (!force && signature !== null && signature === this.lastScheduledProjectSignature) {
+      // `pagehide` promotes the last debounced edit to an immediate commit.
+      // The signature is intentionally identical here; returning without
+      // clearing the timer would let navigation kill the only pending save.
+      if (immediate && (this.projectSaveTimer || this.projectSaveDeadline)) {
+        this.clearProjectSaveTimers();
+        this.setProjectStorageState('saving');
+        this.commitProjectSave(this.projectSaveRevision);
+      }
+      return;
+    }
+    this.lastScheduledProjectSignature = signature;
+    this.projectSaveRevision += 1;
+    this.setProjectStorageState('saving');
+
+    if (immediate) {
+      this.clearProjectSaveTimers();
+      this.commitProjectSave(this.projectSaveRevision);
+      return;
+    }
+
+    if (this.projectSaveTimer) clearTimeout(this.projectSaveTimer);
+    this.projectSaveTimer = setTimeout(() => {
+      this.clearProjectSaveTimers();
+      this.commitProjectSave(this.projectSaveRevision);
+    }, 450);
+    if (!this.projectSaveDeadline) {
+      this.projectSaveDeadline = setTimeout(() => {
+        this.clearProjectSaveTimers();
+        this.commitProjectSave(this.projectSaveRevision);
+      }, 1500);
+    }
+  }
+
+  commitProjectSave(requestRevision = this.projectSaveRevision) {
+    if (
+      !this.projectsHydrated
+      || this.projectStorageUnavailable
+      || this.projectStorageReadOnly
+      || !prefs.get('persistProjects')
+    ) return this.projectSaveChain;
+
+    this.projectSaveChain = this.projectSaveChain
+      .catch(() => {})
+      .then(async () => {
+        if (!prefs.get('persistProjects') || this.projectExternalChange) return null;
+        const result = await this.projectStore.saveWorkspace(this.jobs, {
+          selectedId: this.selectedId,
+          expectedStorageRevision: this.projectStorageRevision,
+          allowMetadataFallback: true,
+        });
+        if (Number.isInteger(result?.storageRevision)) {
+          this.projectStorageRevision = result.storageRevision;
+        }
+        this.projectStorageIssue = result?.issues?.length ? result.issues : null;
+        const issueCodes = new Set((result?.issues || []).map((issue) => issue.code));
+        const previousOutputPreserved = issueCodes.has('quota-last-output-preserved');
+        if (!prefs.get('persistProjects')) {
+          this.setProjectStorageState('off');
+          return result;
+        }
+        if (requestRevision === this.projectSaveRevision) {
+          this.setProjectStorageState(
+            result?.metadataOnly ? 'error' : 'saved',
+            result?.metadataOnly
+              ? (previousOutputPreserved ? 'Resultado nuevo sólo en esta sesión' : 'Proyecto guardado · faltan archivos')
+              : 'Proyectos guardados',
+          );
+        }
+        if (result?.metadataOnly) {
+          this.toast(previousOutputPreserved
+            ? 'No había espacio para guardar el resultado nuevo. El anterior sigue protegido; descargá el nuevo antes de cerrar.'
+            : 'Guardamos la edición, pero no había espacio para copiar todos los archivos. Al volver vas a poder reconectarlos.', {
+            kind: 'error', duration: 9000,
+          });
+        }
+        return result;
+      })
+      .catch((error) => {
+        this.lastScheduledProjectSignature = null;
+        this.projectStorageIssue = error;
+        if (error?.code === 'conflict') {
+          this.projectExternalChange = true;
+          this.clearProjectSaveTimers();
+          this.setProjectStorageState('error', 'Cambios abiertos en otro tab');
+          this.toast('Otro tab guardó cambios primero. Recargá esta página para no sobrescribirlos.', {
+            kind: 'error', duration: 9000,
+          });
+          return null;
+        }
+        if (error?.code === 'storage-unavailable') this.projectStorageUnavailable = true;
+        const quota = isQuotaExceededError(error);
+        this.setProjectStorageState('error', quota ? 'Sin espacio para guardar archivos' : 'Guardado local no disponible');
+        this.toast(
+          quota
+            ? 'El navegador no tiene espacio suficiente. El proyecto sigue abierto, pero descargá el resultado antes de cerrar.'
+            : `No pudimos guardar el proyecto localmente: ${error.message}`,
+          { kind: 'error', duration: 9000 },
+        );
+        return null;
+      });
+    return this.projectSaveChain;
+  }
+
+  subscribeToProjectStore() {
+    if (this.unsubscribeProjectStore) return;
+    this.unsubscribeProjectStore = this.projectStore.subscribe?.((event) => {
+      if (!this.projectsHydrated || this.ignoreProjectBroadcast || event?.local) return;
+      this.projectExternalChange = true;
+      this.clearProjectSaveTimers();
+      this.setProjectStorageState('error', 'Cambios abiertos en otro tab');
+      this.toast('Otro tab actualizó los proyectos locales. Recargá esta página antes de seguir editando.', {
+        duration: 8000,
+      });
+    }) || null;
+  }
+
+  async restoreLocalProjects() {
+    try {
+      await this.projectStore.open();
+      this.subscribeToProjectStore();
+
+      const restored = await this.projectStore.loadWorkspace();
+      this.jobs = Array.isArray(restored?.jobs) ? restored.jobs : [];
+      this.selectedId = this.jobs.some((job) => job.id === restored?.selectedId)
+        ? restored.selectedId
+        : (this.jobs[0]?.id || null);
+      if (Number.isInteger(restored?.storageRevision)) {
+        this.projectStorageRevision = restored.storageRevision;
+      }
+      this.projectsHydrated = true;
+      this.projectStorageUnavailable = false;
+      const blockingIssues = (restored?.issues || [])
+        .filter((issue) => READ_ONLY_STORAGE_ISSUES.has(issue.code));
+      this.projectStorageReadOnly = blockingIssues.length > 0;
+      this.lastScheduledProjectSignature = this.projectStateSignature();
+
+      const needsRelink = this.jobs.filter((job) => job.needsRelink).length;
+      const issueCount = Array.isArray(restored?.issues) ? restored.issues.length : 0;
+      if (this.projectStorageReadOnly) {
+        this.setProjectStorageState('error', 'Proyectos locales en modo protegido');
+        this.toast('Encontramos datos locales de otra versión o incompletos. No los modificaremos; actualizá MediaForge o borrá el almacenamiento local desde Configuración.', {
+          kind: 'error', duration: 10000,
+        });
+      } else if (!prefs.get('persistProjects')) {
+        this.setProjectStorageState('off');
+      } else if (needsRelink || issueCount) {
+        this.setProjectStorageState('error', `${needsRelink || issueCount} proyecto${(needsRelink || issueCount) === 1 ? '' : 's'} para revisar`);
+      } else {
+        this.setProjectStorageState('saved', this.jobs.length ? `${this.jobs.length} proyecto${this.jobs.length === 1 ? '' : 's'} recuperado${this.jobs.length === 1 ? '' : 's'}` : 'Proyectos guardados');
+      }
+
+      for (const job of this.jobs) this.resumeRestoredProject(job);
+      if (this.jobs.length) {
+        this.toast(`${this.jobs.length} proyecto${this.jobs.length === 1 ? '' : 's'} recuperado${this.jobs.length === 1 ? '' : 's'} en este navegador.`, {
+          duration: 4500,
+        });
+      }
+    } catch (error) {
+      this.projectsHydrated = true;
+      this.projectStorageIssue = error;
+      this.projectStorageUnavailable = error?.code === 'storage-unavailable';
+      this.setProjectStorageState(
+        prefs.get('persistProjects') ? 'error' : 'off',
+        prefs.get('persistProjects') ? 'Guardado local no disponible' : undefined,
+      );
+      // Persistence is an enhancement: conversion must remain fully usable in
+      // private/restricted contexts where IndexedDB cannot be opened.
+      if (prefs.get('persistProjects')) {
+        this.toast(`Los proyectos funcionarán sólo durante esta sesión: ${error.message}`, {
+          kind: 'error', duration: 8500,
+        });
+      }
+    }
+  }
+
+  async retryProjectPersistence() {
+    if (!prefs.get('persistProjects')) return;
+    this.setProjectStorageState('saving', 'Reintentando almacenamiento local…');
+    try {
+      await this.projectStore.open();
+      this.subscribeToProjectStore();
+      const restored = await this.projectStore.loadWorkspace();
+      if (!Number.isInteger(restored?.storageRevision)) {
+        const error = new Error('No pudimos verificar la versión de los proyectos guardados.');
+        error.code = 'storage-unavailable';
+        throw error;
+      }
+      if (!prefs.get('persistProjects')) {
+        this.setProjectStorageState('off');
+        return;
+      }
+
+      // A failed initial open means the current jobs are session-only. Adopt
+      // the durable revision first, then merge both sets before writing; a
+      // blind save with expectedRevision=null could otherwise erase projects
+      // that were already in IndexedDB when the transient failure occurred.
+      const liveIds = new Set(this.jobs.map((job) => job.id));
+      const recovered = (restored.jobs || []).filter((job) => !liveIds.has(job.id));
+      this.jobs.push(...recovered);
+      if (!this.selectedId || !this.jobs.some((job) => job.id === this.selectedId)) {
+        this.selectedId = this.jobs.some((job) => job.id === restored.selectedId)
+          ? restored.selectedId
+          : (this.jobs[0]?.id || null);
+      }
+      this.projectStorageRevision = restored.storageRevision;
+      this.projectStorageUnavailable = false;
+      this.projectStorageIssue = restored.issues?.length ? restored.issues : null;
+      this.projectStorageReadOnly = (restored.issues || [])
+        .some((issue) => READ_ONLY_STORAGE_ISSUES.has(issue.code));
+      for (const job of recovered) this.resumeRestoredProject(job);
+      this.lastScheduledProjectSignature = null;
+      this.paintQueue();
+      this.paintDetail();
+      if (this.projectStorageReadOnly) {
+        this.setProjectStorageState('error', 'Proyectos locales en modo protegido');
+        this.toast('El almacenamiento contiene proyectos de otra versión o incompletos. No los sobrescribimos.', {
+          kind: 'error', duration: 9000,
+        });
+        return;
+      }
+      this.scheduleProjectSave({ immediate: true, force: true });
+      await this.projectSaveChain;
+      if (recovered.length) {
+        this.toast(`Recuperamos ${recovered.length} proyecto${recovered.length === 1 ? '' : 's'} guardado${recovered.length === 1 ? '' : 's'} antes de reactivar las copias.`);
+      }
+    } catch (error) {
+      this.projectStorageUnavailable = true;
+      this.projectStorageIssue = error;
+      this.setProjectStorageState('error', 'Guardado local no disponible');
+      this.toast(`El guardado seguirá sólo en esta sesión: ${error.message}`, {
+        kind: 'error', duration: 8500,
+      });
+    }
+  }
+
+  resumeRestoredProject(job) {
+    if (!job || job.needsRelink) return;
+    if (job.outputs?.length) job.previewMode = 'result';
+    if (this.isMergeJob(job)) {
+      this.syncMergeProject(job);
+      const pending = job.clips.filter((clip) => clip.file && !clip.info);
+      if (pending.length) {
+        job.status = 'probing';
+        this.enqueue(() => this.probeMergeClips(job, pending));
+      }
+      return;
+    }
+    if (this.isAddAudioJob(job)) {
+      this.syncAddAudioProject(job);
+      for (const asset of [job.video, job.audio].filter(Boolean)) {
+        if (asset.file && !asset.info) this.enqueue(() => this.probeAddAudioAsset(job, asset));
+      }
+      return;
+    }
+    if (job.file && !job.info) {
+      job.status = 'probing';
+      this.enqueue(() => this.probeJob(job));
+      return;
+    }
+    if (job.outputs?.length && focusedQuickTool(job.forgeToolId)) this.syncQuickDirty(job);
+  }
+
+  onProjectPersistencePreference() {
+    if (!this.projectsHydrated) return;
+    if (prefs.get('persistProjects')) {
+      if (this.projectStorageReadOnly) {
+        this.setProjectStorageState('error', 'Proyectos locales en modo protegido');
+        this.syncStorageSettings();
+        return;
+      }
+      if (this.projectStorageUnavailable || !Number.isInteger(this.projectStorageRevision)) {
+        // Explicitly toggling persistence back on is the retry gesture for a
+        // private/restricted context whose first IndexedDB open failed.
+        return this.retryProjectPersistence();
+      }
+      this.scheduleProjectSave({ immediate: true, force: true });
+    } else {
+      this.clearProjectSaveTimers();
+      this.setProjectStorageState('off');
+    }
+    this.syncStorageSettings();
+  }
+
+  async syncStorageSettings() {
+    const summary = $('#settings-storage-summary');
+    const quota = $('#settings-storage-quota');
+    const persistence = $('#settings-storage-persistence');
+    if (!summary || !quota || !persistence) return;
+
+    summary.textContent = prefs.get('persistProjects')
+      ? (this.projectStorageState === 'error' ? 'El guardado local necesita atención.' : 'El guardado automático está activo.')
+      : 'El guardado automático está desactivado.';
+    try {
+      const estimate = await this.projectStore.estimate();
+      quota.textContent = Number.isFinite(estimate?.usage) && Number.isFinite(estimate?.quota)
+        ? `${formatBytes(estimate.usage)} usados de aproximadamente ${formatBytes(estimate.quota)} disponibles para este origen.`
+        : 'El navegador no informa cuánto espacio local queda disponible.';
+      persistence.textContent = estimate?.persisted
+        ? 'El navegador confirmó que conservará estos datos salvo que los borres.'
+        : 'El navegador puede liberar estos datos si necesita espacio; podés solicitar protección.';
+    } catch (error) {
+      quota.textContent = 'No pudimos consultar el espacio local disponible.';
+      persistence.textContent = error.message;
+    }
+  }
+
+  async requestPersistentProjectStorage() {
+    try {
+      const result = await this.projectStore.requestPersistence();
+      this.toast(result?.persisted
+        ? 'El navegador confirmó la protección de los proyectos locales.'
+        : 'El navegador no concedió protección permanente; el guardado local sigue funcionando.');
+    } catch (error) {
+      this.toast(`No pudimos solicitar protección: ${error.message}`, { kind: 'error' });
+    }
+    this.syncStorageSettings();
+  }
+
+  async clearLocalProjects() {
+    const sure = await this.confirm({
+      title: '¿Borrar todos los proyectos locales?',
+      message: 'Se quitarán la cola, los archivos copiados y los resultados guardados en este navegador. Los archivos originales no se modifican.',
+      confirmLabel: 'Borrar proyectos',
+      danger: true,
+    });
+    if (!sure) return;
+    if (this.runningId) this.cancelRunning();
+    this.releaseQuickSourcePreview();
+    this.releaseQuickOutputPreview();
+    this.releasePreview();
+    this.releaseScrubber();
+    this.releaseCropper();
+    this.releaseMergeSourcePreview();
+    this.releaseMergeSequence();
+    this.releaseAudioMixPreview();
+    this.releaseAudioMixTimeline();
+    this.clearPickerIntent();
+    this.jobs = [];
+    this.selectedId = null;
+    this.clearProjectSaveTimers();
+    this.setProjectStorageState('saving', 'Borrando proyectos…');
+    try {
+      // A large Blob transaction may still be in flight when the user opens
+      // Settings and chooses “Borrar todo”. Queue the clear behind it so the
+      // same tab cannot race its own revision and leave the just-saved bytes
+      // behind after the UI has already emptied the workspace.
+      const clearing = this.projectSaveChain
+        .catch(() => {})
+        .then(() => this.projectStore.clear({
+          expectedStorageRevision: this.projectStorageRevision,
+        }));
+      this.projectSaveChain = clearing.catch(() => {});
+      const result = await clearing;
+      this.projectExternalChange = false;
+      this.projectStorageReadOnly = false;
+      this.projectStorageUnavailable = false;
+      this.projectStorageIssue = null;
+      this.projectStorageRevision = Number.isInteger(result?.storageRevision)
+        ? result.storageRevision
+        : this.projectStorageRevision;
+      this.lastScheduledProjectSignature = this.projectStateSignature();
+      this.setProjectStorageState(prefs.get('persistProjects') ? 'saved' : 'off', prefs.get('persistProjects') ? 'Sin proyectos guardados' : undefined);
+      this.toast('Borramos todos los proyectos locales.');
+    } catch (error) {
+      this.projectStorageIssue = error;
+      if (error?.code === 'conflict') this.projectExternalChange = true;
+      this.setProjectStorageState('error');
+      this.toast(
+        error?.code === 'conflict'
+          ? 'Otro tab cambió los proyectos antes del borrado. No eliminamos sus datos; recargá para revisar el estado actual.'
+          : `No pudimos borrar el almacenamiento local: ${error.message}`,
+        { kind: 'error' },
+      );
+    }
+    this.paintQueue();
+    this.paintDetail();
+    this.syncStorageSettings();
+  }
+
+  deletePersistedProject(projectId) {
+    if (!this.projectsHydrated || this.projectStorageReadOnly || !projectId) return this.projectSaveChain;
+    const deleteRevision = ++this.projectDeleteRevision;
+    this.setProjectStorageState('saving', 'Borrando proyecto…');
+    this.projectSaveChain = this.projectSaveChain
+      .catch(() => {})
+      .then(async () => {
+        const result = await this.projectStore.deleteProject(projectId, {
+          expectedStorageRevision: this.projectStorageRevision,
+        });
+        if (Number.isInteger(result?.storageRevision)) this.projectStorageRevision = result.storageRevision;
+        if (deleteRevision === this.projectDeleteRevision && prefs.get('persistProjects')) {
+          this.setProjectStorageState('saved', this.jobs.length ? 'Proyectos guardados' : 'Sin proyectos guardados');
+        }
+        return result;
+      })
+      .catch((error) => {
+        this.projectStorageIssue = error;
+        if (error?.code === 'conflict') {
+          this.projectExternalChange = true;
+          this.clearProjectSaveTimers();
+          this.setProjectStorageState('error', 'Cambios abiertos en otro tab');
+          this.toast('Otro tab cambió estos proyectos. Recargá antes de volver a borrar o editar.', {
+            kind: 'error', duration: 8000,
+          });
+        } else {
+          this.setProjectStorageState('error');
+        }
+        return null;
+      });
+    return this.projectSaveChain;
+  }
+
+  /* ------------------------------------------------------------------ *
    * Adding files
    * ------------------------------------------------------------------ */
 
@@ -275,7 +808,10 @@ export class App {
     const walk = async (entry, path = '') => {
       if (entry.isFile) {
         const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
-        files.push(path ? new File([file], `${path}/${file.name}`, { type: file.type }) : file);
+        files.push(path ? new File([file], `${path}/${file.name}`, {
+          type: file.type,
+          lastModified: file.lastModified,
+        }) : file);
         return;
       }
       const reader = entry.createReader();
@@ -326,6 +862,12 @@ export class App {
       else this.toast('Ese proyecto ya no está disponible.', { kind: 'error' });
       return;
     }
+    if (pickerIntent?.kind === 'project-relink') {
+      const project = this.jobs.find((job) => job.id === pickerIntent.projectId);
+      if (project) this.relinkProject(project, files);
+      else this.toast('Ese proyecto ya no está disponible.', { kind: 'error' });
+      return;
+    }
 
     const accepted = [];
     const refused = [];
@@ -337,7 +879,7 @@ export class App {
         continue;
       }
       const job = {
-        id: String(nextJobId++),
+        id: createPersistentId('job'),
         file,
         name: file.name,
         size: file.size,
@@ -368,6 +910,10 @@ export class App {
     if (!this.selectedId) this.selectedId = accepted[0].id;
     this.paintQueue();
     this.paintDetail();
+    // A source File is irreplaceable without another user gesture. Start its
+    // IndexedDB transaction now instead of leaving a refresh-sized debounce
+    // window in which only the in-memory job exists.
+    this.scheduleProjectSave({ immediate: true, force: true });
 
     for (const job of accepted) this.enqueue(() => this.probeJob(job));
     // Focused tools need one explicit choice/confirmation. Auto-start remains
@@ -387,6 +933,132 @@ export class App {
       && job.operation === ADD_AUDIO_OPERATION
       && job.video?.role === 'video'
     );
+  }
+
+  missingProjectAssets(job) {
+    if (!job) return [];
+    if (this.isMergeJob(job)) {
+      return job.clips
+        .filter((clip) => !clip.file)
+        .map((clip) => ({ owner: clip, role: 'clip', id: clip.id, name: clip.name, size: clip.size, lastModified: clip.lastModified }));
+    }
+    if (this.isAddAudioJob(job)) {
+      return [job.video, job.audio]
+        .filter((asset) => asset && !asset.file)
+        .map((asset) => ({ owner: asset, role: asset.role, id: asset.id, name: asset.name, size: asset.size, lastModified: asset.lastModified }));
+    }
+    // Some queue/domain tests and embedders use minimal status-only records.
+    // Absence of a `file` field is not itself a persisted relink marker; a
+    // hydrated metadata-only project has the field explicitly set to null.
+    if (!Object.prototype.hasOwnProperty.call(job, 'file')) return [];
+    return job.file ? [] : [{ owner: job, role: 'source', id: job.id, name: job.name, size: job.size, lastModified: job.lastModified }];
+  }
+
+  openRelinkPicker(job) {
+    const missing = this.missingProjectAssets(job);
+    if (!missing.length) return;
+    this.setPickerIntent({ kind: 'project-relink', projectId: job.id });
+    this.dom.fileInput.accept = this.isAddAudioJob(job)
+      ? 'video/*,audio/*'
+      : (job.info?.hasAudio && !job.info?.hasVideo ? 'audio/*' : 'video/*,audio/*');
+    this.dom.fileInput.multiple = missing.length > 1;
+    this.dom.fileInput.click();
+  }
+
+  relinkProject(job, files) {
+    const missing = this.missingProjectAssets(job);
+    const remaining = [...missing];
+    const matches = [];
+    for (const file of Array.from(files || [])) {
+      let index = remaining.findIndex((asset) => (
+        asset.name === file.name
+        && Number(asset.size) === Number(file.size)
+        && (!asset.lastModified || Number(asset.lastModified) === Number(file.lastModified))
+      ));
+      if (index < 0) {
+        index = remaining.findIndex((asset) => (
+          assetBasename(asset.name) === assetBasename(file.name)
+          && Number(asset.size) === Number(file.size)
+          && (!asset.lastModified || Number(asset.lastModified) === Number(file.lastModified))
+        ));
+      }
+      if (index < 0) {
+        index = remaining.findIndex((asset) => (
+          assetBasename(asset.name) === assetBasename(file.name)
+          && Number(asset.size) === Number(file.size)
+        ));
+      }
+      if (index < 0) {
+        index = remaining.findIndex((asset) => (
+          Number(asset.size) === Number(file.size)
+          && asset.lastModified
+          && Number(asset.lastModified) === Number(file.lastModified)
+        ));
+      }
+      if (index < 0) continue;
+      matches.push([remaining.splice(index, 1)[0], file]);
+    }
+
+    if (!matches.length) {
+      this.toast('El archivo no coincide con ninguna fuente pendiente. Revisá el nombre y el tamaño.', {
+        kind: 'error', duration: 7500,
+      });
+      return;
+    }
+
+    if (this.isMergeJob(job)) {
+      const pending = [];
+      for (const [missingAsset, file] of matches) {
+        const clip = missingAsset.owner;
+        clip.file = file;
+        clip.name = file.name;
+        clip.size = file.size;
+        clip.lastModified = file.lastModified;
+        clip.info = null;
+        clip.status = 'pending';
+        clip.error = null;
+        delete clip.needsRelink;
+        pending.push(clip);
+      }
+      job.needsRelink = this.missingProjectAssets(job).length > 0;
+      this.syncMergeProject(job);
+      if (pending.length) this.enqueue(() => this.probeMergeClips(job, pending));
+    } else if (this.isAddAudioJob(job)) {
+      for (const [missingAsset, file] of matches) {
+        const asset = missingAsset.owner;
+        asset.file = file;
+        asset.name = file.name;
+        asset.size = file.size;
+        asset.lastModified = file.lastModified;
+        asset.info = null;
+        asset.status = 'pending';
+        asset.error = null;
+        delete asset.needsRelink;
+        this.enqueue(() => this.probeAddAudioAsset(job, asset));
+      }
+      job.needsRelink = this.missingProjectAssets(job).length > 0;
+      this.syncAddAudioProject(job);
+    } else {
+      const file = matches[0][1];
+      job.file = file;
+      job.name = file.name;
+      job.size = file.size;
+      job.lastModified = file.lastModified;
+      job.info = null;
+      job.status = 'probing';
+      job.error = null;
+      delete job.needsRelink;
+      this.enqueue(() => this.probeJob(job));
+    }
+
+    this.scheduleProjectSave({ immediate: true, force: true });
+    this.paintQueue();
+    this.paintDetail();
+    if (remaining.length) {
+      this.toast(`Reconectamos ${matches.length}; todavía faltan ${remaining.length} fuente${remaining.length === 1 ? '' : 's'}.`);
+    } else {
+      this.toast('Fuentes reconectadas. Estamos verificándolas antes de continuar.');
+    }
   }
 
   mergeFilesWithinLimits(files, job = null) {
@@ -431,7 +1103,7 @@ export class App {
 
     const editState = createMergeEditState();
     const job = {
-      id: String(nextJobId++),
+      id: createPersistentId('job'),
       kind: 'video-merge',
       forgeToolId: toolId,
       clips,
@@ -467,6 +1139,7 @@ export class App {
     this.syncMergeProject(job);
     this.paintQueue();
     this.paintDetail();
+    this.scheduleProjectSave({ immediate: true, force: true });
     this.enqueue(() => this.probeMergeClips(job, clips));
     return job;
   }
@@ -487,6 +1160,7 @@ export class App {
     this.syncMergeProject(job);
     this.paintQueue();
     this.paintDetail();
+    this.scheduleProjectSave({ immediate: true, force: true });
     this.enqueue(() => this.probeMergeClips(job, added));
     return added;
   }
@@ -505,7 +1179,7 @@ export class App {
       const waiting = job.clips.some((clip) => clip.status === 'pending' || clip.status === 'probing');
       job.status = waiting
         ? 'probing'
-        : (job.outputs?.length && (job.dirtySinceOutput || job.status === 'done') ? 'done' : 'ready');
+        : (job.outputs?.length ? 'done' : 'ready');
     }
   }
 
@@ -555,7 +1229,7 @@ export class App {
 
     const video = createAddAudioAsset(videoFile, 'video');
     const job = {
-      id: String(nextJobId++),
+      id: createPersistentId('job'),
       kind: 'video-add-audio',
       forgeToolId: toolId,
       operation: ADD_AUDIO_OPERATION,
@@ -591,6 +1265,7 @@ export class App {
     this.syncAddAudioProject(job);
     this.paintQueue();
     this.paintDetail();
+    this.scheduleProjectSave({ immediate: true, force: true });
     this.enqueue(() => this.probeAddAudioAsset(job, video));
     return job;
   }
@@ -636,6 +1311,7 @@ export class App {
     this.syncAddAudioProject(job);
     this.paintQueue();
     this.paintDetail();
+    this.scheduleProjectSave({ immediate: true, force: true });
     this.enqueue(() => this.probeAddAudioAsset(job, asset));
     return asset;
   }
@@ -648,6 +1324,7 @@ export class App {
     if (this.audioMixPreview?.jobId === job.id) this.releaseAudioMixPreview();
     this.syncAddAudioProject(job);
     this.scheduleCommandPreview();
+    this.scheduleProjectSave({ immediate: true, force: true });
     this.paintQueue();
     if (job.id === this.selectedId) this.paintDetail();
   }
@@ -668,7 +1345,7 @@ export class App {
         .some((asset) => asset.status === 'pending' || asset.status === 'probing');
       job.status = waiting
         ? 'probing'
-        : (job.outputs?.length && (job.dirtySinceOutput || job.status === 'done') ? 'done' : 'ready');
+        : (job.outputs?.length ? 'done' : 'ready');
     }
   }
 
@@ -808,6 +1485,10 @@ export class App {
           { duration: 8000 }
         );
       }
+      if (job.status === 'ready' && job.outputs?.length) {
+        job.status = 'done';
+        this.syncQuickDirty(job);
+      }
     } catch (error) {
       job.status = 'failed';
       job.error = error.message;
@@ -817,18 +1498,30 @@ export class App {
     if (job.id === this.selectedId) this.paintDetail();
   }
 
-  async removeJob(job) {
+  async removeJob(job, { confirm = true } = {}) {
     if (!job) return;
-    // Removing a file mid-conversion throws away however many minutes of the
-    // user's processor it has already spent, and there is no undo.
-    if (this.runningId === job.id) {
+    const isRunning = this.runningId === job.id;
+    const hasSavedResult = Boolean(job.outputs?.length);
+    const isDurableProject = Boolean(this.projectsHydrated && this.projectPersistenceEnabled());
+    // Once projects are durable, removing a finished row also removes the
+    // saved result Blob. Make that destructive boundary explicit; originals
+    // selected from disk are never touched.
+    if (confirm && (isRunning || hasSavedResult || isDurableProject)) {
       const sure = await this.confirm({
-        title: 'Stop converting?',
-        message: `${job.name} is ${Math.round(job.progress * 100)}% converted. Removing it now throws that away.`,
-        confirmLabel: 'Stop and remove',
+        title: isRunning
+          ? '¿Detener y quitar el proyecto?'
+          : (hasSavedResult ? '¿Quitar el proyecto y su resultado?' : '¿Quitar este proyecto?'),
+        message: isRunning
+          ? `${job.name} lleva ${Math.round(job.progress * 100)}% procesado. Se perderán ese avance${hasSavedResult ? ' y el resultado anterior guardado' : ''}.`
+          : (hasSavedResult
+            ? 'Se borrarán de este navegador el proyecto y su resultado guardado. El archivo original no se modifica.'
+            : 'Se borrarán de este navegador el proyecto en proceso y su copia local. El archivo original no se modifica.'),
+        confirmLabel: isRunning ? 'Detener y quitar' : 'Quitar proyecto',
         danger: true,
       });
       if (!sure) return;
+    }
+    if (isRunning) {
       this.cancelRunning();
     }
 
@@ -845,8 +1538,25 @@ export class App {
     }
     this.jobs.splice(index, 1);
     if (this.selectedId === job.id) this.selectedId = this.jobs[Math.min(index, this.jobs.length - 1)]?.id || null;
+    // Turning persistence off means “stop changing the durable copy”, not
+    // “silently delete it”. The explicit storage action remains available in
+    // Settings; re-enabling persistence will commit the current workspace.
+    if (this.projectPersistenceEnabled()) this.deletePersistedProject(job.id);
     this.paintQueue();
     this.paintDetail();
+  }
+
+  async clearFinishedProjects() {
+    const finished = this.jobs.filter((job) => this.jobIsSettledDone(job));
+    if (!finished.length) return;
+    const sure = await this.confirm({
+      title: `¿Quitar ${finished.length} proyecto${finished.length === 1 ? '' : 's'} terminado${finished.length === 1 ? '' : 's'}?`,
+      message: 'Se borrarán de este navegador los proyectos y sus resultados guardados. Los archivos originales no se modifican.',
+      confirmLabel: 'Quitar terminados',
+      danger: true,
+    });
+    if (!sure) return;
+    for (const job of finished) await this.removeJob(job, { confirm: false });
   }
 
   /* ------------------------------------------------------------------ *
@@ -913,6 +1623,10 @@ export class App {
   }
 
   describeJob(job) {
+    if (job?.needsRelink || this.missingProjectAssets(job).length) {
+      const missing = this.missingProjectAssets(job).length;
+      return `${missing} fuente${missing === 1 ? '' : 's'} · Reconectar`;
+    }
     if (this.isMergeJob(job)) {
       if (job.status === 'failed') return job.error ? truncateName(job.error, 44) : 'Falló la unión';
       if (job.status === 'running') {
@@ -985,6 +1699,7 @@ export class App {
 
   jobPendingForRun(job) {
     if (!job) return false;
+    if (job.needsRelink || this.missingProjectAssets(job).length) return false;
     if (job.status === 'queued') return true;
     if (job.status === 'ready') {
       if (this.isAddAudioJob(job)) return this.addAudioValidation(job).ok;
@@ -1158,6 +1873,11 @@ export class App {
       ? `${job.name} · ${this.describeSource(job)}`
       : this.describeSource(job);
 
+    if (job.needsRelink || this.missingProjectAssets(job).length) {
+      this.renderRelinkState(job);
+      return;
+    }
+
     if (mergeJob) {
       this.releasePreview();
       this.releaseQuickSourcePreview();
@@ -1211,6 +1931,54 @@ export class App {
 
     this.renderDetailActions(job, quickTool);
     this.restoreQuickFocus(job);
+  }
+
+  renderRelinkState(job) {
+    this.releasePreview();
+    this.releaseQuickSourcePreview();
+    this.releaseQuickOutputPreview();
+    this.releaseScrubber();
+    this.releaseCropper();
+    this.releaseMergeSourcePreview();
+    this.releaseMergeSequence();
+    this.releaseAudioMixPreview();
+    this.releaseAudioMixTimeline();
+
+    const missing = this.missingProjectAssets(job);
+    const list = el('ul', { class: 'project-relink-list' }, missing.map((asset) => (
+      el('li', { class: 'project-relink-file' }, [
+        el('span', { text: asset.name || 'Archivo sin nombre' }),
+        el('small', { text: Number.isFinite(Number(asset.size)) ? formatBytes(Number(asset.size)) : 'Tamaño desconocido' }),
+      ])
+    )));
+    this.dom.preview.replaceChildren(el('section', { class: 'project-relink-card' }, [
+      el('div', { class: 'project-relink-icon', attrs: { 'aria-hidden': 'true' }, text: '↗' }),
+      el('div', {}, [
+        el('p', { class: 'forge-eyebrow', text: 'Proyecto recuperado' }),
+        el('h3', { text: 'Reconectá los archivos originales' }),
+        el('p', { text: 'La edición y los ajustes están guardados, pero el navegador ya no conserva estas fuentes. Elegilas nuevamente para continuar.' }),
+      ]),
+      list,
+      el('div', { class: 'project-relink-actions' }, [
+        el('button', { type: 'button', class: 'primary-button', dataset: { action: 'relink-project' }, text: missing.length > 1 ? 'Elegir archivos' : 'Elegir archivo' }),
+      ]),
+    ]));
+    this.dom.controls.replaceChildren();
+    this.dom.commandBlock.hidden = true;
+    this.dom.quickFootSummary.hidden = false;
+    this.dom.quickFootSummary.textContent = `${missing.length} fuente${missing.length === 1 ? '' : 's'} pendiente${missing.length === 1 ? '' : 's'}`;
+
+    const start = this.dom.detail.querySelector('[data-action="start-one"]');
+    const cancel = this.dom.detail.querySelector('[data-action="cancel-one"]');
+    const download = this.dom.detail.querySelector('[data-action="download-one"]');
+    const remove = this.dom.detail.querySelector('[data-action="remove-one"]');
+    start.hidden = true;
+    cancel.hidden = true;
+    download.hidden = !job.outputs?.length;
+    download.textContent = 'Descargar resultado anterior';
+    download.classList.toggle('primary-button', Boolean(job.outputs?.length));
+    download.classList.toggle('text-button', !job.outputs?.length);
+    remove.textContent = 'Quitar proyecto';
   }
 
   restoreQuickFocus(job) {
@@ -1986,6 +2754,7 @@ export class App {
     job.pendingMergeFocus = job.selectedClipId ? { type: 'clip', id: job.selectedClipId } : { type: 'add' };
     this.markMergeJobEdited(job);
     this.scheduleCommandPreview();
+    this.scheduleProjectSave({ immediate: true, force: true });
     this.paintQueue();
     if (job.id === this.selectedId) this.paintDetail();
   }
@@ -4489,7 +5258,13 @@ export class App {
     // user has already dismissed. Requiring a pending status also makes stale
     // tasks idempotent: if "Process queue" consumes a job before an individual
     // task for that same job gets its turn, the latter sees `done` and exits.
-    if (!this.jobs.includes(job) || !job.info || !this.jobPendingForRun(job)) return;
+    if (
+      !this.jobs.includes(job)
+      || !job.info
+      || job.needsRelink
+      || this.missingProjectAssets(job).length
+      || !this.jobPendingForRun(job)
+    ) return;
     const valid = this.isAddAudioJob(job)
       ? this.validateAddAudioJob(job, { notify: job.status !== 'queued' })
       : (this.isMergeJob(job)
@@ -4541,6 +5316,7 @@ export class App {
     }
     this.runningId = job.id;
     const startedAt = performance.now();
+    this.scheduleProjectSave({ immediate: true });
     this.paintQueue();
     this.paintDetail();
 
@@ -4590,6 +5366,11 @@ export class App {
         job.dirtySinceOutput = false;
       }
       if (this.quickToolFor(job) || this.isMergeJob(job) || this.isAddAudioJob(job)) job.previewMode = 'result';
+
+      // The encoded bytes are useful only if the matching manifest commits.
+      // Force a save even when a same-sized re-export has an identical cheap
+      // signature; the Blob identity and contents may still be different.
+      this.scheduleProjectSave({ immediate: true, force: true });
 
       const seconds = (performance.now() - startedAt) / 1000;
       this.appendLog(`Finished in ${formatDuration(seconds)} · ${formatBytes(job.outputSize)}`);
@@ -4668,6 +5449,10 @@ export class App {
     on(window, 'offline', () => this.updateOfflineBadge());
     on(window, 'pagehide', (event) => {
       prefs.flush();
+      // Safari may put the page in BFCache and later evict it without another
+      // unload event. Promote the pending edit even when `persisted` is true;
+      // only media teardown must wait for a definitive unload.
+      this.scheduleProjectSave({ immediate: true });
       // A page entering the back/forward cache keeps its DOM alive. Destroying
       // media here would restore a timeline whose listeners and blob URL are
       // gone when the user comes back.
@@ -4682,6 +5467,11 @@ export class App {
       this.releaseAudioMixPreview();
       this.releaseAudioMixTimeline();
       this.clearPickerIntent();
+    });
+    on(document, 'visibilitychange', () => {
+      if (document.visibilityState !== 'hidden') return;
+      prefs.flush();
+      this.scheduleProjectSave({ immediate: true });
     });
     on(window, 'pageshow', (event) => {
       if (!event.persisted) return;
@@ -4700,7 +5490,7 @@ export class App {
     // A conversion in flight is minutes of the user's processor time; losing it
     // to a stray ⌘W deserves at least a question.
     on(window, 'beforeunload', (event) => {
-      if (!this.runningId) return;
+      if (!this.runningId && this.projectStorageState !== 'saving') return;
       event.preventDefault();
       event.returnValue = '';
     });
@@ -4728,7 +5518,8 @@ export class App {
 
     switch (action) {
       case 'add-files':
-        if (this.isMergeJob(job)) this.openMergePicker(job);
+        if (job && (job.needsRelink || this.missingProjectAssets(job).length)) this.openRelinkPicker(job);
+        else if (this.isMergeJob(job)) this.openMergePicker(job);
         else if (this.isAddAudioJob(job)) this.openAddAudioPicker(job, 'audio');
         else this.dom.fileInput.click();
         return true;
@@ -4747,6 +5538,16 @@ export class App {
       case 'settings':
         this.dom.settings.showModal();
         this.syncSettings();
+        return true;
+      case 'request-persistent-storage':
+        this.requestPersistentProjectStorage();
+        return true;
+      case 'clear-local-projects':
+        if (this.dom.settings.open) this.dom.settings.close();
+        this.clearLocalProjects();
+        return true;
+      case 'relink-project':
+        if (job) this.openRelinkPicker(job);
         return true;
       case 'start-all':
         this.enqueue(() => this.runQueue());
@@ -4767,6 +5568,7 @@ export class App {
           if (this.isMergeJob(job)) job.pendingMergeSnapshot = createMergeSnapshot(job);
           if (this.isAddAudioJob(job)) job.pendingAddAudioSnapshot = createAddAudioSnapshot(job);
           this.releaseQuickOutputPreview();
+          this.scheduleProjectSave({ immediate: true });
           this.paintQueue();
           this.paintDetail();
           this.enqueue(() => this.runJob(job));
@@ -4800,10 +5602,7 @@ export class App {
         if (job) this.removeJob(job);
         return true;
       case 'clear-done':
-        this.jobs = this.jobs.filter((item) => !this.jobIsSettledDone(item));
-        if (!this.jobs.some((item) => item.id === this.selectedId)) this.selectedId = this.jobs[0]?.id || null;
-        this.paintQueue();
-        this.paintDetail();
+        this.clearFinishedProjects();
         return true;
       case 'copy-command':
         copyText(this.dom.commandText.textContent).then((ok) => this.toast(ok ? 'Copied.' : 'Could not copy.'));
@@ -4822,7 +5621,8 @@ export class App {
 
     if (meta && event.key.toLowerCase() === 'o') {
       event.preventDefault();
-      if (this.isMergeJob(this.selected)) this.openMergePicker(this.selected);
+      if (this.selected && (this.selected.needsRelink || this.missingProjectAssets(this.selected).length)) this.openRelinkPicker(this.selected);
+      else if (this.isMergeJob(this.selected)) this.openMergePicker(this.selected);
       else if (this.isAddAudioJob(this.selected)) this.openAddAudioPicker(this.selected, 'audio');
       else this.dom.fileInput.click();
       return;
@@ -4986,9 +5786,9 @@ export class App {
 
     const details = this.engineDetails;
     $('#settings-engine').textContent = details
-      ? `FFmpeg ${details.capabilities.version}, ${details.threads ? 'multi-threaded' : 'single-threaded'}, ` +
-        `with ${details.capabilities.encoders.length} encoders compiled in.`
-      : 'FFmpeg has not finished starting.';
+      ? `FFmpeg ${details.capabilities.version}, ${details.threads ? 'multihilo' : 'un solo hilo'}, ` +
+        `con ${details.capabilities.encoders.length} codificadores incluidos.`
+      : 'FFmpeg todavía está iniciando.';
 
     // Isolation is necessary for the threaded core but not sufficient: the
     // threaded build also has to have been vendored. Saying "isolated, so it
@@ -4997,12 +5797,12 @@ export class App {
     const { crossOriginIsolated, sharedArrayBuffer } = isolationStatus();
     const isolated = crossOriginIsolated && sharedArrayBuffer;
     $('#settings-isolation').textContent = details?.threads
-      ? 'This page is cross-origin isolated, so the faster multi-threaded core is in use.'
+      ? 'La página está aislada entre orígenes y usa el motor multihilo más rápido.'
       : isolated
-        ? 'This page is cross-origin isolated, but only the single-threaded core is vendored here. ' +
-          'Run `node tools/fetch-core.mjs --mt` to add the faster one.'
-        : 'This page is not cross-origin isolated, so the single-threaded core is in use. ' +
-          'GitHub Pages cannot send the two headers that would change that.';
+        ? 'La página está aislada, pero esta instalación sólo incluye el motor de un hilo.'
+        : 'La página usa el motor de un hilo porque GitHub Pages no puede enviar los encabezados necesarios para el modo multihilo.';
+
+    this.syncStorageSettings();
   }
 
   /* ------------------------------------------------------------------ *

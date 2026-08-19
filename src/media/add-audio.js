@@ -8,6 +8,7 @@
  */
 
 import { audioTrackDuration, videoTrackDuration } from './probe.js';
+import { createPersistentId } from '../storage/ids.js';
 
 export const ADD_AUDIO_TOOL_ID = 'video-add-audio';
 export const ADD_AUDIO_OPERATION = 'add-audio-to-video';
@@ -41,8 +42,6 @@ const MIX_MODES = new Set(['mix', 'replace']);
 const AUDIO_FITS = new Set(['once', 'loop']);
 const QUALITIES = new Set(['high', 'balanced', 'small']);
 const SPEEDS = new Set(['ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow', 'slower']);
-
-let nextAssetId = 1;
 
 const stableNumber = (value) => Number(Number(value).toFixed(6));
 
@@ -120,7 +119,7 @@ export function createAddAudioAsset(file, role, id = null) {
   if (!Number.isFinite(size) || size < 0) throw new TypeError(`The ${role} asset needs a valid file size.`);
 
   const stableId = id === null || id === undefined || String(id).trim() === ''
-    ? `add-audio-${role}-${nextAssetId++}`
+    ? createPersistentId(`add-audio-${role}`)
     : String(id);
 
   return {

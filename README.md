@@ -5,6 +5,8 @@ build step, no npm dependencies — open the page and it works, including offlin
 
 The converter is FFmpeg itself, compiled to WebAssembly and running in the tab.
 Your files are never uploaded, because there is nowhere to upload them to.
+By default, recoverable project copies are kept in this browser's private
+storage; that can be disabled or cleared at any time in **Configuración**.
 
 **[→ Open it](https://pablocaviglia-uy.github.io/media-forge/)**
 
@@ -29,11 +31,15 @@ Your files are never uploaded, because there is nowhere to upload them to.
 - A queue that converts one file after another, with progress and an estimate
 - Cancel a conversion that is taking longer than it is worth
 - Preview the source, and download the result — or all of them, as a zip
-- Every file is read straight into FFmpeg's memory and never touches storage
+- Recover projects, source files, options and completed results after a reload
+- Turn local project saving off, reconnect a missing source, or clear every
+  saved copy from **Configuración**
 
 **Being local**
 - Installable as a PWA; works with the network off
 - No analytics, no telemetry, no fonts or scripts from a CDN
+- Project data stays in browser-managed storage on this device; it is never
+  sent to a server
 - The FFmpeg log, in full, whenever you want to see what it actually ran
 
 ## Why it is slow
@@ -156,16 +162,19 @@ src/
     ffmpeg.worker.js  Instantiates the core, runs plans, reports progress
 
   storage/
-    prefs.js          Preferences in localStorage
+    ids.js            Collision-safe ids for records that survive a reload
+    prefs.js          Small synchronous preferences in localStorage
+    projects.js       Project manifests and media blobs in IndexedDB
 
   ui/                 DOM helpers, focused editors, formatting, downloads
 ```
 
-A conversion goes: file dropped → probed with `ffprobe` → the inspector builds
-`options` → `commands.js` turns those into a plan of one or more invocations →
-the worker writes the input into FFmpeg's in-memory filesystem and runs each
-step → progress arrives on FFmpeg's `-progress` pipe → the outputs are
-transferred back as bytes and turned into a `Blob`. See
+A conversion goes: file dropped → copied to the local project store and probed
+with `ffprobe` → the inspector builds `options` → `commands.js` turns those into
+a plan of one or more invocations → the worker writes the input into FFmpeg's
+in-memory filesystem and runs each step → progress arrives on FFmpeg's
+`-progress` pipe → the outputs are transferred back as bytes, turned into a
+`Blob`, and saved with the project. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the details.
 
 ### Why the queue converts one file at a time
@@ -176,12 +185,17 @@ over each other's files. Running two instances would mean two 32 MB cores
 competing for the same 2 GB heap ceiling that already limits how large one file
 can be. So the queue is a queue.
 
-## Security
+## Security and local data
 
-The app makes no network requests after it loads, has no server to talk to, and
-stores nothing: files live in memory for as long as their job does. There is no
-`innerHTML` path that user data can reach, and file names — the only text that
-comes from outside — are set as `textContent`.
+Media processing makes no network requests and the app has no backend to talk to.
+With project saving enabled, source files, options and results are copied into
+same-origin IndexedDB so work can survive a reload. They remain on the device
+and are available only to this origin, but they still occupy disk space and the
+browser or user can delete them. Turning saving off stops future autosaves; the
+explicit **Borrar todos los proyectos locales** action removes previous copies.
+
+There is no `innerHTML` path that user data can reach, and file names — the only
+text that comes from outside — are set as `textContent`.
 
 The parts worth auditing are the ones that parse untrusted bytes:
 [`src/media/probe.js`](src/media/probe.js) reads FFmpeg's own output, and
@@ -242,8 +256,14 @@ Worth knowing before you file an issue:
 - **Progress is an estimate.** It comes from the output timestamp FFmpeg has
   reached, so a two-pass job reports each pass as half the work whether or not
   it takes half the time.
-- **Everything is per tab.** Closing it loses the queue. Nothing is persisted
-  because nothing should be: these are your files.
+- **Local storage is finite and browser-managed.** Saving a 500 MB source uses
+  roughly another 500 MB of disk before any result is retained. MediaForge
+  checks the reported quota and surfaces storage failures, but the browser may
+  evict best-effort data. **Configuración** can request persistent storage; the browser
+  decides whether to grant it.
+- **Private browsing is temporary.** A private window may reject local project
+  storage or discard it when the private session ends. The converter remains
+  usable for the current tab when saving cannot be opened.
 - Browsers vary: module workers need Firefox 114+, MediaForge's SIMD core needs
   Safari 16.4+, and the threaded core needs headers no static host sends by
   default.

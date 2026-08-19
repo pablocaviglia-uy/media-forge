@@ -494,6 +494,14 @@ html[data-interface="forge"] .statusbar {
   border-top-color: var(--border);
 }
 
+html[data-interface="forge"] .status-storage {
+  min-height: 20px;
+  padding: 0.1rem 0.55rem;
+  background: color-mix(in srgb, currentColor 9%, transparent);
+  border: 1px solid color-mix(in srgb, currentColor 24%, transparent);
+  border-radius: 999px;
+}
+
 html[data-interface="forge"] .sheet {
   background: var(--bg-raised);
   border-color: var(--border-strong);
@@ -518,6 +526,55 @@ html[data-interface="forge"] .sheet-head h2 {
 
 html[data-interface="forge"] .sheet-body {
   padding: 1.1rem;
+}
+
+html[data-interface="forge"] .setting-storage {
+  padding: 0.9rem;
+  background: color-mix(in srgb, var(--accent-soft) 48%, var(--bg-raised));
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border));
+  border-radius: 14px;
+}
+
+html[data-interface="forge"] .setting-storage > h3 {
+  color: var(--accent);
+}
+
+html[data-interface="forge"] .storage-status {
+  background: color-mix(in srgb, var(--bg-raised) 86%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 14%, var(--border));
+  border-radius: 10px;
+}
+
+html[data-interface="forge"] .storage-actions .text-button {
+  min-height: 34px;
+  padding-inline: 0.65rem;
+  border: 1px solid var(--border);
+}
+
+html[data-interface="forge"] .storage-actions .text-button.danger {
+  border-color: color-mix(in srgb, var(--danger) 32%, var(--border));
+}
+
+html[data-interface="forge"] .project-relink-card {
+  padding: 1rem;
+  background: color-mix(in srgb, var(--warn-soft) 76%, var(--bg-raised));
+  border-color: color-mix(in srgb, var(--warn) 30%, var(--border));
+  border-radius: 14px;
+  box-shadow: var(--shadow-sm);
+}
+
+html[data-interface="forge"] .project-relink-icon {
+  width: 42px;
+  height: 42px;
+}
+
+html[data-interface="forge"] .project-relink-actions .text-button,
+html[data-interface="forge"] .project-relink-actions .primary-button {
+  min-height: 36px;
+}
+
+html[data-interface="forge"] .project-relink-actions .text-button {
+  border: 1px solid color-mix(in srgb, var(--warn) 22%, var(--border));
 }
 
 /* ------------------------------------------------------------------ *
@@ -1080,6 +1137,13 @@ html[data-interface="forge"] .detail[data-workspace="quick-tool"] {
 
 html[data-interface="forge"] .detail[data-workspace="quick-tool"] > #preview {
   display: none;
+}
+
+/* A metadata-only restore can still know which Quick tool owns the project.
+   Its missing-source recovery lives in #preview, so it must override the
+   normal Quick workspace rule that hides the legacy preview container. */
+html[data-interface="forge"] .detail[data-workspace="quick-tool"] > #preview:has(.project-relink-card) {
+  display: grid;
 }
 
 html[data-interface="forge"] .detail[data-workspace="quick-tool"] > .detail-head {

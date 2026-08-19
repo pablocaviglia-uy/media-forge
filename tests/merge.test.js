@@ -62,7 +62,10 @@ test('createMergeClip gives each clip stable identity and pending probe state', 
     error: null,
   });
   assert.notEqual(generatedA.id, generatedB.id);
-  assert.match(generatedA.id, /^merge-clip-\d+$/);
+  assert.match(
+    generatedA.id,
+    /^merge-clip-(?:[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}|legacy-[a-z0-9-]+)$/,
+  );
   assert.equal(first.id, 'intro');
 });
 

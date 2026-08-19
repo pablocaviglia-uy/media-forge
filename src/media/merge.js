@@ -7,6 +7,8 @@
  * No DOM, File reads or FFmpeg calls live here.
  */
 
+import { createPersistentId } from '../storage/ids.js';
+
 export const MERGE_TOOL_ID = 'video-merge';
 export const MERGE_OPERATION = 'join-videos';
 
@@ -18,8 +20,6 @@ export const MERGE_MAX_CLIPS = 24;
 // also makes a transferable copy, so an aggregate guard must be stricter than
 // the converter's per-file limit.
 export const MERGE_SAFE_BYTES = 350 * 1024 * 1024;
-
-let nextMergeClipId = 1;
 
 const clipsOf = (projectOrClips) => {
   if (Array.isArray(projectOrClips)) return projectOrClips;
@@ -69,7 +69,7 @@ export function createMergeClip(file, id = null) {
   if (!Number.isFinite(size) || size < 0) throw new TypeError('A merge clip needs a valid file size.');
 
   const stableId = id === null || id === undefined || String(id).trim() === ''
-    ? `merge-clip-${nextMergeClipId++}`
+    ? createPersistentId('merge-clip')
     : String(id);
 
   return {

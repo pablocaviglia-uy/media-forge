@@ -18,6 +18,9 @@ Almost everything below is a consequence of that sentence.
         │
         ├── refuse it if it is over 500 MB          app.js
         │
+        ├── save a recoverable project copy ──────► storage/projects.js
+        │     manifest + source File/Blob             IndexedDB
+        │
         ├── probe ────────────────────────────────► worker
         │     ffprobe -print_format json -o report.json
         │     parseProbeJson(report)                 media/probe.js
@@ -37,12 +40,67 @@ Almost everything below is a consequence of that sentence.
         │     progress ◄──── out_time_us= on the pipe
         │     FS.readFile(output).slice()
         │
-        └── outputs come back as transferred bytes ──► Blob ──► download
+        └── outputs come back as transferred bytes ──► Blob
+              ├── save the new project revision ──► IndexedDB
+              └── download on explicit request
 ```
 
 Every arrow crossing to the worker is a `postMessage` carrying an id, and every
 reply carries the same id back. A reply that forgets it is a promise that never
 settles, which is a mistake worth making only once.
+
+## Local projects
+
+There are two browser-storage layers, with deliberately different jobs:
+
+- `localStorage` holds only small preferences that must be available before
+  first paint, including whether project autosave is enabled. It is synchronous
+  and far too small for media.
+- IndexedDB holds versioned project records and their `File`/`Blob` values. It
+  is asynchronous, transactional and can store the bytes without turning them
+  into base64. There is no server-side copy and the service worker's Cache
+  Storage contains app assets only, never user media.
+
+`storage/projects.js` is the boundary around IndexedDB. UI code deals in
+project snapshots rather than object-store requests, which keeps schema
+migrations, validation, quota failures and test doubles out of `app.js`.
+Identifiers come from `storage/ids.js`; a counter that restarts at one would
+collide with a restored project after every reload.
+
+Schema v1 uses five stores: `projects`, `assets`, `outputs`, `blobs` and
+`meta`. Media bytes live only in `blobs`; descriptors and editing state stay
+small, and stable blob identities mean an option edit does not rewrite a
+500 MB source. A workspace revision provides optimistic conflict detection.
+`BroadcastChannel` announces commits to other tabs; a tab that sees an external
+change stops autosaving and asks for a reload instead of silently overwriting
+the other editor.
+
+Autosave is continuous. Source changes and completed outputs are written when
+they happen, while option-only changes are coalesced so dragging a control does
+not open dozens of transactions. `pagehide` requests one final best-effort save
+after flushing preferences, but correctness never depends on an asynchronous
+unload write that the browser is free to cut short.
+
+Startup hydrates manifests before the engine is needed. Runtime-only state —
+object URLs, DOM references, worker handles and progress clocks — is rebuilt,
+not serialized. A project that was `queued` or `running` when the page vanished
+returns as interrupted work that can be started again; FFmpeg cannot resume an
+encode in the middle. Object URLs are always revoked on the same lifecycle as
+in-memory previews.
+
+The browser owns the quota. `navigator.storage.estimate()` gives the Settings
+sheet a useful, approximate usage report, and `navigator.storage.persist()` can
+request protection from storage-pressure eviction after an explicit user
+action. Neither is a promise of a particular number of bytes. A failed or full
+database does not make the in-memory editor or converter unusable. If media
+bytes exceed quota but metadata still fits, the edit graph is preserved and
+the restored project asks the user to reconnect its original files. A failed
+replacement output never evicts the last output that was already durable.
+
+Turning autosave off stops new writes; it intentionally does not destroy data
+as a side effect of a checkbox. Removing a project removes its stored record,
+and the destructive Settings action clears every local project. Clearing site
+data or ending a private-browsing session can do the same outside the app.
 
 ## One job at a time
 

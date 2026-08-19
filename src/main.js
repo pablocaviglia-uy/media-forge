@@ -44,7 +44,8 @@ function reportFatal(error) {
 
 const app = new App();
 
-app.start().then(
+app.ready = app.start();
+app.ready.then(
   () => {
     window.addEventListener('media-forge:update-ready', () => {
       app.toast('A new version is ready.', {

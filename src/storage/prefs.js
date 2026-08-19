@@ -3,8 +3,8 @@
  *
  * These are small, must be readable synchronously before the first paint (to
  * avoid a theme flash), and describe how the app looks and behaves rather than
- * what is in the queue — the queue is deliberately not persisted, because the
- * `File` objects it holds cannot outlive the tab anyway.
+ * what is in the queue. Project manifests and their `File`/`Blob` data live in
+ * IndexedDB instead; only the user's opt-in and UI preferences belong here.
  *
  * Reads go through an in-memory cache; writes are debounced and mirrored across
  * tabs via the `storage` event.
@@ -18,6 +18,7 @@ export const DEFAULTS = {
   queueOpen: true,
   logOpen: false,
   autoStart: false, // start converting the moment files are dropped
+  persistProjects: true, // keep recoverable project copies in this browser
   preset: 'mp4-h264', // the target selected for a freshly added file
   advanced: false, // show codec-level controls and the command preview
   queueWidth: 320,

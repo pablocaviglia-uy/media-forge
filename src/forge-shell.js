@@ -12,6 +12,9 @@ import { prefs } from './storage/prefs.js';
 
 if (document.documentElement.dataset.interface === 'forge') {
   const app = window.mediaForge;
+  // Do not accept a launcher/file intent until IndexedDB hydration has either
+  // restored the previous workspace or cleanly degraded to session-only mode.
+  await app.ready;
   const launcher = document.querySelector('#tool-launcher');
   const queryInput = document.querySelector('#forge-launcher-query');
   const toolList = document.querySelector('#forge-tool-list');
