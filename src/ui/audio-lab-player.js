@@ -43,6 +43,13 @@ const finiteTime = (value, fallback = 0) => {
 };
 
 const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+const PEAK_STATUSES = new Set(['idle', 'loading', 'ready', 'unavailable']);
+
+const normalizePeakStatus = (value, hasPeaks = false) => {
+  if (hasPeaks) return 'ready';
+  if (value === 'ready') return 'idle';
+  return PEAK_STATUSES.has(value) ? value : 'idle';
+};
 
 /**
  * Clamp a proposed range to an audio duration without allowing its edges to
@@ -220,6 +227,8 @@ function button(label, action, text, attrs = {}) {
  * @param {string} [options.name]
  * @param {number|null} [options.duration]
  * @param {Iterable<number|[number, number]|{min: number, max: number}>|null} [options.peaks]
+ * @param {'idle'|'loading'|'ready'|'unavailable'} [options.peaksStatus]
+ * @param {string|null} [options.peaksMessage]
  * @param {AudioLabSelection|null} [options.selection]
  * @param {AudioLabSelection|null} [options.selectionBounds] Allowed range of the active fragment, on the root clock.
  * @param {boolean} [options.loop]
@@ -231,6 +240,7 @@ function button(label, action, text, attrs = {}) {
  * @param {(loop: boolean, context: {source: 'button'|'shortcut'}) => void} [options.onLoopChange]
  * @param {(selection: AudioLabSelection, context: {name: string, duration: number}) => boolean|void|Promise<boolean>} [options.onCreateFragment]
  * @param {(state: {selection: AudioLabSelection, view: AudioLabView, currentTime: number, loop: boolean}) => void} [options.onOpenLab]
+ * @param {() => void|Promise<unknown>} [options.onRetryPeaks]
  * @returns {{
  *   node: HTMLElement,
  *   media: HTMLAudioElement,
@@ -254,6 +264,8 @@ export function createAudioLabPlayer(options = {}) {
     name: 'Audio',
     duration: null,
     peaks: null,
+    peaksStatus: 'idle',
+    peaksMessage: null,
     selection: null,
     selectionBounds: null,
     loop: false,
@@ -265,6 +277,7 @@ export function createAudioLabPlayer(options = {}) {
     onLoopChange: null,
     onCreateFragment: null,
     onOpenLab: null,
+    onRetryPeaks: null,
     ...options,
   };
   let duration = finiteDuration(config.duration);
@@ -312,10 +325,14 @@ export function createAudioLabPlayer(options = {}) {
     height: 180,
     attrs: { 'aria-hidden': 'true' },
   });
-  const fallback = el('p', {
-    class: 'audio-lab-waveform-fallback',
-    text: 'La forma de onda todavía no está disponible. Podés reproducir y elegir tiempos igualmente.',
+  const fallbackText = el('span', {
+    class: 'audio-lab-waveform-fallback-copy',
   });
+  const retryPeaksButton = button('Reintentar el análisis de la forma de onda', 'retry-peaks', 'Reintentar');
+  const fallback = el('div', {
+    class: 'audio-lab-waveform-fallback',
+    attrs: { role: 'status', 'aria-live': 'polite' },
+  }, [fallbackText, retryPeaksButton]);
   const selectionBadge = el('span', { class: 'audio-lab-selection-badge' });
   const selectionBand = el('span', {
     class: 'audio-lab-selection-band',
@@ -406,7 +423,7 @@ export function createAudioLabPlayer(options = {}) {
 
   const node = el('section', {
     class: 'audio-lab-player',
-    dataset: { disabled: String(disabled), peaks: peaks.length ? 'ready' : 'unavailable' },
+    dataset: { disabled: String(disabled), peaks: normalizePeakStatus(config.peaksStatus, peaks.length > 0) },
     attrs: {
       'aria-labelledby': titleId,
       'aria-describedby': helpId,
@@ -674,8 +691,16 @@ export function createAudioLabPlayer(options = {}) {
   }
 
   function paintWaveform() {
-    node.dataset.peaks = peaks.length ? 'ready' : 'unavailable';
-    fallback.hidden = peaks.length > 0;
+    const peakStatus = normalizePeakStatus(config.peaksStatus, peaks.length > 0);
+    node.dataset.peaks = peakStatus;
+    fallback.hidden = peakStatus === 'ready';
+    fallbackText.textContent = peakStatus === 'loading'
+      ? 'Analizando la forma de onda…'
+      : peakStatus === 'unavailable'
+        ? String(config.peaksMessage || 'No se pudo generar la forma de onda en este navegador.')
+        : 'Preparando la forma de onda…';
+    retryPeaksButton.hidden = peakStatus !== 'unavailable' || typeof config.onRetryPeaks !== 'function';
+    retryPeaksButton.disabled = peakStatus === 'loading';
     const context = typeof canvas.getContext === 'function' ? canvas.getContext('2d') : null;
     if (!context) return;
 
@@ -1282,6 +1307,21 @@ export function createAudioLabPlayer(options = {}) {
     on(markFromButton, 'click', () => setSelectionEdge('from', currentTime(), { source: 'mark', commit: true })),
     on(markToButton, 'click', () => setSelectionEdge('to', currentTime(), { source: 'mark', commit: true })),
     on(createFragmentButton, 'click', createSelectedFragment),
+    on(retryPeaksButton, 'pointerdown', (event) => event.stopPropagation()),
+    on(retryPeaksButton, 'click', (event) => {
+      event.stopPropagation();
+      if (disabled || typeof config.onRetryPeaks !== 'function') return;
+      config.peaksStatus = 'loading';
+      config.peaksMessage = null;
+      paintWaveform();
+      try {
+        Promise.resolve(config.onRetryPeaks()).catch(() => {});
+      } catch {
+        config.peaksStatus = 'unavailable';
+        config.peaksMessage = 'No se pudo reintentar el análisis de la forma de onda.';
+        paintWaveform();
+      }
+    }),
     on(openLabButton, 'click', () => {
       if (disabled || typeof config.onOpenLab !== 'function') return;
       config.onOpenLab({
@@ -1395,6 +1435,8 @@ export function createAudioLabPlayer(options = {}) {
       if (sourceWillChange) {
         if (!own(next, 'duration')) config.duration = null;
         if (!own(next, 'peaks')) config.peaks = null;
+        if (!own(next, 'peaksStatus')) config.peaksStatus = 'idle';
+        if (!own(next, 'peaksMessage')) config.peaksMessage = null;
         duration = finiteDuration(config.duration);
         peaks = normalizeAudioPeaks(config.peaks);
         pendingSelection = own(next, 'selection') && next.selection ? { ...next.selection } : null;
@@ -1451,6 +1493,9 @@ export function createAudioLabPlayer(options = {}) {
       render();
       if (
         own(next, 'peaks')
+        || own(next, 'peaksStatus')
+        || own(next, 'peaksMessage')
+        || own(next, 'onRetryPeaks')
         || own(next, 'duration')
         || own(next, 'selection')
         || own(next, 'selectionBounds')

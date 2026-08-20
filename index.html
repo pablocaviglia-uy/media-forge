@@ -292,7 +292,13 @@
     <button type="button" class="forge-filter" data-filter-availability="available">Disponibles hoy</button>
   </div>
   <p class="forge-result-summary" id="forge-result-summary" aria-live="polite"></p>
-  <div class="forge-tool-list" id="forge-tool-list"></div>
+  <div class="forge-tool-scroll">
+    <div class="forge-tool-list" id="forge-tool-list"></div>
+    <div class="forge-tool-scroll-cue" id="forge-tool-scroll-cue" aria-hidden="true" hidden>
+      <span>Desplazá para ver más acciones</span>
+      <span class="forge-tool-scroll-arrow">↓</span>
+    </div>
+  </div>
 </dialog>
 
 <div class="drop-overlay" id="drop-overlay" hidden>

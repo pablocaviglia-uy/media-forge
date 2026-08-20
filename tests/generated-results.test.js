@@ -479,6 +479,46 @@ test('audio results use the custom waveform player without native chrome or lega
   }
 });
 
+test('audio results forward a visible waveform retry with result context', async () => {
+  const restoreDocument = installFakeDocument();
+  const retries = [];
+  try {
+    const result = { id: 'audio-1', name: 'session.mp3', url: 'blob:caller-audio', duration: 207 };
+    const control = createGeneratedResults({
+      results: [result],
+      audioLabStateByResult: {
+        'audio-1': {
+          peaksStatus: 'unavailable',
+          peaksMessage: 'El análisis tardó demasiado.',
+        },
+      },
+      onRetryAudioPeaks: (...args) => retries.push(args),
+    });
+
+    const retry = control.node.querySelector('[data-audio-lab-action="retry-peaks"]');
+    assert.equal(retry.hidden, false);
+    assert.match(control.node.querySelector('.audio-lab-waveform-fallback-copy').textContent, /tardó demasiado/);
+    retry.dispatch('click');
+    await Promise.resolve();
+    assert.equal(retries.length, 1);
+    assert.equal(retries[0][0], result);
+    assert.deepEqual(
+      { id: retries[0][1].id, index: retries[0][1].index },
+      { id: 'audio-1', index: 0 },
+    );
+
+    control.update({
+      audioLabStateByResult: {
+        'audio-1': { peaksStatus: 'ready', peaks: [{ min: -0.2, max: 0.5 }] },
+      },
+    });
+    assert.equal(control.node.querySelector('.audio-lab-player').dataset.peaks, 'ready');
+    control.destroy();
+  } finally {
+    restoreDocument();
+  }
+});
+
 test('same-source state and callback updates preserve a duration learned from media metadata', () => {
   const restoreDocument = installFakeDocument();
 

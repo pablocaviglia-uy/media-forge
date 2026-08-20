@@ -398,6 +398,48 @@ test('the custom player exposes accessible controls and keyboard-driven fragment
   }
 });
 
+test('waveform analysis distinguishes loading, failure, retry and ready states', async () => {
+  const env = installBrowserFakes();
+  try {
+    let retries = 0;
+    const control = createAudioLabPlayer({
+      url: 'blob:caller-owned',
+      name: 'Long take.mp3',
+      duration: 207,
+      peaksStatus: 'loading',
+      onRetryPeaks: () => { retries += 1; },
+    });
+    const fallback = control.node.querySelector('.audio-lab-waveform-fallback');
+    const fallbackCopy = control.node.querySelector('.audio-lab-waveform-fallback-copy');
+    const retry = action(control, 'retry-peaks');
+
+    assert.equal(control.node.dataset.peaks, 'loading');
+    assert.match(fallbackCopy.textContent, /Analizando/);
+    assert.equal(retry.hidden, true);
+
+    control.update({
+      peaksStatus: 'unavailable',
+      peaksMessage: 'El navegador no terminó de decodificar el audio.',
+    });
+    assert.equal(control.node.dataset.peaks, 'unavailable');
+    assert.match(fallbackCopy.textContent, /no terminó/);
+    assert.equal(retry.hidden, false);
+
+    retry.dispatch('click');
+    await Promise.resolve();
+    assert.equal(retries, 1);
+    assert.equal(control.node.dataset.peaks, 'loading');
+    assert.match(fallbackCopy.textContent, /Analizando/);
+
+    control.update({ peaksStatus: 'ready', peaks: [{ min: -0.5, max: 0.75 }] });
+    assert.equal(control.node.dataset.peaks, 'ready');
+    assert.equal(fallback.hidden, true);
+    control.destroy();
+  } finally {
+    env.restore();
+  }
+});
+
 test('selection playback loops and stops at its boundary through requestAnimationFrame', () => {
   const env = installBrowserFakes();
   try {

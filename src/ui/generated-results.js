@@ -357,7 +357,7 @@ function sourceNode(source, selectable = false) {
  *   followLatest?: boolean,
  *   allowRemove?: boolean,
  *   storageStatus?: 'saving'|'saved'|'error'|'off'|'persisted'|'session',
- *   audioLabStateByResult?: Record<string, {selection?: {from: number, to: number}|null, peaks?: Iterable<number|[number, number]|{min: number, max: number}>|null, loop?: boolean, disabled?: boolean}>,
+ *   audioLabStateByResult?: Record<string, {selection?: {from: number, to: number}|null, peaks?: Iterable<number|[number, number]|{min: number, max: number}>|null, peaksStatus?: 'idle'|'loading'|'ready'|'unavailable', peaksMessage?: string|null, loop?: boolean, disabled?: boolean}>,
  *   audioLabState?: object|null,
  *   audioLabExpandedId?: string|number|null,
  *   onSelectSource?: (source: object|null) => void,
@@ -373,6 +373,7 @@ function sourceNode(source, selectable = false) {
  *   onOpenAudioLab?: (result: GeneratedResult, playerState: {selection: object, view: object, currentTime: number, loop: boolean}, context: {id: string, index: number, audioLabState: object|null}) => void,
  *   onSelectAudioNode?: (nodeId: string, context: {result: GeneratedResult, id: string, index: number, node: object}) => void,
  *   onAudioLabExpandedChange?: (id: string|null, context: {result: GeneratedResult|null, reason: 'open'|'close'|'api'}) => void,
+ *   onRetryAudioPeaks?: (result: GeneratedResult, context: {id: string, index: number, audioLabState: object|null}) => void|Promise<unknown>,
  * }} options
  * @returns {{
  *   node: HTMLElement,
@@ -579,6 +580,15 @@ export function createGeneratedResults(options = {}) {
         audioLabState: canonicalAudioLabState(current),
       });
     },
+    onRetryPeaks: typeof config.onRetryAudioPeaks === 'function' ? () => {
+      const current = resultById(resultId);
+      if (!current) return null;
+      return config.onRetryAudioPeaks(current.original, {
+        id: current.id,
+        index: resultIndex(current.id),
+        audioLabState: canonicalAudioLabState(current),
+      });
+    } : null,
   });
 
   const audioPlayerOptions = (result, { includeState = true } = {}) => {
@@ -615,6 +625,12 @@ export function createGeneratedResults(options = {}) {
     if (includeState) {
       next.selection = Object.prototype.hasOwnProperty.call(state, 'selection') ? state.selection : null;
       next.peaks = Object.prototype.hasOwnProperty.call(state, 'peaks') ? state.peaks : null;
+      next.peaksStatus = Object.prototype.hasOwnProperty.call(state, 'peaksStatus')
+        ? state.peaksStatus
+        : (next.peaks ? 'ready' : 'idle');
+      next.peaksMessage = Object.prototype.hasOwnProperty.call(state, 'peaksMessage')
+        ? state.peaksMessage
+        : null;
       next.loop = Boolean(state.loop);
       next.disabled = Boolean(state.disabled);
     }

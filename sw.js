@@ -16,8 +16,8 @@
  * the single exception called out at IMMUTABLE.
  */
 
-// v18 replaces the generic option wall with a contextual conversion workspace.
-const CACHE_VERSION = 'v18';
+// v19 makes waveform analysis recoverable and keeps the catalogue scrollable.
+const CACHE_VERSION = 'v19';
 const CACHE_NAME = `media-forge-${CACHE_VERSION}`;
 
 /**

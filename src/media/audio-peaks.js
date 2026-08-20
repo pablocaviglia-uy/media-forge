@@ -10,6 +10,18 @@
 export const AUDIO_PEAKS_DEFAULT_BUCKETS = 2_048;
 const WEB_AUDIO_BYTES_PER_SAMPLE = 4;
 
+export const AUDIO_PEAKS_DEFAULT_TIMEOUTS = Object.freeze({
+  // Blob reads are local, but a broken storage-backed Blob must not hold the
+  // process-wide decoder gate forever.
+  readMs: 30_000,
+  // The largest admitted source can expand to 256 MB of PCM. Leave ample room
+  // for slower mobile decoders while still guaranteeing eventual recovery.
+  decodeMs: 120_000,
+  // Closing is cleanup. Browsers occasionally leave this promise pending,
+  // especially after an interrupted Web Audio context.
+  closeMs: 2_000,
+});
+
 export const AUDIO_PEAKS_DEFAULT_LIMITS = Object.freeze({
   maxSourceBytes: 64 * 1024 * 1024,
   maxDurationSeconds: 15 * 60,
@@ -133,6 +145,31 @@ function normalizeBucketCount(value, limits) {
     );
   }
   return buckets;
+}
+
+function normalizeTimeouts(overrides = {}) {
+  if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) {
+    fail('invalid-timeouts', 'Los tiempos máximos de la forma de onda no son válidos.');
+  }
+  const timeouts = { ...AUDIO_PEAKS_DEFAULT_TIMEOUTS, ...overrides };
+  for (const key of ['readMs', 'decodeMs', 'closeMs']) {
+    if (!finitePositive(timeouts[key])) {
+      fail('invalid-timeouts', `El tiempo máximo ${key} debe ser un número positivo.`, {
+        key,
+        value: timeouts[key],
+      });
+    }
+    // Runtime callers may tighten these deadlines but cannot turn a bounded
+    // lifecycle back into an effectively unbounded one.
+    if (timeouts[key] > AUDIO_PEAKS_DEFAULT_TIMEOUTS[key]) {
+      fail('unsafe-timeouts', `El tiempo máximo ${key} no puede superar el límite incorporado.`, {
+        key,
+        requested: timeouts[key],
+        safeMaximum: AUDIO_PEAKS_DEFAULT_TIMEOUTS[key],
+      });
+    }
+  }
+  return Object.freeze(timeouts);
 }
 
 function normalizeDuration(value) {
@@ -376,6 +413,81 @@ function raceWithAbort(promise, signal, stage) {
   });
 }
 
+const TIMEOUT_ERRORS = Object.freeze({
+  reading: Object.freeze({
+    code: 'read-timeout',
+    message: 'La lectura del audio tardó demasiado.',
+  }),
+  decoding: Object.freeze({
+    code: 'decode-timeout',
+    message: 'La decodificación del audio tardó demasiado.',
+  }),
+  closing: Object.freeze({
+    code: 'context-close-timeout',
+    message: 'El cierre del contexto de audio tardó demasiado.',
+  }),
+});
+
+/** Bound one browser promise and keep late resolve/reject events observed. */
+function raceWithTimeout(promise, timeoutMs, stage) {
+  const timeout = TIMEOUT_ERRORS[stage];
+  if (!timeout) {
+    fail('invalid-timeout-stage', 'La etapa temporizada de la forma de onda no es válida.', { stage });
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback(value);
+    };
+    const timer = setTimeout(() => finish(
+      reject,
+      new AudioPeaksError(timeout.code, timeout.message, { stage, timeoutMs }),
+    ), timeoutMs);
+    Promise.resolve(promise).then(
+      (value) => finish(resolve, value),
+      (error) => finish(reject, error),
+    );
+  });
+}
+
+/** Abortable and bounded stage with eager listener/timer cleanup. */
+function raceStage(promise, signal, stage, timeoutMs) {
+  if (!signal) return raceWithTimeout(promise, timeoutMs, stage);
+  throwIfAborted(signal, stage);
+  const timeout = TIMEOUT_ERRORS[stage];
+  if (!timeout) {
+    fail('invalid-timeout-stage', 'La etapa temporizada de la forma de onda no es válida.', { stage });
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+    };
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback(value);
+    };
+    const onAbort = () => finish(reject, aborted(stage));
+    const timer = setTimeout(() => finish(
+      reject,
+      new AudioPeaksError(timeout.code, timeout.message, { stage, timeoutMs }),
+    ), timeoutMs);
+    signal.addEventListener('abort', onAbort, { once: true });
+    // Abort can happen between the check above and listener registration.
+    if (signal.aborted) onAbort();
+    Promise.resolve(promise).then(
+      (value) => finish(resolve, value),
+      (error) => finish(reject, error),
+    );
+  });
+}
+
 function defaultAudioContextFactory(contextOptions) {
   const AudioContextClass = globalThis.AudioContext || globalThis.webkitAudioContext;
   if (typeof AudioContextClass !== 'function') {
@@ -460,7 +572,7 @@ function serializeDecode(signal, operation) {
   return queued;
 }
 
-function sharedExtraction(blob, bucketCount, createAudioContext, contextSampleRate) {
+function sharedExtraction(blob, bucketCount, createAudioContext, contextSampleRate, timeouts) {
   let entries = inFlightCache.get(blob);
   if (!entries) {
     entries = new Map();
@@ -493,6 +605,7 @@ function sharedExtraction(blob, bucketCount, createAudioContext, contextSampleRa
     controller.signal,
     createAudioContext,
     contextSampleRate,
+    timeouts,
   ))
     .then((result) => {
       throwIfAborted(controller.signal, 'no-consumers');
@@ -519,15 +632,16 @@ async function consumeSharedExtraction(
   bucketCount,
   createAudioContext,
   contextSampleRate,
+  timeouts,
   signal,
 ) {
   // A new caller can arrive while an abandoned context is closing. Wait for
   // that cleanup before replacing the entry so two decodes for the same Blob
   // and bucket cannot overlap.
-  let entry = sharedExtraction(blob, bucketCount, createAudioContext, contextSampleRate);
+  let entry = sharedExtraction(blob, bucketCount, createAudioContext, contextSampleRate, timeouts);
   while (entry.cancelled && !entry.settled) {
     await raceWithAbort(entry.operation.catch(() => undefined), signal, 'waiting-for-cancelled-decode');
-    entry = sharedExtraction(blob, bucketCount, createAudioContext, contextSampleRate);
+    entry = sharedExtraction(blob, bucketCount, createAudioContext, contextSampleRate, timeouts);
   }
 
   entry.consumers += 1;
@@ -556,11 +670,12 @@ async function decodePeaks(
   signal,
   createAudioContext,
   contextSampleRate,
+  timeouts,
 ) {
   throwIfAborted(signal, 'before-read');
   let bytes;
   try {
-    bytes = await raceWithAbort(blob.arrayBuffer(), signal, 'reading');
+    bytes = await raceStage(blob.arrayBuffer(), signal, 'reading', timeouts.readMs);
   } catch (error) {
     if (error instanceof AudioPeaksError) throw error;
     throw new AudioPeaksError('read-failed', 'No se pudo leer el audio local.', {
@@ -573,7 +688,6 @@ async function decodePeaks(
 
   throwIfAborted(signal, 'before-decode');
   let context;
-  let primaryError = null;
   try {
     try {
       context = createAudioContext({ sampleRate: contextSampleRate });
@@ -589,7 +703,12 @@ async function decodePeaks(
     validateAudioContextSampleRate(context, contextSampleRate);
     let audioBuffer;
     try {
-      audioBuffer = await raceWithAbort(decodeAudioDataCompat(context, bytes), signal, 'decoding');
+      audioBuffer = await raceStage(
+        decodeAudioDataCompat(context, bytes),
+        signal,
+        'decoding',
+        timeouts.decodeMs,
+      );
     } catch (error) {
       if (error instanceof AudioPeaksError) throw error;
       throw new AudioPeaksError('decode-failed', 'No se pudo decodificar este archivo de audio.', {
@@ -611,19 +730,21 @@ async function decodePeaks(
     }
     throwIfAborted(signal, 'after-downsample');
     return publicResult(metadata, peaks);
-  } catch (error) {
-    primaryError = error;
-    throw error;
   } finally {
     if (context && typeof context.close === 'function') {
       try {
-        await context.close();
-      } catch (error) {
-        if (!primaryError) {
-          throw new AudioPeaksError('context-close-failed', 'No se pudo cerrar el contexto de audio.', {
-            cause: error?.message || String(error),
-          });
-        }
+        await raceWithTimeout(
+          Promise.resolve().then(() => context.close()),
+          timeouts.closeMs,
+          'closing',
+        );
+      } catch {
+        // Cleanup is best-effort. Once peaks exist, a rejected or stuck close
+        // promise must not erase useful work. When another stage already
+        // failed, suppressing the cleanup failure preserves the more
+        // actionable primary public error.
+        // The bounded wait still guarantees the serialized decoder gate is
+        // released even when the browser never settles `close()`.
       }
     }
   }
@@ -639,6 +760,8 @@ async function decodePeaks(
  * supplied from trusted probe metadata. Missing values fall back independently
  * to a conservative 96 kHz / 8-channel estimate; callers must not pass
  * user-entered values to relax that preflight.
+ * `timeouts` may tighten the built-in read/decode/close deadlines for tests or
+ * constrained hosts, but cannot weaken the guarantee that each stage settles.
  * `createAudioContext` is injectable for tests and receives the same standard
  * `{ sampleRate }` options object used by the native AudioContext constructor.
  */
@@ -647,6 +770,7 @@ export async function extractAudioPeaks(blob, options = {}) {
   throwIfAborted(signal, 'start');
   if (!isBlobLike(blob)) fail('invalid-blob', 'Se necesita un Blob de audio local válido.');
   const limits = normalizeLimits(options.limits);
+  const timeouts = normalizeTimeouts(options.timeouts);
   const bucketCount = normalizeBucketCount(options.bucketCount, limits);
   const duration = normalizeDuration(options.duration);
   const pcmHint = normalizePcmHint(options, limits);
@@ -670,6 +794,7 @@ export async function extractAudioPeaks(blob, options = {}) {
     bucketCount,
     createAudioContext,
     pcmHint.sampleRate,
+    timeouts,
     signal,
   );
   validateDecodedSummary(result, limits);

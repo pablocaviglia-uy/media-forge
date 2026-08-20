@@ -2434,12 +2434,20 @@ export class App {
     if (!output?.id || !output.blob || !Number.isFinite(duration) || duration <= 0) return null;
     const sampleRateValue = Number(result.metadata?.sampleRate ?? job.info?.audio?.sampleRate);
     const channelsValue = Number(result.metadata?.channels ?? job.info?.audio?.channels);
+    const outputType = String(output.type || result.metadata?.mime || output.blob.type || '').toLowerCase();
+    const outputName = String(output.name || result.downloadName || '').toLowerCase();
+    // MP3 is defined for at most 48 kHz and mono/stereo. Older durable results
+    // predate these metadata fields, so format-specific ceilings safely avoid
+    // the deliberately harsh 96 kHz / 7.1 fallback rejecting an ordinary file.
+    const isMp3 = outputType === 'audio/mpeg' || outputName.endsWith('.mp3');
+    const mp3SampleRate = isMp3 ? 48_000 : null;
+    const mp3Channels = isMp3 ? 2 : null;
     const sampleRate = Number.isFinite(sampleRateValue) && sampleRateValue > 0
-      ? sampleRateValue
-      : null;
+      ? (isMp3 ? Math.min(48_000, sampleRateValue) : sampleRateValue)
+      : mp3SampleRate;
     const channels = Number.isInteger(channelsValue) && channelsValue > 0
-      ? channelsValue
-      : null;
+      ? (isMp3 ? Math.min(2, channelsValue) : channelsValue)
+      : mp3Channels;
     return {
       history,
       result,
@@ -2522,6 +2530,7 @@ export class App {
       playerStateByResult: {},
     };
     const peakRecord = this.audioPeakCache?.get(context.output.blob);
+    const peakStatus = peakRecord?.status || 'idle';
     return {
       ...context,
       expandedId: context.session.expanded ? context.result.id : null,
@@ -2530,6 +2539,8 @@ export class App {
           selection: context.session.selection,
           loop: context.session.loop,
           peaks: peakRecord?.status === 'ready' ? peakRecord.result.peaks : null,
+          peaksStatus: peakStatus,
+          peaksMessage: peakRecord?.message || null,
         },
       },
     };
@@ -2546,13 +2557,13 @@ export class App {
     });
   }
 
-  prepareAudioPeaks(job, resultId) {
+  prepareAudioPeaks(job, resultId, { force = false } = {}) {
     const context = this.audioLabSessionFor(job, resultId);
     if (!context) return Promise.resolve(null);
     if (!this.audioPeakCache) this.audioPeakCache = new WeakMap();
     const blob = context.output.blob;
     const cached = this.audioPeakCache.get(blob);
-    if (cached?.status === 'ready' || cached?.status === 'unavailable') {
+    if (cached?.status === 'ready' || (cached?.status === 'unavailable' && !force)) {
       return Promise.resolve(cached.result || null);
     }
     if (
@@ -2562,6 +2573,12 @@ export class App {
     ) return this.audioPeakTask.promise;
 
     this.audioPeakTask?.controller.abort();
+    // FFmpeg's WebAssembly memory keeps its high-water mark until its worker
+    // terminates. A waveform decode needs its own PCM allocation, so release
+    // an idle converter before asking Web Audio for tens or hundreds of MB.
+    // Never dispose while another probe or conversion still owns the worker.
+    if (!this.runningId && this.engine?.running === false) this.engine.dispose();
+    if (force) this.audioPeakCache.delete(blob);
     const controller = new AbortController();
     const extractor = this.audioPeaksExtractor || extractAudioPeaks;
     const task = {
@@ -2571,15 +2588,39 @@ export class App {
       controller,
       promise: null,
     };
-    this.audioPeakCache.set(blob, { status: 'loading', result: null });
-    task.promise = Promise.resolve().then(() => extractor(blob, {
+    this.audioPeakCache.set(blob, {
+      status: 'loading',
+      result: null,
+      message: 'Analizando la forma de onda…',
+    });
+    const extractionOptions = {
       duration: context.duration,
       signal: controller.signal,
       ...(context.sampleRate ? { sampleRate: context.sampleRate } : {}),
       ...(context.channels ? { channels: context.channels } : {}),
-    })).then((result) => {
+    };
+    task.promise = Promise.resolve().then(async () => {
+      try {
+        return await extractor(blob, extractionOptions);
+      } catch (error) {
+        // Some browsers expose a 96 kHz device context even when asked for the
+        // trusted 44.1/48 kHz track rate. Retry once with the extractor's
+        // conservative 96 kHz preflight instead of making that device setting
+        // a permanent, unexplained failure.
+        if (
+          error?.code === 'audio-context-sample-rate-too-high'
+          && Object.prototype.hasOwnProperty.call(extractionOptions, 'sampleRate')
+          && !controller.signal.aborted
+        ) {
+          const conservative = { ...extractionOptions };
+          delete conservative.sampleRate;
+          return extractor(blob, conservative);
+        }
+        throw error;
+      }
+    }).then((result) => {
       if (controller.signal.aborted) return null;
-      this.audioPeakCache.set(blob, { status: 'ready', result });
+      this.audioPeakCache.set(blob, { status: 'ready', result, message: null });
       this.refreshGeneratedAudioLab(job);
       return result;
     }).catch((error) => {
@@ -2587,13 +2628,19 @@ export class App {
         this.audioPeakCache.delete(blob);
         return null;
       }
-      this.audioPeakCache.set(blob, { status: 'unavailable', result: null, code: error?.code || 'failed' });
+      this.audioPeakCache.set(blob, {
+        status: 'unavailable',
+        result: null,
+        code: error?.code || 'failed',
+        message: error?.message || 'No se pudo generar la forma de onda en este navegador.',
+      });
       this.refreshGeneratedAudioLab(job);
       return null;
     }).finally(() => {
       if (this.audioPeakTask === task) this.audioPeakTask = null;
     });
     this.audioPeakTask = task;
+    this.refreshGeneratedAudioLab(job);
     return task.promise;
   }
 
@@ -2756,6 +2803,7 @@ export class App {
         if (!context.result?.id) return;
         this.setAudioLabSession(job, context.result.id, { expanded: Boolean(expandedId) });
       },
+      onRetryAudioPeaks: (entry) => this.prepareAudioPeaks(job, entry.id, { force: true }),
     };
 
     if (this.generatedResults?.jobId === job.id) {

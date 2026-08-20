@@ -18,6 +18,7 @@ if (document.documentElement.dataset.interface === 'forge') {
   const launcher = document.querySelector('#tool-launcher');
   const queryInput = document.querySelector('#forge-launcher-query');
   const toolList = document.querySelector('#forge-tool-list');
+  const toolScrollCue = document.querySelector('#forge-tool-scroll-cue');
   const resultSummary = document.querySelector('#forge-result-summary');
   const intentForm = document.querySelector('#forge-intent-form');
   const intentInput = document.querySelector('#forge-intent');
@@ -216,12 +217,25 @@ if (document.documentElement.dataset.interface === 'forge') {
       : 'No encontramos una acción con esos términos.';
 
     for (const button of document.querySelectorAll('[data-filter-workspace]')) {
-      button.classList.toggle('is-active', button.dataset.filterWorkspace === state.workspace);
+      const selected = button.dataset.filterWorkspace === state.workspace;
+      button.classList.toggle('is-active', selected);
+      button.setAttribute('aria-pressed', String(selected));
     }
     for (const button of document.querySelectorAll('[data-filter-availability]')) {
       button.classList.toggle('is-active', state.availability === button.dataset.filterAvailability);
       button.setAttribute('aria-pressed', String(state.availability === button.dataset.filterAvailability));
     }
+
+    toolList.scrollTop = 0;
+    requestAnimationFrame(updateToolScrollCue);
+  }
+
+  function updateToolScrollCue() {
+    const scrollable = toolList.scrollHeight > toolList.clientHeight + 1;
+    const atEnd = toolList.scrollTop + toolList.clientHeight >= toolList.scrollHeight - 1;
+    launcher.dataset.toolOverflow = scrollable ? 'true' : 'false';
+    launcher.dataset.toolScrollEnd = atEnd ? 'true' : 'false';
+    toolScrollCue.hidden = !scrollable || atEnd;
   }
 
   function openLauncher({ workspace = 'all', availability = 'all', query = '' } = {}) {
@@ -235,7 +249,10 @@ if (document.documentElement.dataset.interface === 'forge') {
       if (typeof launcher.showModal === 'function') launcher.showModal();
       else launcher.setAttribute('open', '');
     }
-    requestAnimationFrame(() => queryInput.focus());
+    requestAnimationFrame(() => {
+      updateToolScrollCue();
+      queryInput.focus();
+    });
   }
 
   function closeLauncher() {
@@ -392,6 +409,9 @@ if (document.documentElement.dataset.interface === 'forge') {
     state.query = queryInput.value;
     renderTools();
   });
+
+  toolList.addEventListener('scroll', updateToolScrollCue, { passive: true });
+  window.addEventListener('resize', updateToolScrollCue);
 
   document.querySelector('#forge-launcher-form').addEventListener('submit', (event) => {
     event.preventDefault();

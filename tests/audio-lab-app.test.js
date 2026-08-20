@@ -170,6 +170,107 @@ test('waveform analysis is race-safe and only publishes the currently requested 
   assert.ok(updates.some((entry) => entry.audioLabStateByResult?.['output-two']?.peaks === peaks));
 });
 
+test('waveform failures stay actionable and an explicit retry can recover', async () => {
+  const legacy = audioResult('project-audio', 'result-legacy', 'output-legacy', 207, {});
+  const { app, job, updates } = audioLabApp([legacy]);
+  let disposed = 0;
+  app.engine = {
+    running: false,
+    dispose() { disposed += 1; },
+  };
+  let attempts = 0;
+  app.audioPeaksExtractor = async (_blob, options) => {
+    attempts += 1;
+    assert.equal(options.channels, 2, 'legacy MP3 safely infers its format channel ceiling');
+    assert.equal(options.sampleRate, 48_000, 'legacy MP3 safely infers its format sample-rate ceiling');
+    if (attempts === 1) {
+      const error = new Error('El navegador no terminó de decodificar el audio.');
+      error.code = 'decode-timeout';
+      throw error;
+    }
+    return { status: 'ready', peaks: Object.freeze([{ min: -0.4, max: 0.6 }]), duration: 207 };
+  };
+
+  assert.equal(await app.prepareAudioPeaks(job, legacy.id), null);
+  assert.equal(disposed, 1, 'an idle FFmpeg heap is released before decoding PCM');
+  const failed = app.audioPeakCache.get(legacy.outputs[0].blob);
+  assert.equal(failed.status, 'unavailable');
+  assert.equal(failed.code, 'decode-timeout');
+  assert.match(failed.message, /no terminó/);
+  assert.ok(updates.some((entry) => (
+    entry.audioLabStateByResult?.['output-legacy']?.peaksStatus === 'loading'
+  )));
+  assert.ok(updates.some((entry) => (
+    entry.audioLabStateByResult?.['output-legacy']?.peaksStatus === 'unavailable'
+  )));
+
+  const recovered = await app.prepareAudioPeaks(job, legacy.id, { force: true });
+  assert.equal(attempts, 2);
+  assert.equal(disposed, 2);
+  assert.equal(recovered.peaks.length, 1);
+  assert.equal(app.audioPeakCache.get(legacy.outputs[0].blob).status, 'ready');
+});
+
+test('a browser-raised device sample rate retries under the conservative preflight', async () => {
+  const result = audioResult('project-audio', 'result-device-rate', 'output-device-rate', 207);
+  const { app, job } = audioLabApp([result]);
+  const attempts = [];
+  app.audioPeaksExtractor = async (_blob, options) => {
+    attempts.push(options);
+    if (attempts.length === 1) {
+      const error = new Error('device uses 96 kHz');
+      error.code = 'audio-context-sample-rate-too-high';
+      throw error;
+    }
+    return { status: 'ready', peaks: [{ min: -0.25, max: 0.25 }], duration: 207 };
+  };
+
+  const extracted = await app.prepareAudioPeaks(job, result.id);
+  assert.equal(extracted.peaks.length, 1);
+  assert.equal(attempts.length, 2);
+  assert.equal(attempts[0].sampleRate, 48_000);
+  assert.equal(Object.hasOwn(attempts[1], 'sampleRate'), false);
+  assert.equal(attempts[1].channels, 2);
+});
+
+test('MP3 waveform preflight uses output limits instead of wider source metadata', async () => {
+  const result = audioResult(
+    'project-audio',
+    'result-wide-source',
+    'output-wide-source',
+    207,
+    { sampleRate: 192_000, channels: 6 },
+  );
+  const { app, job } = audioLabApp([result]);
+  let received = null;
+  app.audioPeaksExtractor = async (_blob, options) => {
+    received = options;
+    return { status: 'ready', peaks: [{ min: -0.2, max: 0.2 }], duration: 207 };
+  };
+
+  await app.prepareAudioPeaks(job, result.id);
+  assert.equal(received.sampleRate, 48_000);
+  assert.equal(received.channels, 2);
+});
+
+test('waveform analysis never disposes an engine that still owns work', async () => {
+  const result = audioResult('project-audio', 'result-running', 'output-running', 30);
+  const { app, job } = audioLabApp([result]);
+  let disposed = 0;
+  app.engine = {
+    running: true,
+    dispose() { disposed += 1; },
+  };
+  app.audioPeaksExtractor = async () => ({
+    status: 'ready',
+    peaks: [{ min: -0.1, max: 0.1 }],
+    duration: 30,
+  });
+
+  await app.prepareAudioPeaks(job, result.id);
+  assert.equal(disposed, 0);
+});
+
 test('removing one generation clears only its virtual Audio Lab records', () => {
   const first = audioResult('project-audio', 'result-one', 'output-one');
   const second = audioResult('project-audio', 'result-two', 'output-two');

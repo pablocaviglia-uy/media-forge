@@ -967,7 +967,9 @@ html[data-interface="forge"] .forge-workspace-summary span {
 
 html[data-interface="forge"] #tool-launcher.sheet {
   width: min(920px, calc(100vw - 2rem));
-  max-height: min(84vh, 780px);
+  height: min(84vh, 780px);
+  height: min(84dvh, 780px);
+  max-height: calc(100dvh - 2rem);
   overflow: hidden;
 }
 
@@ -979,7 +981,14 @@ html[data-interface="forge"] .forge-launcher {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  max-height: min(84vh, 780px);
+  max-height: calc(100dvh - 2rem);
+}
+
+html[data-interface="forge"] .forge-launcher-head,
+html[data-interface="forge"] .forge-launcher-search,
+html[data-interface="forge"] .forge-filter-row,
+html[data-interface="forge"] .forge-result-summary {
+  flex: 0 0 auto;
 }
 
 html[data-interface="forge"] .forge-launcher-head {
@@ -1080,13 +1089,67 @@ html[data-interface="forge"] .forge-filter[aria-pressed="true"] {
   border-color: color-mix(in srgb, var(--accent) 24%, transparent);
 }
 
+html[data-interface="forge"] .forge-tool-scroll {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
 html[data-interface="forge"] .forge-tool-list {
-  flex: 1;
+  flex: 1 1 0;
   min-height: 0;
   margin: 0;
   padding: 0.65rem;
   overflow-x: hidden;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: var(--border-strong) transparent;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+}
+
+html[data-interface="forge"] .forge-tool-list::-webkit-scrollbar {
+  width: 10px;
+}
+
+html[data-interface="forge"] .forge-tool-list::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  background-clip: padding-box;
+  border: 3px solid transparent;
+  border-radius: 999px;
+}
+
+html[data-interface="forge"] .forge-tool-scroll-cue {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  min-height: 38px;
+  margin: 0.2rem 0.85rem 0.75rem;
+  padding: 0.45rem 0.8rem;
+  color: var(--fg-muted);
+  font-size: 11px;
+  font-weight: 620;
+  letter-spacing: 0.01em;
+  pointer-events: none;
+  border: 1px solid color-mix(in srgb, var(--accent) 16%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg-sunken) 94%, transparent);
+  box-shadow: 0 10px 28px rgb(0 0 0 / 0.38);
+  backdrop-filter: blur(10px);
+}
+
+html[data-interface="forge"] .forge-tool-scroll-cue[hidden] {
+  display: none;
+}
+
+html[data-interface="forge"] .forge-tool-scroll-arrow {
+  color: var(--accent);
+  font-size: 15px;
+  line-height: 1;
 }
 
 html[data-interface="forge"] .forge-tool-row {
@@ -3571,7 +3634,7 @@ html[data-interface="forge"] .detail[data-workspace="video-merge"] .quick-foot-s
     width: 100vw;
     max-width: none;
     height: 100dvh;
-    max-height: none;
+    max-height: 100dvh;
     margin: 0;
     border: 0;
     border-radius: 0;
@@ -3579,7 +3642,7 @@ html[data-interface="forge"] .detail[data-workspace="video-merge"] .quick-foot-s
 
   html[data-interface="forge"] .forge-launcher {
     height: 100dvh;
-    max-height: none;
+    max-height: 100dvh;
     padding-top: env(safe-area-inset-top);
     padding-bottom: env(safe-area-inset-bottom);
   }
@@ -5696,14 +5759,51 @@ html[data-interface="forge"] .audio-lab-selection-handle[data-outside="after"] {
 html[data-interface="forge"] .audio-lab-waveform-fallback {
   position: absolute;
   inset: 50% auto auto 50%;
-  z-index: 1;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.55rem;
   width: min(31rem, 84%);
+  padding: 0.55rem 0.7rem;
   color: #8fa19c;
   font-size: 10px;
   line-height: 1.5;
   text-align: center;
-  pointer-events: none;
+  border: 1px solid rgb(101 210 194 / 0.22);
+  border-radius: 12px;
+  background: rgb(7 23 19 / 0.92);
+  box-shadow: 0 10px 28px rgb(0 0 0 / 0.36);
+  backdrop-filter: blur(8px);
   transform: translate(-50%, -50%);
+}
+
+html[data-interface="forge"] .audio-lab-waveform-fallback[hidden] {
+  display: none;
+}
+
+html[data-interface="forge"] .audio-lab-waveform-fallback-copy {
+  pointer-events: none;
+}
+
+html[data-interface="forge"] .audio-lab-retry-peaks {
+  min-height: 32px;
+  padding: 0.38rem 0.72rem;
+  color: #b8f1e8;
+  font: inherit;
+  font-weight: 700;
+  border: 1px solid rgb(101 213 198 / 0.42);
+  border-radius: 999px;
+  background: rgb(24 80 72 / 0.72);
+  cursor: pointer;
+}
+
+html[data-interface="forge"] .audio-lab-retry-peaks:hover,
+html[data-interface="forge"] .audio-lab-retry-peaks:focus-visible {
+  color: #071714;
+  background: #78ded0;
+  outline: none;
 }
 
 html[data-interface="forge"] .audio-lab-transport,

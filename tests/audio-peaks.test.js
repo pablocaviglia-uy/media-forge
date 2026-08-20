@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   AUDIO_PEAKS_DEFAULT_BUCKETS,
   AUDIO_PEAKS_DEFAULT_LIMITS,
+  AUDIO_PEAKS_DEFAULT_TIMEOUTS,
   AudioPeaksError,
   estimateAudioPcmBytes,
   downsampleAudioPeaks,
@@ -42,6 +43,7 @@ function contextHarness({
   buffer,
   decodeError,
   closeError,
+  closePending = false,
   callbackOnly = false,
   pending = false,
   actualSampleRate,
@@ -49,6 +51,7 @@ function contextHarness({
   const state = { created: 0, decoded: 0, closed: 0, contextOptions: [] };
   let resolveDecode;
   let rejectDecode;
+  let resolveClose;
   const factory = (contextOptions = {}) => {
     state.created += 1;
     state.contextOptions.push({ ...contextOptions });
@@ -78,6 +81,7 @@ function contextHarness({
       async close() {
         state.closed += 1;
         if (closeError) throw closeError;
+        if (closePending) return new Promise((resolve) => { resolveClose = resolve; });
       },
     };
   };
@@ -86,6 +90,7 @@ function contextHarness({
     factory,
     resolveDecode: (value = buffer) => resolveDecode?.(value),
     rejectDecode: (error) => rejectDecode?.(error),
+    resolveClose: () => resolveClose?.(),
   };
 }
 
@@ -101,9 +106,13 @@ test('public defaults are conservative and PCM estimates are deterministic', () 
   assert.equal(AUDIO_PEAKS_DEFAULT_LIMITS.maxEstimatedPcmBytes, 256 * 1024 * 1024);
   assert.equal(AUDIO_PEAKS_DEFAULT_LIMITS.estimateSampleRate, 96_000);
   assert.equal(AUDIO_PEAKS_DEFAULT_LIMITS.estimateChannels, 8);
+  assert.equal(AUDIO_PEAKS_DEFAULT_TIMEOUTS.readMs, 30_000);
+  assert.equal(AUDIO_PEAKS_DEFAULT_TIMEOUTS.decodeMs, 120_000);
+  assert.equal(AUDIO_PEAKS_DEFAULT_TIMEOUTS.closeMs, 2_000);
   assert.equal(estimateAudioPcmBytes(1, { sampleRate: 10, channels: 2, bytesPerSample: 4 }), 80);
   assert.equal(estimateAudioPcmBytes(1.01, { sampleRate: 10, channels: 2, bytesPerSample: 4 }), 81);
   assert.ok(Object.isFrozen(AUDIO_PEAKS_DEFAULT_LIMITS));
+  assert.ok(Object.isFrozen(AUDIO_PEAKS_DEFAULT_TIMEOUTS));
 });
 
 test('downsampling merges channels into min/max buckets and preserves one-frame transients', () => {
@@ -618,16 +627,14 @@ test('decode failures remain public errors and always close the AudioContext', a
   assert.equal(harness.state.closed, 1);
 });
 
-test('a close failure is reported after success but never hides a decode failure', async () => {
+test('a close failure never discards ready peaks or hides a decode failure', async () => {
   const closeOnly = contextHarness({ buffer: smallBuffer(), closeError: new Error('cannot close') });
-  await assert.rejects(
-    extractAudioPeaks(new Blob([new Uint8Array(1)]), {
-      duration: 1,
-      limits: testLimits(),
-      createAudioContext: closeOnly.factory,
-    }),
-    errorCode('context-close-failed'),
-  );
+  const result = await extractAudioPeaks(new Blob([new Uint8Array(1)]), {
+    duration: 1,
+    limits: testLimits(),
+    createAudioContext: closeOnly.factory,
+  });
+  assert.equal(result.status, 'ready');
   assert.equal(closeOnly.state.closed, 1);
 
   const both = contextHarness({
@@ -643,6 +650,101 @@ test('a close failure is reported after success but never hides a decode failure
     errorCode('decode-failed'),
   );
   assert.equal(both.state.closed, 1);
+});
+
+test('a never-settling Blob read fails with a stable timeout and releases the global queue', async () => {
+  const blocked = new Blob([new Uint8Array(1)]);
+  let finishRead;
+  blocked.arrayBuffer = () => new Promise((resolve) => { finishRead = resolve; });
+
+  await assert.rejects(
+    extractAudioPeaks(blocked, {
+      duration: 1,
+      sampleRate: 48_000,
+      channels: 2,
+      limits: testLimits(),
+      timeouts: { readMs: 15, decodeMs: 100, closeMs: 15 },
+      createAudioContext: contextHarness({ buffer: smallBuffer() }).factory,
+    }),
+    (error) => errorCode('read-timeout')(error)
+      && error.message === 'La lectura del audio tardó demasiado.'
+      && error.details.stage === 'reading'
+      && error.details.timeoutMs === 15,
+  );
+
+  const survivor = contextHarness({ buffer: smallBuffer() });
+  const result = await extractAudioPeaks(new Blob([new Uint8Array(2)]), {
+    duration: 1,
+    bucketCount: 2,
+    limits: testLimits(),
+    timeouts: { readMs: 100, decodeMs: 100, closeMs: 15 },
+    createAudioContext: survivor.factory,
+  });
+  assert.equal(result.status, 'ready');
+  assert.equal(survivor.state.decoded, 1);
+  finishRead?.(new ArrayBuffer(1));
+});
+
+test('never-settling decode and close promises time out without poisoning the global queue', async () => {
+  const blocked = contextHarness({
+    buffer: smallBuffer(),
+    pending: true,
+    closePending: true,
+  });
+
+  await assert.rejects(
+    extractAudioPeaks(new Blob([new Uint8Array(1)]), {
+      duration: 1,
+      bucketCount: 2,
+      limits: testLimits(),
+      timeouts: { readMs: 100, decodeMs: 15, closeMs: 15 },
+      createAudioContext: blocked.factory,
+    }),
+    (error) => errorCode('decode-timeout')(error)
+      && error.message === 'La decodificación del audio tardó demasiado.'
+      && error.details.stage === 'decoding'
+      && error.details.timeoutMs === 15,
+  );
+  assert.equal(blocked.state.decoded, 1);
+  assert.equal(blocked.state.closed, 1);
+
+  const survivor = contextHarness({ buffer: smallBuffer() });
+  const result = await extractAudioPeaks(new Blob([new Uint8Array(2)]), {
+    duration: 1,
+    bucketCount: 2,
+    limits: testLimits(),
+    timeouts: { readMs: 100, decodeMs: 100, closeMs: 15 },
+    createAudioContext: survivor.factory,
+  });
+  assert.equal(result.status, 'ready');
+  assert.equal(survivor.state.decoded, 1);
+
+  blocked.resolveDecode();
+  blocked.resolveClose();
+});
+
+test('a never-settling close keeps ready peaks and releases the next decode', async () => {
+  const blocked = contextHarness({ buffer: smallBuffer(), closePending: true });
+  const result = await extractAudioPeaks(new Blob([new Uint8Array(1)]), {
+    duration: 1,
+    bucketCount: 2,
+    limits: testLimits(),
+    timeouts: { readMs: 100, decodeMs: 100, closeMs: 15 },
+    createAudioContext: blocked.factory,
+  });
+  assert.equal(result.status, 'ready');
+  assert.equal(blocked.state.closed, 1);
+
+  const survivor = contextHarness({ buffer: smallBuffer() });
+  assert.equal((await extractAudioPeaks(new Blob([new Uint8Array(2)]), {
+    duration: 1,
+    bucketCount: 2,
+    limits: testLimits(),
+    timeouts: { readMs: 100, decodeMs: 100, closeMs: 15 },
+    createAudioContext: survivor.factory,
+  })).status, 'ready');
+  assert.equal(survivor.state.decoded, 1);
+  blocked.resolveClose();
 });
 
 test('context creation and peak access failures use public codes, closing whenever possible', async () => {
